@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=DarkSec Survival Database
+Comment=Preserving the code of humanity before the system wipes it clean.
+Exec=/opt/DarkSec-Survival-Database/DarkSec-Database
+Icon=/home/null/DarkSec-Survival-Database/guide.png
+Terminal=false
+Categories=Utility;Education;Science;

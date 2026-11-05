@@ -1,0 +1,35 @@
+<!doctype html><html><head><meta charset="utf-8"><title>DarkSec Survival Database</title><link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0d1117">
+<style>
+body{font-family:'Consolas','Monaco',monospace;background:#0d1117;color:#00ff00;max-width:1000px;margin:32px auto;padding:0 16px}
+a{color:#00ff00;text-decoration:none;border-bottom:1px dashed #008800;}
+a:hover{color:#33ff33;border-bottom:1px solid #33ff33;}
+h1{color:#33ff33;text-shadow:0 0 5px #00ff00, 0 0 10px #00aa00;}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:20px}
+.card{display:block;padding:15px;border:1px solid #00ff00;border-radius:0;background:#1a202c;box-shadow:0 0 10px rgba(0,255,0,.5);transition:.2s;text-decoration:none;color:#00ff00;}
+.card:hover{background:#2c343e;box-shadow:0 0 15px #33ff33;transform:translateY(-2px);}
+.card b{display:block;margin-bottom:6px;font-size:1.1em;color:#33ff33;}
+.card .desc{display:block;margin-top:4px;color:#00ff00;font-size:.95em}
+small{color:#008800;}
+.note{margin:.5rem 0 1rem;color:#00ff00}
+</style></head><body>
+<h1>// DarkSec Survival Database</h1>
+<p class="note"><a href="../index.html">..</a></p>
+<div class="grid">
+  <a class="card" href="NOAA_GPS_Tutorial.LINK.txt"><b>NOAA_GPS_Tutorial.LINK.txt</b></a>
+
+</div>
+<p><small>Updated: <code id="ts"></code></small></p>
+<script>document.getElementById('ts').textContent=new Date().toLocaleString();</script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').then(registration => {
+        console.log('ServiceWorker registration successful with scope: ', registration.scope);
+      }, err => {
+        console.log('ServiceWorker registration failed: ', err);
+      });
+    });
+  }
+</script>
+</body></html>

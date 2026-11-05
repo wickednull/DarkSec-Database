@@ -1,0 +1,1 @@
+https://download.parrot.sh/parrot/iso/6.2/Parrot-home-6.2_amd64.iso

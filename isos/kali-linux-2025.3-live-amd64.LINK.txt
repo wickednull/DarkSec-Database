@@ -1,0 +1,1 @@
+https://cdimage.kali.org/current/kali-linux-2025.3-live-amd64.iso

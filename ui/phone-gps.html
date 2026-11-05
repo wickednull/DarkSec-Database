@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark">
+  <title>DarkSec Phone GPS</title>
+  <style>
+    :root { color-scheme: dark; --green: #5dff9a; --amber: #ffd166; --red: #ff6969; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #050806; color: #d1e1d5; font: 16px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    main { width: min(560px, 100%); margin: 0 auto; padding: max(22px, env(safe-area-inset-top)) 18px max(22px, env(safe-area-inset-bottom)); }
+    header { border-bottom: 1px solid #284333; padding: 8px 0 16px; margin-bottom: 18px; }
+    h1 { margin: 0; color: var(--green); letter-spacing: .14em; font-size: 20px; }
+    .sub { color: #91a99a; font-size: 12px; margin-top: 4px; }
+    .box { border: 1px solid #294333; background: #09120c; padding: 14px; margin: 12px 0; border-radius: 4px; }
+    .warn { border-color: #655124; color: #f4d68b; }
+    .status { min-height: 52px; color: #9cad9f; overflow-wrap: anywhere; }
+    .status.good { color: var(--green); }
+    .status.bad { color: var(--red); }
+    .fix { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .fix .cell { border: 1px solid #203529; padding: 10px; min-width: 0; }
+    .label { color: #809487; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
+    .value { color: var(--green); font-size: 17px; overflow-wrap: anywhere; }
+    button { width: 100%; min-height: 54px; margin: 8px 0; border: 1px solid var(--green); background: #0b1c11; color: var(--green); font: inherit; font-weight: 700; letter-spacing: .1em; border-radius: 4px; }
+    button:disabled { opacity: .45; }
+    button.stop { border-color: #a75353; color: #ff9a9a; background: #1b0c0c; }
+    .tiny { color: #819387; font-size: 11px; }
+    a { color: var(--green); }
+    @media (max-width: 360px) { .fix { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>DARKSEC // PHONE GPS</h1>
+    <div class="sub">LOCAL HTTPS · TEMPORARY SESSION · NO CLOUD RELAY</div>
+  </header>
+  <div class="box warn">
+    Only share location with the DarkSec computer you chose. Keep this page open; updates stop when this session expires or you tap STOP. The desktop will not save a fix until its operator accepts it.
+  </div>
+  <div id="status" class="box status">Checking secure connection…</div>
+  <div class="fix">
+    <div class="cell"><div class="label">Latitude</div><div id="lat" class="value">—</div></div>
+    <div class="cell"><div class="label">Longitude</div><div id="lon" class="value">—</div></div>
+    <div class="cell"><div class="label">Horizontal accuracy</div><div id="accuracy" class="value">—</div></div>
+    <div class="cell"><div class="label">Fix time</div><div id="fixTime" class="value">—</div></div>
+  </div>
+  <button id="start">START GPS SHARING</button>
+  <button id="stop" class="stop" disabled>STOP & CLOSE SESSION</button>
+  <div class="tiny">Enable Precise Location in the browser. For best accuracy, use outdoors with a clear sky view. Location uses phone GPS/system services and may consume battery.</div>
+</main>
+<script>
+(() => {
+  const statusEl = document.getElementById('status');
+  const startButton = document.getElementById('start');
+  const stopButton = document.getElementById('stop');
+  const token = new URLSearchParams(location.search).get('t');
+  let watchId = null;
+  let statusTimer = null;
+  let lastSent = 0;
+  let wakeLock = null;
+  let active = false;
+  history.replaceState(null, '', '/');
+
+  function status(message, tone = '') {
+    statusEl.textContent = message;
+    statusEl.className = `box status ${tone}`;
+  }
+
+  async function request(path, options = {}) {
+    const response = await fetch(path, {
+      ...options,
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) },
+    });
+    if (!response.ok) throw new Error((await response.text()).slice(0, 180) || `Request failed (${response.status})`);
+    return response;
+  }
+
+  async function sendFix(position) {
+    if (!active) return;
+    const now = Date.now();
+    if (now - lastSent < 4000) return;
+    const c = position.coords;
+    const payload = {
+      lat: c.latitude, lon: c.longitude, accuracy_m: c.accuracy,
+      alt_m: Number.isFinite(c.altitude) ? c.altitude : null,
+      speed_mps: Number.isFinite(c.speed) ? c.speed : null,
+      heading_deg: Number.isFinite(c.heading) ? c.heading : null,
+      timestamp_ms: position.timestamp,
+    };
+    document.getElementById('lat').textContent = Number(c.latitude).toFixed(6);
+    document.getElementById('lon').textContent = Number(c.longitude).toFixed(6);
+    document.getElementById('accuracy').textContent = `±${Number(c.accuracy).toFixed(1)} m`;
+    document.getElementById('fixTime').textContent = new Date(position.timestamp).toLocaleTimeString();
+    status('Sending this fix to the paired computer over local HTTPS…');
+    try {
+      await request('/fix', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      lastSent = now;
+      status('Fix sent. Review the position and accuracy on the DarkSec desktop.', 'good');
+    } catch (error) {
+      status(`Send failed: ${error.message}`, 'bad');
+    }
+  }
+
+  function positionError(error) {
+    const messages = {
+      1: 'Location permission denied. Allow location for this browser, then try again.',
+      2: 'Phone location is unavailable. Check Location Services and GPS reception.',
+      3: 'Location request timed out. Move outdoors and retry.',
+    };
+    status(messages[error.code] || `Location error: ${error.message}`, 'bad');
+  }
+
+  async function stop(sendStop = true) {
+    active = false;
+    if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+    if (statusTimer) clearInterval(statusTimer);
+    statusTimer = null;
+    if (wakeLock) { try { await wakeLock.release(); } catch {} }
+    wakeLock = null;
+    startButton.disabled = true;
+    stopButton.disabled = true;
+    if (sendStop && token) { try { await request('/stop', { method: 'POST' }); } catch {} }
+    status('Sharing stopped. You can close this page.', '');
+  }
+
+  async function checkSession() {
+    try {
+      const response = await request('/status');
+      const state = await response.json();
+      if (state.state === 'expired' || state.state === 'stopped') {
+        await stop(false);
+        status('This session has ended. Start a new session on the desktop.', 'bad');
+      }
+    } catch {
+      await stop(false);
+      status('The desktop session is no longer reachable. Stop and re-pair from Settings.', 'bad');
+    }
+  }
+
+  startButton.addEventListener('click', async () => {
+    if (!token) { status('No pairing token. Open this page from a fresh DarkSec QR.', 'bad'); return; }
+    if (!window.isSecureContext || !navigator.geolocation) {
+      status('This connection is not a secure HTTPS context. Verify/accept the local certificate for the selected computer IP, then reload.', 'bad');
+      return;
+    }
+    active = true;
+    startButton.disabled = true;
+    stopButton.disabled = false;
+    status('Requesting phone location permission…');
+    try {
+      if (navigator.wakeLock?.request) wakeLock = await navigator.wakeLock.request('screen');
+    } catch {}
+    watchId = navigator.geolocation.watchPosition(sendFix, positionError, {
+      enableHighAccuracy: true, maximumAge: 2000, timeout: 20000,
+    });
+    statusTimer = setInterval(checkSession, 2500);
+  });
+
+  stopButton.addEventListener('click', () => stop(true));
+  if (!token) status('No pairing token. Open this page from a fresh DarkSec QR.', 'bad');
+  else if (!window.isSecureContext) status('Secure HTTPS connection required. Verify/accept the certificate for the selected computer IP.', 'bad');
+  else status('Secure local session ready. Tap START GPS SHARING to grant location permission.');
+})();
+</script>
+</body>
+</html>

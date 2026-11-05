@@ -1,0 +1,9 @@
+fastapi>=0.115
+uvicorn>=0.30
+psutil>=6.0
+cryptography>=43
+ephem>=4.1
+numpy>=1.26
+requests>=2.32
+qrcode>=7.4
+pypdf>=5.0

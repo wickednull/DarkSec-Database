@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en" data-accent="green">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#050806">
+  <title>DARKSEC // NIGHTWATCH</title>
+  <link rel="icon" href="/ui/img/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/ui/css/app.css">
+</head>
+<body>
+  <div class="boot" id="boot">
+    <div class="boot-mark">DS</div>
+    <div class="boot-text">DARKSEC NIGHTWATCH</div>
+    <div class="boot-sub">INITIALISING FIELD CONSOLE<span class="dots"></span></div>
+    <div class="boot-bar"><span></span></div>
+  </div>
+
+  <div class="app" id="app" hidden>
+    <div class="fx-grid" aria-hidden="true"></div>
+    <div class="fx-scan" id="scanlines" aria-hidden="true"></div>
+    <div class="fx-vignette" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="class-stripe" aria-hidden="true"></div>
+      <button class="menu-btn icon-btn" id="menuBtn" aria-label="Open navigation" title="Navigation">
+        <span data-icon="menu"></span>
+      </button>
+      <a class="brand" href="#/dashboard" aria-label="DarkSec dashboard">
+        <span class="brand-mark">DS</span>
+        <span class="brand-copy">
+          <strong>DARKSEC</strong>
+          <small>NIGHTWATCH · FIELD CONSOLE</small>
+        </span>
+      </a>
+      <div class="classification">
+        <span class="class-label">UNCLASSIFIED</span>
+        <span class="class-sub">// FIELD OPERATIONS // LOCAL ONLY</span>
+      </div>
+      <div class="top-meta">
+        <div class="clock" title="Local / UTC">
+          <strong id="clockLocal">--:--:--</strong>
+          <small id="clockUtc">UTC --:--</small>
+        </div>
+        <div class="top-pill" id="gridPill" title="Current grid reference">
+          <span class="pill-label">GRID</span><span id="gridValue">----</span>
+        </div>
+        <div class="top-pill net-pill" id="netPill" title="Network status">
+          <span class="led" id="netLed"></span><span id="netText">OFFLINE</span>
+        </div>
+        <div class="top-pill vault-pill" id="vaultPill" title="Vault status">
+          <span data-icon="lock"></span><span id="vaultText">VAULT</span>
+        </div>
+        <button class="icon-btn" id="searchBtn" title="Command palette (Ctrl+K)" aria-label="Command palette">
+          <span data-icon="search"></span>
+        </button>
+      </div>
+    </header>
+
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-inner">
+        <div class="side-section">
+          <div class="side-label">COMMAND</div>
+          <nav id="navPrimary" class="nav"></nav>
+        </div>
+        <div class="side-section">
+          <div class="side-label">OPERATIONS</div>
+          <nav id="navOps" class="nav"></nav>
+        </div>
+        <div class="side-section">
+          <div class="side-label">SYSTEM</div>
+          <nav id="navSystem" class="nav"></nav>
+        </div>
+        <div class="side-foot">
+          <div class="opsec-row">
+            <span>OPSEC BLACKOUT</span>
+            <button class="switch" id="opsecToggle" role="switch" aria-checked="false" title="Reduce sensitive on-screen detail">
+              <span></span>
+            </button>
+          </div>
+          <div class="build">BUILD 2.0.0 // NIGHTWATCH</div>
+        </div>
+      </div>
+    </aside>
+    <div class="sidebar-scrim" id="sidebarScrim"></div>
+
+    <main class="main" id="view" tabindex="-1"></main>
+
+    <footer class="statusbar">
+      <div class="sb-left">
+        <span class="sb-item"><span class="led" id="sbLed"></span><span id="sbStatus">SYSTEM NOMINAL</span></span>
+        <span class="sb-item hide-sm">CPU <b id="sbCpu">--</b>%</span>
+        <span class="sb-item hide-sm">MEM <b id="sbMem">--</b>%</span>
+        <span class="sb-item hide-sm">DISK <b id="sbDisk">--</b>%</span>
+      </div>
+      <div class="sb-right">
+        <span class="sb-item" id="sbReadiness">READINESS --</span>
+        <span class="sb-item hide-sm" id="sbCoords">--</span>
+        <span class="sb-item" id="sbGps" title="Saved position source and age">GPS UNVERIFIED</span>
+        <span class="sb-item">LOCALHOST // TOKEN AUTH</span>
+      </div>
+    </footer>
+  </div>
+
+  <div class="toast-stack" id="toasts" aria-live="polite"></div>
+  <div id="modalRoot"></div>
+  <div id="paletteRoot"></div>
+
+  <script type="module" src="/ui/js/main.js"></script>
+</body>
+</html>

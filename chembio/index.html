@@ -1,0 +1,60 @@
+<!doctype html><html><head><meta charset="utf-8"><title>DarkSec Survival Database</title><link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0d1117">
+<style>
+body{font-family:'Consolas','Monaco',monospace;background:#0d1117;color:#00ff00;max-width:1000px;margin:32px auto;padding:0 16px}
+a{color:#00ff00;text-decoration:none;border-bottom:1px dashed #008800;}
+a:hover{color:#33ff33;border-bottom:1px solid #33ff33;}
+h1{color:#33ff33;text-shadow:0 0 5px #00ff00, 0 0 10px #00aa00;}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:20px}
+.card{display:block;padding:15px;border:1px solid #00ff00;border-radius:0;background:#1a202c;box-shadow:0 0 10px rgba(0,255,0,.5);transition:.2s;text-decoration:none;color:#00ff00;}
+.card:hover{background:#2c343e;box-shadow:0 0 15px #33ff33;transform:translateY(-2px);}
+.card b{display:block;margin-bottom:6px;font-size:1.1em;color:#33ff33;}
+.card .desc{display:block;margin-top:4px;color:#00ff00;font-size:.95em}
+small{color:#008800;}
+.note{margin:.5rem 0 1rem;color:#00ff00}
+</style></head><body>
+<h1>// DarkSec Survival Database</h1>
+<p class="note"><a href="../index.html">..</a></p>
+<div class="grid">
+  <a class="card" href="SOLIDS IN CONTACT WITH NATURAL WATERS.pdf"><b>SOLIDS IN CONTACT WITH NATURAL WATERS.pdf</b></a>
+<a class="card" href="PROPERTIES OF GASES.pdf"><b>PROPERTIES OF GASES.pdf</b></a>
+<a class="card" href="ATOMS, ELECTRONS, AND THE PERIODIC TABLE.pdf"><b>ATOMS, ELECTRONS, AND THE PERIODIC TABLE.pdf</b></a>
+<a class="card" href="DIY KEARNY FALLOUT METER.pdf"><b>DIY KEARNY FALLOUT METER.pdf</b></a>
+<a class="card" href="CHEMICAL ENERGENICS.pdf"><b>CHEMICAL ENERGENICS.pdf</b></a>
+<a class="card" href="WHAT TO DO IF A NUCLEAR DISASTER IS IMMINENT.pdf"><b>WHAT TO DO IF A NUCLEAR DISASTER IS IMMINENT.pdf</b></a>
+<a class="card" href="ACID BASED MATH.pdf"><b>ACID BASED MATH.pdf</b></a>
+<a class="card" href="SOLUTIONS.pdf"><b>SOLUTIONS.pdf</b></a>
+<a class="card" href="CHEMICAL BONDING.pdf"><b>CHEMICAL BONDING.pdf</b></a>
+<a class="card" href="NBC PROTECTION.pdf"><b>NBC PROTECTION.pdf</b></a>
+<a class="card" href="CHEMICAL EQUILIBRIUM.pdf"><b>CHEMICAL EQUILIBRIUM.pdf</b></a>
+<a class="card" href="BASEMENT FALLOUT SHELTER.pdf"><b>BASEMENT FALLOUT SHELTER.pdf</b></a>
+<a class="card" href="LIQUIDS AND VAPORS.pdf"><b>LIQUIDS AND VAPORS.pdf</b></a>
+<a class="card" href="GEOBIOCHEMISTRY.pdf"><b>GEOBIOCHEMISTRY.pdf</b></a>
+<a class="card" href="NUCLEAR WAR SURVIVAL SKILLS.pdf"><b>NUCLEAR WAR SURVIVAL SKILLS.pdf</b></a>
+<a class="card" href="ACQUATIC ACIDS AND BASES.pdf"><b>ACQUATIC ACIDS AND BASES.pdf</b></a>
+<a class="card" href="STATES OF MATTER.pdf"><b>STATES OF MATTER.pdf</b></a>
+<a class="card" href="INTRO TO ACIDS AND BASES.pdf"><b>INTRO TO ACIDS AND BASES.pdf</b></a>
+<a class="card" href="QUANTUM THEORY.pdf"><b>QUANTUM THEORY.pdf</b></a>
+<a class="card" href="CHEMICAL THERMODYNAMICS.pdf"><b>CHEMICAL THERMODYNAMICS.pdf</b></a>
+<a class="card" href="CARBONATE EQUILIBRIA IN NATURAL WATERS.pdf"><b>CARBONATE EQUILIBRIA IN NATURAL WATERS.pdf</b></a>
+<a class="card" href="HOME FALLOUT SHELTER.pdf"><b>HOME FALLOUT SHELTER.pdf</b></a>
+<a class="card" href="MATTER AND MEASURE.pdf"><b>MATTER AND MEASURE.pdf</b></a>
+<a class="card" href="FALLOUT SHELTER SURVEY.pdf"><b>FALLOUT SHELTER SURVEY.pdf</b></a>
+<a class="card" href="REDOX EQUILIBRIA IN NATURAL WATERS.pdf"><b>REDOX EQUILIBRIA IN NATURAL WATERS.pdf</b></a>
+<a class="card" href="ELECTROCHEMISTRY.pdf"><b>ELECTROCHEMISTRY.pdf</b></a>
+
+</div>
+<p><small>Updated: <code id="ts"></code></small></p>
+<script>document.getElementById('ts').textContent=new Date().toLocaleString();</script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').then(registration => {
+        console.log('ServiceWorker registration successful with scope: ', registration.scope);
+      }, err => {
+        console.log('ServiceWorker registration failed: ', err);
+      });
+    });
+  }
+</script>
+</body></html>

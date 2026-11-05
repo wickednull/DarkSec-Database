@@ -1,0 +1,70 @@
+{
+  "name": "darksec-nightwatch",
+  "version": "2.0.0",
+  "description": "DarkSec NIGHTWATCH — offline-first survival field console with document library, SDR, navigation and medical tools.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "backend": "python3 -m darksec",
+    "start:web": "python3 -m darksec --open",
+    "check": "node --check main.js && node --check preload.js && python3 -m py_compile darksec/*.py",
+    "dist": "electron-builder"
+  },
+  "keywords": [
+    "offline",
+    "survival",
+    "sdr",
+    "field-manual",
+    "electron"
+  ],
+  "author": "DarkSec",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^38.2.2",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.darksec.nightwatch",
+    "productName": "DarkSec NIGHTWATCH",
+    "asar": false,
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "darksec/**/*",
+      "ui/**/*",
+      "maps/vector/**/*",
+      "maps/tiles/**/*",
+      "chembio/**/*",
+      "comms/**/*",
+      "engineering/**/*",
+      "hacking/**/*",
+      "manuals/**/*",
+      "medical/**/*",
+      "prepper/**/*",
+      "water_food/**/*",
+      "isos/**/*",
+      "!**/__pycache__/**",
+      "!**/*.pyc",
+      "!Books/**/*",
+      "!venv/**/*",
+      "!node_modules/**/*",
+      "!dist/**/*",
+      "!build/**/*",
+      "!sys"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "guide.png",
+      "category": "Utility"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "guide.png"
+    }
+  }
+}

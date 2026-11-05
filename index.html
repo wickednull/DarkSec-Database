@@ -1,0 +1,107 @@
+<!doctype html><html><head><meta charset="utf-8"><title>DarkSec Survival Database</title><link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0d1117">
+<style>
+body{font-family:'Consolas','Monaco',monospace;background:#0d1117;color:#00ff00;max-width:1000px;margin:32px auto;padding:0 16px}
+a{color:#00ff00;text-decoration:none;border-bottom:1px dashed #008800;}
+a:hover{color:#33ff33;border-bottom:1px solid #33ff33;}
+h1{color:#33ff33;text-shadow:0 0 5px #00ff00, 0 0 10px #00aa00;}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:20px}
+.card{display:block;padding:15px;border:1px solid #00ff00;border-radius:0;background:#1a202c;box-shadow:0 0 10px rgba(0,255,0,.5);transition:.2s;text-decoration:none;color:#00ff00;}
+.card:hover{background:#2c343e;box-shadow:0 0 15px #33ff33;transform:translateY(-2px);}
+.card b{display:block;margin-bottom:6px;font-size:1.1em;color:#33ff33;}
+.card .desc{display:block;margin-top:4px;color:#00ff00;font-size:.95em}
+small{color:#008800;}
+.note{margin:.5rem 0 1rem;color:#00ff00}
+</style></head><body>
+<style>
+  .controls {
+    margin-bottom: 20px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .controls button, .controls input {
+    padding: 8px 15px;
+    border: 1px solid #00ff00;
+    background: #1a202c;
+    color: #00ff00;
+    border-radius: 3px;
+    cursor: pointer;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 0.9em;
+  }
+  .controls button:hover {
+    background: #2c343e;
+    box-shadow: 0 0 5px #33ff33;
+  }
+  .controls input[type="text"] {
+    flex-grow: 1;
+    max-width: 300px;
+  }
+  .controls input::placeholder {
+    color: #008800;
+  }
+</style>
+<h1>// DarkSec Survival Database</h1>
+<div class="controls">
+  <button id="backButton">← Back</button>
+</div>
+<p class="note">Drop PDFs into any category folder; run this script (or <code>./darksec-atlas_survival_database.sh reindex</code>) to refresh.</p>
+<div class="grid">
+  <a class="card" href="chembio/index.html"><b>[CHEMBIO]</b> 27 files available.<span class="desc">Chemical, biological, radiological, and nuclear survival</span></a>
+<a class="card" href="comms/index.html"><b>[COMMS]</b> 57 files available.<span class="desc">ARES/WRN guides, antennas, propagation, signaling</span></a>
+<a class="card" href="engineering/index.html"><b>[ENGINEERING]</b> 365 files available.<span class="desc">Electrical, plumbing, welding, diesel, solar/wind</span></a>
+<a class="card" href="manuals/index.html"><b>[MANUALS]</b> 250 files available.<span class="desc">Survival, SERE, Ranger, British Fieldcraft</span></a>
+<a class="card" href="medical/index.html"><b>[MEDICAL]</b> 68 files available.<span class="desc">First aid, hygiene, herbal medicine, and more</span></a>
+<a class="card" href="prepper/index.html"><b>[PREPPER]</b> 65 files available.<span class="desc">Security hardening, checklists, psychology</span></a>
+<a class="card" href="water_food/index.html"><b>[WATER_FOOD]</b> 75 files available.<span class="desc">Preservation, canning, disinfection, hydroponics</span></a>
+<a class="card" href="isos/index.html"><b>[ISOS]</b> 5 files available.<span class="desc">Rescue/OS image links</span></a>
+<a class="card" href="maps/index.html"><b>[MAPS]</b> 2 files available.<span class="desc">Land nav, celestial, USGS symbols</span></a>
+<a class="card" href="hacking/index.html"><b>[HACKING]</b> 9 files available.<span class="desc">Hacking tools and guides</span></a>
+
+</div>
+<p><small>Updated: <code id="ts"></code></small></p>
+<script>document.getElementById('ts').textContent=new Date().toLocaleString();</script>
+<script>
+  // Service Worker registration disabled for Electron app
+
+  // Electron specific controls
+  document.addEventListener('DOMContentLoaded', () => {
+    const backButton = document.getElementById('backButton');
+    const newDirNameInput = document.getElementById('newDirName');
+    const createDirButton = document.getElementById('createDirButton');
+
+    if (backButton) {
+      backButton.addEventListener('click', () => {
+        if (window.electronAPI) {
+          window.electronAPI.goBack();
+        } else {
+          window.history.back();
+        }
+      });
+    }
+
+    console.log('DOMContentLoaded event fired. Initializing Electron controls.');
+
+    // Intercept PDF links
+    document.querySelectorAll('a[href$=".pdf"]').forEach(pdfLink => {
+      pdfLink.addEventListener('click', async (event) => {
+        console.log('PDF link click event detected.');
+        event.preventDefault(); // Prevent default navigation
+        console.log('PDF link clicked:', pdfLink.href);
+
+        if (typeof window.electronAPI !== 'undefined') { // More robust check for electronAPI
+          console.log('window.electronAPI is available.');
+          const absolutePdfPath = new URL(pdfLink.href, window.location.href).href;
+          console.log('Absolute PDF path to send:', absolutePdfPath);
+          window.electronAPI.openPdfWindow(absolutePdfPath);
+        } else {
+          console.error('window.electronAPI is NOT available. Cannot open PDF in new window.');
+          // Fallback for browser environment (though this app is Electron-specific)
+          window.open(pdfLink.href, '_blank');
+        }
+      });
+    });
+  });
+</script>
+</body></html>

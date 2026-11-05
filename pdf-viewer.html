@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>PDF Viewer</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        #pdf-embed { width: 100vw; height: 100vh; border: none; }
+    </style>
+</head>
+<body>
+    <embed id="pdf-embed" type="application/pdf" />
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const pdfPath = localStorage.getItem('currentPdfPath');
+            if (pdfPath) {
+                document.getElementById('pdf-embed').src = pdfPath;
+            } else {
+                console.error('No PDF path found in localStorage.');
+                document.body.innerHTML = '<h1>Error: No PDF specified.</h1>';
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,225 @@
+{
+  "version": 1,
+  "note": "Quantities are planning baselines for one adult. Adjust for children, elderly, pregnancy, pets, climate and medication needs. Inspect and rotate consumables every 6 months.",
+  "kits": [
+    {
+      "id": "edc",
+      "name": "Everyday Carry (EDC)",
+      "description": "Minimum capability carried on the body.",
+      "items": [
+        {"id": "edc-light", "text": "Primary flashlight + spare battery", "critical": true},
+        {"id": "edc-knife", "text": "Folding knife or multitool", "critical": true},
+        {"id": "edc-fire", "text": "Two independent fire starters (lighter + ferro rod)", "critical": true},
+        {"id": "edc-water", "text": "Water bottle and purification tablets", "critical": true},
+        {"id": "edc-med", "text": "Tourniquet, gauze, tape, gloves", "critical": true},
+        {"id": "edc-cord", "text": "10 m paracord", "critical": false},
+        {"id": "edc-nav", "text": "Compass and local paper map", "critical": true},
+        {"id": "edc-comms", "text": "Charged phone + power bank; programmed handheld radio if licensed", "critical": false},
+        {"id": "edc-cash", "text": "Cash in small bills", "critical": true},
+        {"id": "edc-id", "text": "ID, emergency contacts, medical card", "critical": true},
+        {"id": "edc-whistle", "text": "Pealess whistle", "critical": true},
+        {"id": "edc-shelter", "text": "Space blanket / emergency bivy", "critical": false}
+      ]
+    },
+    {
+      "id": "72h",
+      "name": "72-Hour Go Bag",
+      "description": "Grab-and-go kit for three days away from home.",
+      "items": [
+        {"id": "72-water", "text": "Water: 12 L per person (3 days minimum)", "critical": true},
+        {"id": "72-filter", "text": "Water filter + purification tablets + metal cup", "critical": true},
+        {"id": "72-food", "text": "3 days no-cook food (2,000 kcal/day) + manual can opener", "critical": true},
+        {"id": "72-fa", "text": "Comprehensive first-aid kit + personal prescriptions (7 days)", "critical": true},
+        {"id": "72-radio", "text": "AM/FM/NOAA radio + spare batteries or hand crank", "critical": true},
+        {"id": "72-light", "text": "Headlamp + spare batteries", "critical": true},
+        {"id": "72-shelter", "text": "Tent/tarp, cordage, sleeping bag or blanket, ground pad", "critical": true},
+        {"id": "72-clothes", "text": "Full change of clothing, rain shell, insulation, sturdy boots", "critical": true},
+        {"id": "72-fire", "text": "Lighter, ferro rod, waterproof tinder", "critical": true},
+        {"id": "72-tools", "text": "Multitool, duct tape, zip ties, repair kit", "critical": false},
+        {"id": "72-hygiene", "text": "Soap, toothbrush, menstrual products, toilet paper, hand sanitizer", "critical": false},
+        {"id": "72-sanitation", "text": "Waste bags, trowel, disinfectant", "critical": false},
+        {"id": "72-docs", "text": "Copies of ID, insurance, medications, contacts; USB backup", "critical": true},
+        {"id": "72-cash", "text": "Cash, including small denominations", "critical": true},
+        {"id": "72-mask", "text": "N95/P100 masks and eye protection", "critical": true},
+        {"id": "72-signal", "text": "Whistle, signal mirror, high-visibility marker", "critical": true},
+        {"id": "72-nav", "text": "Local map, compass, pencil, route card", "critical": true},
+        {"id": "72-pets", "text": "Pet food, leash, carrier, vaccination record", "critical": false}
+      ]
+    },
+    {
+      "id": "inch",
+      "name": "INCH / Long-Duration Bag",
+      "description": "I'm Never Coming Home: sustainment and rebuilding tools.",
+      "items": [
+        {"id": "inch-water", "text": "Water storage: 20+ L + 2 filters + spare parts", "critical": true},
+        {"id": "inch-food", "text": "14+ days food + seeds + fishing/hunting kit where legal", "critical": true},
+        {"id": "inch-shelter", "text": "Four-season shelter, stove, fuel, sleep system", "critical": true},
+        {"id": "inch-tools", "text": "Axe, saw, shovel, pry bar, files, sharpening stones", "critical": true},
+        {"id": "inch-repair", "text": "Sewing kit, wire, hose clamps, glue, spare buckles, batteries", "critical": true},
+        {"id": "inch-med", "text": "Trauma kit, antibiotics if prescribed, 30-day medication supply", "critical": true},
+        {"id": "inch-comms", "text": "HF/VHF radio, antenna wire, power supply, written comms plan", "critical": true},
+        {"id": "inch-power", "text": "Solar panel, charge controller, battery bank, cables", "critical": true},
+        {"id": "inch-docs", "text": "Paper maps, field manuals, ID copies, offline data drive", "critical": true},
+        {"id": "inch-barter", "text": "Trade goods: salt, lighters, batteries, coffee, sewing kits", "critical": false},
+        {"id": "inch-cache", "text": "Cache plan with GPS/MGRS coordinates, contents list, access notes", "critical": true}
+      ]
+    },
+    {
+      "id": "vehicle",
+      "name": "Vehicle Kit",
+      "description": "Keep in the vehicle year-round; rotate water and food.",
+      "items": [
+        {"id": "veh-water", "text": "12 L water + cup + filter", "critical": true},
+        {"id": "veh-food", "text": "2 days shelf-stable food", "critical": true},
+        {"id": "veh-fa", "text": "First-aid kit + trauma kit + gloves", "critical": true},
+        {"id": "veh-tools", "text": "Jack, lug wrench, tire plug kit, compressor, jumper cables/pack", "critical": true},
+        {"id": "veh-fuel", "text": "Full tank + 20 L approved fuel container", "critical": false},
+        {"id": "veh-weather", "text": "Blankets, gloves, hat, rain gear, boots", "critical": true},
+        {"id": "veh-signal", "text": "Warning triangle, reflective vest, whistle, headlamp", "critical": true},
+        {"id": "veh-fire", "text": "ABC fire extinguisher", "critical": true},
+        {"id": "veh-nav", "text": "Paper maps, compass, route notes", "critical": true},
+        {"id": "veh-comms", "text": "Charger, power bank, radio, written contacts", "critical": false},
+        {"id": "veh-traction", "text": "Tow strap, traction boards, shovel, sand/salt (winter)", "critical": false},
+        {"id": "veh-docs", "text": "Registration, insurance, emergency contacts", "critical": true}
+      ]
+    },
+    {
+      "id": "home",
+      "name": "Home Resilience (14 Days)",
+      "description": "Shelter-in-place baseline for a household.",
+      "items": [
+        {"id": "home-water", "text": "Water: 4 L/person/day x 14 days (56 L/person)", "critical": true},
+        {"id": "home-waterstore", "text": "Food-grade containers, rotated every 6 months", "critical": true},
+        {"id": "home-food", "text": "14 days food + manual can opener + cooking fuel", "critical": true},
+        {"id": "home-cook", "text": "Camp stove/fuel or BBQ with fuel; never indoors", "critical": true},
+        {"id": "home-light", "text": "LED lanterns, headlamps, candles, matches, batteries", "critical": true},
+        {"id": "home-heat", "text": "Safe backup heat, CO alarm, fire extinguisher", "critical": true},
+        {"id": "home-med", "text": "30-day medication supply, first aid, glasses, dental kit", "critical": true},
+        {"id": "home-sanitation", "text": "Bucket toilet, bags, lime/kitty litter, soap, disinfectant", "critical": true},
+        {"id": "home-comms", "text": "NOAA radio, AM/FM radio, charged power banks", "critical": true},
+        {"id": "home-power", "text": "Generator or battery/solar backup + fuel", "critical": false},
+        {"id": "home-docs", "text": "Waterproof copies of IDs, deeds, insurance, medical records", "critical": true},
+        {"id": "home-security", "text": "Locks, lighting, extinguishers, plan with neighbours", "critical": true},
+        {"id": "home-cash", "text": "Cash reserve in small bills", "critical": true}
+      ]
+    },
+    {
+      "id": "griddown",
+      "name": "Grid-Down Actions",
+      "description": "First 24 hours without mains power.",
+      "items": [
+        {"id": "grid-assess", "text": "Confirm outage extent with neighbours and radio", "critical": true},
+        {"id": "grid-fridge", "text": "Keep fridge/freezer closed; 4 h fridge / 48 h full freezer", "critical": true},
+        {"id": "grid-water", "text": "Fill bathtub and containers before pressure is lost", "critical": true},
+        {"id": "grid-power", "text": "Start backup power only outdoors/ventilated; never backfeed", "critical": true},
+        {"id": "grid-comms", "text": "Monitor NOAA/emergency broadcasts; conserve phone battery", "critical": true},
+        {"id": "grid-light", "text": "Use battery lights, not candles, near sleeping areas", "critical": true},
+        {"id": "grid-med", "text": "Check medication refrigeration and oxygen needs", "critical": true},
+        {"id": "grid-cash", "text": "Withdraw cash early; card systems may fail", "critical": true},
+        {"id": "grid-security", "text": "Lock doors, share status with trusted neighbours, avoid generators indoors", "critical": true},
+        {"id": "grid-plan", "text": "Set water/power conservation and evacuation trigger points", "critical": true}
+      ]
+    },
+    {
+      "id": "winter",
+      "name": "Winter / Cold Snap",
+      "description": "Prevent hypothermia, pipe damage and vehicle stranding.",
+      "items": [
+        {"id": "win-heat", "text": "Safe heat plan, CO alarm, dry firewood/fuel", "critical": true},
+        {"id": "win-pipes", "text": "Drip faucets, insulate/heat-trace pipes, know shutoff", "critical": true},
+        {"id": "win-clothes", "text": "Layers, dry socks, gloves, hats, boots", "critical": true},
+        {"id": "win-shelter", "text": "Seal one room as a warming area; keep vents clear", "critical": true},
+        {"id": "win-water", "text": "Store water before freezing; melt snow only with fuel", "critical": true},
+        {"id": "win-vehicle", "text": "Winter kit, full tank, blanket, shovel, sand, phone charger", "critical": true},
+        {"id": "win-pets", "text": "Bring animals inside; protect water from freezing", "critical": false},
+        {"id": "win-neighbors", "text": "Check on elderly/isolated neighbours", "critical": true}
+      ]
+    },
+    {
+      "id": "wildfire",
+      "name": "Wildfire",
+      "description": "Leave early; do not defend an indefensible home.",
+      "items": [
+        {"id": "fire-alerts", "text": "Sign up for local alerts; monitor radio and lookouts", "critical": true},
+        {"id": "fire-go", "text": "Go bag, N95 masks, goggles, water, documents, medications", "critical": true},
+        {"id": "fire-route", "text": "Two evacuation routes; know wind direction and road closures", "critical": true},
+        {"id": "fire-home", "text": "Clear defensible space, remove fuel from gutters/porch, close vents", "critical": true},
+        {"id": "fire-vehicle", "text": "Park facing out, windows up, fuel full, keys ready", "critical": true},
+        {"id": "fire-communicate", "text": "Tell someone your destination and ETA", "critical": true},
+        {"id": "fire-smoke", "text": "If trapped, shelter in a cleared area; call emergency services", "critical": true}
+      ]
+    },
+    {
+      "id": "flood",
+      "name": "Flood",
+      "description": "Water is the hazard; move to high ground early.",
+      "items": [
+        {"id": "flood-alerts", "text": "Monitor alerts; know river gauge and evacuation zone", "critical": true},
+        {"id": "flood-go", "text": "Go bag, water, meds, documents, phone power, cash", "critical": true},
+        {"id": "flood-route", "text": "Never drive through moving water; 30 cm can float a vehicle", "critical": true},
+        {"id": "flood-power", "text": "Move electrical items up; shut off power only if safe and dry", "critical": true},
+        {"id": "flood-water", "text": "Assume floodwater is contaminated; boil/filter all drinking water", "critical": true},
+        {"id": "flood-sanitation", "text": "Hand hygiene, gloves, boots, tetanus status", "critical": true},
+        {"id": "flood-after", "text": "Document damage; avoid downed lines and weakened structures", "critical": false}
+      ]
+    },
+    {
+      "id": "earthquake",
+      "name": "Earthquake",
+      "description": "Drop, cover, hold on; then expect aftershocks.",
+      "items": [
+        {"id": "eq-now", "text": "Drop, cover, hold on; stay away from glass and heavy objects", "critical": true},
+        {"id": "eq-gas", "text": "Know how to shut off gas; only if you smell or hear a leak", "critical": true},
+        {"id": "eq-kit", "text": "Go bag, sturdy shoes, gloves, flashlight, dust mask", "critical": true},
+        {"id": "eq-water", "text": "Do not drink from damaged pipes; use stored water", "critical": true},
+        {"id": "eq-comms", "text": "Text rather than call; expect network congestion", "critical": true},
+        {"id": "eq-aftershock", "text": "Expect aftershocks; inspect structure before re-entry", "critical": true},
+        {"id": "eq-tsunami", "text": "If near coast, move inland/high ground immediately after shaking", "critical": true}
+      ]
+    },
+    {
+      "id": "nuclear",
+      "name": "Radiological / Nuclear",
+      "description": "Get inside, stay inside, stay tuned. Sheltering is the priority.",
+      "items": [
+        {"id": "nuc-inside", "text": "Get inside the nearest building; basement or centre of a multi-storey building", "critical": true},
+        {"id": "nuc-seal", "text": "Close windows/doors, shut off HVAC, seal gaps with tape/plastic if available", "critical": true},
+        {"id": "nuc-radio", "text": "Use battery radio/NOAA; follow official instructions", "critical": true},
+        {"id": "nuc-ki", "text": "KI only when directed by authorities; age-specific dose", "critical": true},
+        {"id": "nuc-water", "text": "Use sealed stored water/food; avoid open water and fresh produce", "critical": true},
+        {"id": "nuc-decon", "text": "Remove outer clothing, bag it, shower with soap and water", "critical": true},
+        {"id": "nuc-dosimeter", "text": "Record dose rate and time; minimise time, maximise distance/shielding", "critical": true},
+        {"id": "nuc-evac", "text": "Evacuate only when told; know routes and reception centres", "critical": true}
+      ]
+    },
+    {
+      "id": "pandemic",
+      "name": "Pandemic / Biological",
+      "description": "Reduce contacts, protect airways, support the sick safely.",
+      "items": [
+        {"id": "pan-mask", "text": "N95/KN95 masks, gloves, eye protection, hand sanitizer", "critical": true},
+        {"id": "pan-isolate", "text": "Isolation room, separate bathroom if possible, ventilation", "critical": true},
+        {"id": "pan-med", "text": " Fever/pain relief, ORS, thermometer, pulse oximeter", "critical": true},
+        {"id": "pan-water", "text": "14 days water and food; minimise shopping trips", "critical": true},
+        {"id": "pan-hygiene", "text": "Handwashing, surface disinfection, laundry protocol", "critical": true},
+        {"id": "pan-plan", "text": "Care plan for dependants, pets, medications and work", "critical": true},
+        {"id": "pan-info", "text": "Official public-health sources only; write down key numbers", "critical": true}
+      ]
+    },
+    {
+      "id": "bugout",
+      "name": "Bug-Out / Evacuation",
+      "description": "Decision and execution checklist. Leave early if you can.",
+      "items": [
+        {"id": "bug-trigger", "text": "Define written evacuation triggers (not gut feeling alone)", "critical": true},
+        {"id": "bug-rally", "text": "Primary and alternate rally points; accountable person list", "critical": true},
+        {"id": "bug-route", "text": "Two routes, fuel plan, choke points, paper map", "critical": true},
+        {"id": "bug-comms", "text": "Comms plan, check-in times, radio frequencies, phone tree", "critical": true},
+        {"id": "bug-load", "text": "Load vehicle in priority order; secure loose items", "critical": true},
+        {"id": "bug-home", "text": "Shut off utilities if instructed; lock up; leave note", "critical": true},
+        {"id": "bug-cache", "text": "Cache coordinates and contents documented offline", "critical": false},
+        {"id": "bug-arrive", "text": "Report arrival, establish security and water first", "critical": true}
+      ]
+    }
+  ]
+}

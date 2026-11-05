@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "docs": [
+    {"id": "priorities", "title": "Survival Priorities", "tagline": "The order of decisions that keeps people alive", "file": "priorities.md", "order": 1},
+    {"id": "water", "title": "Water", "tagline": "Find, treat, store and ration", "file": "water.md", "order": 2},
+    {"id": "food", "title": "Food & Foraging", "tagline": "Calories, safety, preservation, and the limits of wild food", "file": "food.md", "order": 3},
+    {"id": "shelter", "title": "Shelter & Fire", "tagline": "Core temperature is a life-support system", "file": "shelter.md", "order": 4},
+    {"id": "medical", "title": "Field Medicine", "tagline": "Assess, stabilise, evacuate — know your limits", "file": "medical.md", "order": 5},
+    {"id": "navigation", "title": "Navigation", "tagline": "Map, compass, terrain, sun and stars", "file": "navigation.md", "order": 6},
+    {"id": "comms", "title": "Communications", "tagline": "Radios, nets, antennas and emission security", "file": "comms.md", "order": 7},
+    {"id": "sdr", "title": "HackRF / SDR Operations", "tagline": "Real spectrum work, receive-first", "file": "sdr.md", "order": 8},
+    {"id": "weather", "title": "Weather", "tagline": "Read the sky and your instruments", "file": "weather.md", "order": 9},
+    {"id": "cbrn", "title": "CBRN", "tagline": "Chemical, biological, radiological and nuclear response", "file": "cbrn.md", "order": 10},
+    {"id": "security", "title": "Security & OPSEC", "tagline": "Avoid trouble, detect it early, and stay legal", "file": "security.md", "order": 11},
+    {"id": "power", "title": "Power Systems", "tagline": "Solar, batteries, generators and load discipline", "file": "power.md", "order": 12},
+    {"id": "sanitation", "title": "Sanitation & Hygiene", "tagline": "The disaster after the disaster", "file": "sanitation.md", "order": 13},
+    {"id": "logistics", "title": "Logistics & Sustainment", "tagline": "Stockpiles, caches, rotation and planning", "file": "logistics.md", "order": 14},
+    {"id": "knots", "title": "Knots & Rigging", "tagline": "Eight knots that cover most field tasks", "file": "knots.md", "order": 15},
+    {"id": "legal", "title": "Legal, Ethical & Safety Boundaries", "tagline": "Read this before transmitting, treating or defending", "file": "legal.md", "order": 16}
+  ]
+}
