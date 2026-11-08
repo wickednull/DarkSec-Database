@@ -5,8 +5,7 @@ Times are returned as ISO-8601 UTC; the interface converts to local time.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any
+from datetime import datetime, timezone
 
 import ephem
 

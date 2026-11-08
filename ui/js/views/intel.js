@@ -1,15 +1,26 @@
 import { api } from "../api.js";
 import { store } from "../store.js";
 import {
-  h, panel, stat, gauge, badge, btn, pageHead, alertStrip, emptyState, loading, fmt, toast,
+  h, panel, stat, gauge, badge, btn, pageHead, alertStrip, emptyState, loading, fmt, toast, tabs, sectionTitle,
 } from "../components.js";
-import { kv, feedBadge, severityBadge, positionConfidence } from "./shared.js";
+import { feedBadge, severityBadge, positionConfidence } from "./shared.js";
+import * as U from "../units.js";
 
 const AUTO_MS = 90_000;
 let autoTimer = null;
 let autoBusy = false;
+let activeTab = "overview";
 
-export async function render(root) {
+const TAB_ITEMS = [
+  { id: "overview", label: "OVERVIEW" },
+  { id: "conflict", label: "CONFLICT" },
+  { id: "cyber", label: "CYBER & NEWS" },
+  { id: "events", label: "EVENTS & HAZARDS" },
+  { id: "sensors", label: "AIR & SPACE" },
+];
+
+export async function render(root, params = {}) {
+  if (params.tab && TAB_ITEMS.some((t) => t.id === params.tab)) activeTab = params.tab;
   if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
   root.replaceChildren(loading("READING GLOBAL INTELLIGENCE"));
   let data;
@@ -20,6 +31,7 @@ export async function render(root) {
     return;
   }
   root.replaceChildren();
+
   const threat = data.threat || {};
   const events = data.events || [];
   const aircraft = data.aircraft || [];
@@ -39,14 +51,16 @@ export async function render(root) {
   const disasterNews = data.disaster_news || [];
   const covidStats = data.covid_stats || null;
   const diseaseSummary = data.disease_summary || null;
+  const feeds = data.feeds || [];
   const threatBand = String(threat.band || "NO DATA");
   const positionInfo = positionConfidence(store.settings || {});
   const observer = fmt.coord(store.settings?.lat, store.settings?.lon, 4);
+  const feedById = Object.fromEntries(feeds.map((f) => [f.id, f]));
 
   root.appendChild(pageHead({
     kicker: "OPERATIONS // GLOBAL INTELLIGENCE",
     title: "Global Threat & Live Intel",
-    desc: "Live intelligence while online: geocoded GDELT conflict reports, monthly verified UCDP conflict events, OpenSky aircraft, CelesTrak satellites, NASA asteroids and EONET hazards, GDACS disasters, USGS earthquakes, NOAA space weather, NWS alerts and world news. Every item carries its age; cached data stays readable offline and is never presented as a live warning.",
+    desc: "Cached public-source intelligence organized by mission area. Live conflict media (GDELT), verified conflict (UCDP), cybersecurity news (The Hacker News), world news, hazards, aircraft, satellites and space weather are age-labeled and readable offline. Cached data is never presented as a live warning.",
     actions: [
       btn("REFRESH INTEL", { icon: "refresh", tone: "primary", onClick: refreshIntel }),
       btn("OPEN MAP", { icon: "map", onClick: () => { location.hash = "#/map"; } }),
@@ -61,7 +75,7 @@ export async function render(root) {
     : sync.online
       ? (sync.enabled === false ? "ONLINE · AUTO-SYNC OFF" : "LIVE · AUTO-SYNC ON")
       : "OFFLINE · CACHED DATA";
-  root.appendChild(h("div", { class: "row gap-8 wrap mt-8" },
+  root.appendChild(h("div", { class: "row gap-8 wrap mt-8 items-center" },
     badge(syncLabel, syncTone),
     h("span", { class: "tiny muted", text: `Last successful refresh ${fmt.ago(sync.last_success)} · ${sync.feed_ok ?? "?"}/${sync.feed_total ?? "?"} feeds cached · view auto-refreshes every 90 s` })));
 
@@ -71,151 +85,260 @@ export async function render(root) {
       criticalList.length ? "red" : "amber",
     ));
   }
-  if (!warSummary.newest_age_hours || warSummary.newest_age_hours > 6) {
-    root.appendChild(alertStrip(
-      warSummary.newest_age_hours
-        ? `Newest conflict report is ${fmt.ago(warSummary.newest_time)} old. Treat the conflict picture as cached history, not a live warning; refresh feeds before relying on it.`
-        : "No dated conflict reports are cached. Refresh while online; do not treat an empty panel as a quiet picture.",
-      "amber",
-    ));
+  if (activeTab === "conflict" || activeTab === "overview") {
+    if (!warSummary.newest_age_hours || warSummary.newest_age_hours > 6) {
+      root.appendChild(alertStrip(
+        warSummary.newest_age_hours
+          ? `Newest conflict report is ${fmt.ago(warSummary.newest_time)} old. Treat the conflict picture as cached history, not a live warning; refresh feeds before relying on it.`
+          : "No dated conflict reports are cached. Refresh while online; do not treat an empty panel as a quiet picture.",
+        "amber",
+      ));
+    }
   }
 
-  const stats = h("div", { class: "grid grid-4 mt-14" });
-  stats.appendChild(stat("THREAT INDEX", String(threat.score ?? 0), threatBand, (threatBand === "SEVERE" || threatBand === "ELEVATED") ? "acc" : ""));
-  stats.appendChild(stat("AIRCRAFT TRACKED", String(aircraft.length).padStart(3, "0"), "OpenSky public positions"));
-  stats.appendChild(stat("SATS OVER OBSERVER", String(satellites.length).padStart(3, "0"), "CelesTrak TLE · SGP4"));
-  stats.appendChild(stat("CRITICAL CACHED", String(criticalList.length).padStart(3, "0"), "across all feeds"));
-  stats.appendChild(stat("CONFLICT EVENTS", String(conflictLive.length + conflictVerified.length).padStart(3, "0"), `${conflictVerified.length} verified · ${conflictLive.length} live media`));
-  if (neoSummary) {
-    stats.appendChild(stat("NEO OBJECTS", String(neoSummary.total || 0), `${neoSummary.hazardous || 0} hazardous`, neoSummary.threat_level === "HIGH" || neoSummary.threat_level === "CRITICAL" ? "acc" : ""));
-  }
-  if (diseaseSummary) {
-    stats.appendChild(stat("DISEASE TRACKING", String(diseaseSummary.active_outbreaks || 0), `${covidStats?.active ? (covidStats.active / 1000000).toFixed(1) + "M" : "0"} active COVID`, covidStats?.severity === "CRITICAL" ? "acc" : ""));
-  }
-  root.appendChild(stats);
-
-  const threatPanel = panel({
-    title: "Global Threat Index",
-    sub: "Local aggregation over cached live events",
-    icon: "warning",
-    body: h("div", { class: "col gap-10" },
-      h("div", { class: "row gap-14" },
-        gauge(threat.score ?? 0, threatBand),
-        h("div", { class: "col gap-4" },
-          badge("METHOD", "LOCAL_WEIGHTED"),
-          kv([
-            ["CRITICAL ITEMS", String(criticalList.length)],
-            ["BAND", threatBand],
-            ["TOP SOURCE", Object.entries(threat.by_source || {}).sort((a, b) => b[1] - a[1])[0]?.[0] || "—"],
-            ["HIGHEST LOAD", Object.entries(threat.by_source || {}).sort((a, b) => b[1] - a[1])[0]?.[1] ?? 0],
-            ["EVENTS IN SCOPE", String(threat.events_scoped ?? true)],
-          ]),
-        ),
-      ),
-      h("div", { class: "tiny muted", text: `Weights apply to sourced live events (earthquakes, disasters, public safety warnings) within the local weighting window from the stored reference position (${threat.near_count ?? 0} events inside 500 km). Computed only from cached events. Not a forecast product.` }),
-      h("div", { class: "tiny muted", text: sun ? `SOLAR STATE ${Number(sun?.sun?.altitude_deg) > 0 ? "DAY" : "NIGHT"} · SUN ALT ${sun?.sun?.altitude_deg ?? "—"} deg · NEXT RISE ${fmt.date(sun?.sun?.next_rise)} · NEXT SET ${fmt.date(sun?.sun?.next_set)}` : "SOLAR STATE UNKNOWN" }),
-    ),
-    cls: "span-2",
+  const tabBar = tabs(TAB_ITEMS, activeTab, (id) => {
+    activeTab = id;
+    try { history.replaceState(null, "", `#/intel?tab=${id}`); } catch {}
+    render(root);
   });
+  root.appendChild(h("div", { class: "mt-14" }, tabBar));
 
-  const grid = h("div", { class: "panel-grid grid-2 mt-14" });
-  root.appendChild(grid);
-  grid.appendChild(threatPanel);
+  const body = h("div", { class: "mt-14" });
+  root.appendChild(body);
 
-  grid.appendChild(panel({
-    title: "Live Aircraft (OpenSky public)",
-    sub: `${aircraft.length} cached position(s)`,
-    icon: "satellite",
-    body: buildAircraft(aircraft),
-  }));
+  if (activeTab === "overview") renderOverview(body);
+  else if (activeTab === "conflict") renderConflict(body);
+  else if (activeTab === "cyber") renderCyber(body);
+  else if (activeTab === "events") renderEvents(body);
+  else if (activeTab === "sensors") renderSensors(body);
 
-  grid.appendChild(panel({
-    title: "Satellite Watch (CelesTrak TLE)",
-    sub: `SGP4 prediction for observer ${observer} · ${positionInfo.mapLabel}`,
-    icon: "satellite",
-    body: buildSats(satellites),
-  }));
-
-  const airBody = air ? h("div", { class: "col gap-4" },
-    h("div", { class: "big-num", text: String(air.aqi ?? "—") }),
-    h("div", { class: "tiny muted", text: `AQI ${air.aqi ?? "—"} · ${air.category || "UNKNOWN"} · ${air.source || ""} · fetched ${fmt.ago(air.time)}` }),
-    emptyState("Air quality layer refreshes while online; cached snapshot remains readable offline.", "", "wind"),
-  ) : h("div", { class: "small muted", text: "No air quality snapshot cached. Refresh while online." });
-  grid.appendChild(panel({
-    title: "Air Quality (Open-Meteo)",
-    sub: "US AQI snapshot",
-    icon: "wind",
-    body: airBody,
-  }));
-
-  if (neoSummary) {
-    grid.appendChild(panel({
-      title: "Near-Earth Objects (NASA)",
-      sub: `${neoSummary.total} objects · ${neoSummary.hazardous} hazardous · max threat ${neoSummary.max_threat_score ?? 0}/100 (${neoSummary.threat_level || "UNKNOWN"})`,
-      icon: "alert",
-      body: buildNEO(neoObjects),
-    }));
-  }
-
-  if (covidStats && Object.keys(covidStats).length > 0) {
-    grid.appendChild(panel({
-      title: "Disease Tracking (COVID-19)",
-      sub: `Active outbreaks: ${diseaseSummary?.active_outbreaks || 0} · Severity: ${covidStats.severity || "UNKNOWN"}`,
-      icon: "biohazard",
-      body: buildDisease(covidStats),
-    }));
-  }
-
-  grid.appendChild(panel({
-    title: "Global Live Events",
-    sub: `${events.length} cached event(s) with coordinates`,
-    icon: "globe",
-    body: buildEvents(events),
-    cls: "span-2",
-  }));
-
-  grid.appendChild(panel({
-    title: "Conflict & War Intelligence",
-    sub: `${warSummary.live ?? conflictLive.length} live media · ${warSummary.verified ?? conflictVerified.length} verified · ${warSummary.headlines ?? war.length} headlines · newest ${warSummary.newest_time ? fmt.ago(warSummary.newest_time) : "unavailable"}`,
-    icon: "alert",
-    body: buildWar(war),
-    cls: "span-2",
-  }));
-
-  if (conflictNews.length > 0) {
-    grid.appendChild(panel({
-      title: "Conflict News (NewsAPI)",
-      sub: `${conflictNews.length} real-time conflict stories`,
-      icon: "alert",
-      body: buildNews(conflictNews),
-      cls: "span-2",
-    }));
-  }
-
-  if (disasterNews.length > 0) {
-    grid.appendChild(panel({
-      title: "Disaster News (NewsAPI)",
-      sub: `${disasterNews.length} real-time disaster stories`,
-      icon: "alert",
-      body: buildNews(disasterNews),
-      cls: "span-2",
-    }));
-  }
-
-  grid.appendChild(panel({
-    title: "Live News & Public Safety Feeds",
-    sub: "Cached official and wire sources",
-    icon: "book",
-    body: h("div", { class: "col gap-10" },
-      h("div", { class: "grid grid-2" },
-        ...(data.feeds || []).filter((f) => ["gdelt_conflict", "ucdp_candidate", "bbc_world", "aljazeera_world", "gdacs", "reliefweb", "nws_alerts", "swpc_kp", "swpc_scales", "usgs_quakes", "open_meteo_air", "opensky_states", "celestrak_tle"].includes(f.id)).slice(0, 6).map((f) => newsCard(f)),
-      ),
-    ),
-  }));
-
-  root.appendChild(h("div", { class: "tiny dim mt-14", text: "INTEL SOURCES: GDELT 2.0 (automated media coding, 15-minute slices), UCDP Candidate Events (monthly verified, lags weeks), OpenSky Network (public positions), CelesTrak (TLE/SGP4), USGS (earthquakes), BBC/Al Jazeera/Guardian/France24/DW (world news), International Crisis Group, Open-Meteo (air quality), NOAA SWPC (space weather), NWS (alerts), ReliefWeb/GDACS/WHO (disasters). Every item shows its age; a cached snapshot is never a live warning." }));
+  root.appendChild(h("div", { class: "tiny dim mt-14", text: "INTEL SOURCES: The Hacker News (cybersecurity RSS), GDELT 2.0 (automated media coding), UCDP Candidate Events (monthly verified), OpenSky Network, CelesTrak (TLE/SGP4), NASA NEO/EONET, USGS, BBC/Al Jazeera/Guardian/France24/DW, International Crisis Group, Open-Meteo, NOAA SWPC, NWS, ReliefWeb, GDACS, WHO, Safecast. Every item shows its age; cached snapshots are never live warnings." }));
 
   return () => {};
+
+  function renderOverview(host) {
+    const stats = h("div", { class: "grid grid-4" });
+    stats.appendChild(stat("THREAT INDEX", String(threat.score ?? 0), threatBand, (threatBand === "SEVERE" || threatBand === "ELEVATED") ? "acc" : ""));
+    stats.appendChild(stat("CRITICAL CACHED", String(criticalList.length).padStart(3, "0"), "across all feeds"));
+    stats.appendChild(stat("CONFLICT EVENTS", String(conflictLive.length + conflictVerified.length).padStart(3, "0"), `${conflictVerified.length} verified · ${conflictLive.length} live media`));
+    stats.appendChild(stat("CYBER HEADLINES", String((feedById.thehackernews?.items || []).length).padStart(3, "0"), "The Hacker News cached"));
+    stats.appendChild(stat("WORLD EVENTS", String(events.length).padStart(3, "0"), "geocoded cached events"));
+    stats.appendChild(stat("AIRCRAFT", String(aircraft.length).padStart(3, "0"), "OpenSky public positions"));
+    stats.appendChild(stat("SATELLITES", String(satellites.length).padStart(3, "0"), "over observer (SGP4)"));
+    if (neoSummary) stats.appendChild(stat("NEO OBJECTS", String(neoSummary.total || 0), `${neoSummary.hazardous || 0} hazardous`, neoSummary.threat_level === "HIGH" || neoSummary.threat_level === "CRITICAL" ? "acc" : ""));
+    host.appendChild(stats);
+
+    const grid = h("div", { class: "panel-grid grid-2 mt-14" });
+    host.appendChild(grid);
+
+    grid.appendChild(panel({
+      title: "Global Threat Index",
+      sub: "Local aggregation over cached live events",
+      icon: "warning",
+      cls: "span-2",
+      body: h("div", { class: "col gap-10" },
+        h("div", { class: "row gap-14 wrap" },
+          gauge(threat.score ?? 0, threatBand),
+          h("div", { class: "col gap-4" },
+            badge("METHOD", "LOCAL_WEIGHTED"),
+            h("div", { class: "kv compact" },
+              ...[
+                ["CRITICAL ITEMS", String(criticalList.length)],
+                ["BAND", threatBand],
+                ["TOP SOURCE", Object.entries(threat.by_source || {}).sort((a, b) => b[1] - a[1])[0]?.[0] || "—"],
+                ["EVENTS NEAR OPERATOR", String(threat.near_count ?? 0)],
+              ].flatMap(([k, v]) => [h("span", { class: "k", text: k }), h("span", { class: "v", text: v })]),
+            ),
+          ),
+        ),
+        h("div", { class: "tiny muted", text: `${threat.events_scoped ? `Location-weighted from ${observer} (${positionInfo.mapLabel})` : "Global cached view (set a valid position for local weighting)"}: severity, distance, recency and source credibility are applied. ${threat.near_count ?? 0} weighted event(s) within the near-operator window. Cached data only — verify before acting.` }),
+        h("div", { class: "tiny muted", text: sun ? `SOLAR STATE ${Number(sun?.sun?.altitude_deg) > 0 ? "DAY" : "NIGHT"} · SUN ALT ${sun?.sun?.altitude_deg ?? "—"}° · NEXT RISE ${fmt.date(sun?.sun?.next_rise)} · NEXT SET ${fmt.date(sun?.sun?.next_set)}` : "SOLAR STATE UNKNOWN" }),
+      ),
+    }));
+
+    const thn = feedById.thehackernews;
+    if (thn) {
+      grid.appendChild(panel({
+        title: "Cybersecurity (The Hacker News)",
+        sub: `${thn.count ?? 0} cached item(s) · ${feedBadge(thn.status).textContent || thn.status} · fetched ${fmt.ago(thn.fetched_at)}`,
+        icon: "book",
+        body: buildFeedItemList(thn, 5),
+        tools: [btn("REFRESH", { size: "sm", tone: "ghost", onClick: () => refreshFeed(thn) })],
+      }));
+    }
+
+    grid.appendChild(panel({
+      title: "Conflict Snapshot",
+      sub: `${warSummary.live ?? conflictLive.length} live media · ${warSummary.verified ?? conflictVerified.length} verified · newest ${warSummary.newest_time ? fmt.ago(warSummary.newest_time) : "unavailable"}`,
+      icon: "alert",
+      body: buildConflictSnapshot(),
+      tools: [btn("OPEN TAB", { size: "sm", tone: "ghost", onClick: () => { activeTab = "conflict"; render(root); } })],
+    }));
+  }
+
+  function buildConflictSnapshot() {
+    const rows = [...(conflictLive || []).slice(0, 2).map((x) => ({ ...x, _kind: "live" })),
+      ...(conflictVerified || []).slice(0, 2).map((x) => ({ ...x, _kind: "verified" })),
+      ...(war || []).slice(0, 2).map((x) => ({ ...x, _kind: "headline" }))];
+    if (!rows.length) return emptyState("No conflict reporting cached", "Refresh intel feeds while online.", "globe");
+    const list = h("div", { class: "list" });
+    for (const it of rows) {
+      const row = h("div", { class: `list-item ${it.severity === "CRITICAL" ? "alert" : ""}` });
+      const main = h("div", { class: "li-main" });
+      main.appendChild(h("div", { class: "li-title", text: it.title || "Item" }));
+      main.appendChild(h("div", { class: "li-sub", text: `${it._kind === "verified" ? "UCDP" : it._kind === "live" ? "GDELT" : (it.source || "headline")} · ${fmt.ago(it.time)}` }));
+      row.appendChild(main);
+      if (it.url) row.appendChild(h("a", { class: "badge cyan", href: it.url, target: "_blank", rel: "noopener noreferrer", text: "SOURCE" }));
+      list.appendChild(row);
+    }
+    return list;
+  }
+
+  function renderConflict(host) {
+    host.appendChild(sectionTitle("Conflict & War Intelligence", "GDELT live media reports, UCDP verified events, and filtered wire headlines"));
+    const grid = h("div", { class: "panel-grid grid-1 mt-10" });
+    host.appendChild(grid);
+    grid.appendChild(panel({
+      title: "Conflict Reporting",
+      sub: `${warSummary.live ?? conflictLive.length} live media · ${warSummary.verified ?? conflictVerified.length} verified · ${warSummary.headlines ?? war.length} headlines · newest ${warSummary.newest_time ? fmt.ago(warSummary.newest_time) : "unavailable"}`,
+      icon: "alert",
+      body: buildWar(war),
+    }));
+  }
+
+  function renderCyber(host) {
+    host.appendChild(sectionTitle("Cybersecurity & News", "The Hacker News RSS, world/news feeds, and NewsAPI stories"));
+    const grid = h("div", { class: "panel-grid grid-2 mt-10" });
+    host.appendChild(grid);
+
+    const thn = feedById.thehackernews;
+    grid.appendChild(panel({
+      title: "The Hacker News",
+      sub: thn ? `Cybersecurity RSS · ${thn.count ?? 0} cached · fetched ${fmt.ago(thn.fetched_at)} · ${thn.status || "?"}` : "Feed not yet cached",
+      icon: "book",
+      cls: "span-2",
+      tools: thn ? [btn("REFRESH", { size: "sm", tone: "ghost", onClick: () => refreshFeed(thn) })] : [],
+      body: thn ? buildFeedItemList(thn, 12, { showSummary: true }) : emptyState("The Hacker News feed is not cached yet", "Refresh intel while online to ingest https://feeds.feedburner.com/TheHackersNews.", "book"),
+    }));
+
+    if (conflictNews.length > 0) {
+      grid.appendChild(panel({
+        title: "Conflict News (NewsAPI)",
+        sub: `${conflictNews.length} real-time conflict stories`,
+        icon: "alert",
+        body: buildNews(conflictNews),
+      }));
+    }
+    if (disasterNews.length > 0) {
+      grid.appendChild(panel({
+        title: "Disaster News (NewsAPI)",
+        sub: `${disasterNews.length} real-time disaster stories`,
+        icon: "alert",
+        body: buildNews(disasterNews),
+      }));
+    }
+
+    const warFeedIds = ["bbc_middle_east", "twz_defense", "breaking_defense", "defense_one", "long_war_journal", "war_on_the_rocks"];
+    const warFeeds = warFeedIds.map((id) => feedById[id]).filter(Boolean);
+    if (warFeeds.length) {
+      grid.appendChild(panel({
+        title: "Defense & War Reporting Feeds",
+        sub: "Specialized conflict/defense sources (cached). Headlines are filtered for conflict relevance in the Conflict tab.",
+        icon: "alert",
+        cls: "span-2",
+        body: h("div", { class: "grid grid-2 gap-10" }, ...warFeeds.map((f) => newsCard(f, 4))),
+      }));
+    }
+
+    const newsFeedIds = ["thehackernews", "bbc_world", "guardian_world", "aljazeera_world", "france24_world", "dw_news", "reliefweb", "crisisgroup", "gdacs", "rsoe_edis", "nws_alerts", "usgs_quakes"];
+    const newsFeeds = newsFeedIds.map((id) => feedById[id]).filter(Boolean);
+    grid.appendChild(panel({
+      title: "News & Public Safety Feeds",
+      sub: "Cached official and wire sources, grouped separately from tactical overlays",
+      icon: "globe",
+      cls: "span-2",
+      body: h("div", { class: "grid grid-2 gap-10" }, ...newsFeeds.map((f) => newsCard(f, 3))),
+    }));
+  }
+
+  function renderEvents(host) {
+    host.appendChild(sectionTitle("Global Events & Hazards", "Geocoded cached events, near-earth objects, and disease tracking"));
+    const grid = h("div", { class: "panel-grid grid-2 mt-10" });
+    host.appendChild(grid);
+
+    grid.appendChild(panel({
+      title: "Global Live Events",
+      sub: `${events.length} cached event(s) with coordinates`,
+      icon: "globe",
+      cls: "span-2",
+      body: buildEvents(events),
+    }));
+
+    const rsoe = feedById.rsoe_edis;
+    if (rsoe) {
+      grid.appendChild(panel({
+        title: "RSOE EDIS Disaster Events",
+        sub: `Global hazard monitor · ${rsoe.count ?? 0} cached · fetched ${fmt.ago(rsoe.fetched_at)} · ${rsoe.status || "?"}`,
+        icon: "alert",
+        cls: "span-2",
+        tools: [btn("REFRESH", { size: "sm", tone: "ghost", onClick: () => refreshFeed(rsoe) })],
+        body: rsoe.count
+          ? buildFeedItemList(rsoe, 12, { showSummary: true })
+          : emptyState("RSOE EDIS not cached yet", "Refresh intel while online to ingest https://rsoe-edis.org/eventList.", "alert"),
+      }));
+    }
+
+    if (neoSummary) {
+      grid.appendChild(panel({
+        title: "Near-Earth Objects (NASA)",
+        sub: `${neoSummary.total} objects · ${neoSummary.hazardous} hazardous · max threat ${neoSummary.max_threat_score ?? 0}/100 (${neoSummary.threat_level || "UNKNOWN"})`,
+        icon: "alert",
+        body: buildNEO(neoObjects),
+      }));
+    }
+
+    if (covidStats && Object.keys(covidStats).length > 0) {
+      grid.appendChild(panel({
+        title: "Disease Tracking (COVID-19)",
+        sub: `Active outbreaks: ${diseaseSummary?.active_outbreaks || 0} · Severity: ${covidStats.severity || "UNKNOWN"}`,
+        icon: "biohazard",
+        body: buildDisease(covidStats),
+      }));
+    }
+  }
+
+  function renderSensors(host) {
+    host.appendChild(sectionTitle("Air, Space & Environment", "Public aircraft positions, satellite passes, and air quality"));
+    const grid = h("div", { class: "panel-grid grid-2 mt-10" });
+    host.appendChild(grid);
+
+    grid.appendChild(panel({
+      title: "Live Aircraft (OpenSky public)",
+      sub: `${aircraft.length} cached position(s)`,
+      icon: "satellite",
+      body: buildAircraft(aircraft),
+    }));
+
+    grid.appendChild(panel({
+      title: "Satellite Watch (CelesTrak TLE)",
+      sub: `SGP4 prediction for observer ${observer} · ${positionInfo.mapLabel}`,
+      icon: "satellite",
+      body: buildSats(satellites),
+    }));
+
+    const airBody = air ? h("div", { class: "col gap-4" },
+      h("div", { class: "big-num", text: String(air.aqi ?? "—") }),
+      h("div", { class: "tiny muted", text: `AQI ${air.aqi ?? "—"} · ${air.category || "UNKNOWN"} · ${air.source || ""} · fetched ${fmt.ago(air.time)}` }),
+      h("div", { class: "small muted", text: "Air quality layer refreshes while online; cached snapshot remains readable offline." }),
+    ) : h("div", { class: "small muted", text: "No air quality snapshot cached. Refresh while online." });
+    grid.appendChild(panel({
+      title: "Air Quality (Open-Meteo)",
+      sub: "US AQI snapshot",
+      icon: "wind",
+      cls: "span-2",
+      body: airBody,
+    }));
+  }
 
   async function refreshIntel() {
     toast("Refreshing public intel feeds", "warn");
@@ -225,6 +348,34 @@ export async function render(root) {
       toast(`Intel refresh: ${ok}/${(out.results || []).length} source(s) OK`);
       render(root);
     } catch (err) { toast(err.message || "Intel refresh failed", "error"); }
+  }
+
+  function buildFeedItemList(f, limit = 8, opts = {}) {
+    const wrap = h("div", { class: "col gap-6" });
+    const items = f.items || [];
+    if (!items.length) {
+      wrap.appendChild(emptyState("No cached items", f.error ? String(f.error) : "Refresh while online to fetch items.", "book"));
+      return wrap;
+    }
+    const list = h("div", { class: "list" });
+    for (const it of items.slice(0, limit)) {
+      const row = h("div", { class: "list-item" });
+      const main = h("div", { class: "li-main" });
+      main.appendChild(h("div", { class: "li-title", text: it.title || "Feed item" }));
+      const meta = [f.name, fmt.ago(it.time)].filter(Boolean).join(" · ");
+      main.appendChild(h("div", { class: "li-sub", text: meta }));
+      if (opts.showSummary && it.summary) {
+        main.appendChild(h("div", { class: "li-sub", text: String(it.summary).slice(0, 180) + (String(it.summary).length > 180 ? "…" : "") }));
+      }
+      row.appendChild(main);
+      const tools = h("div", { class: "row gap-6 mt-6 wrap" });
+      if (it.time) tools.appendChild(badge(fmt.ago(it.time), "muted"));
+      if (it.url) tools.appendChild(h("a", { class: "badge cyan", href: it.url, target: "_blank", rel: "noopener noreferrer", text: "READ" }));
+      row.appendChild(tools);
+      list.appendChild(row);
+    }
+    wrap.appendChild(list);
+    return wrap;
   }
 
   function buildAircraft(items) {
@@ -237,7 +388,7 @@ export async function render(root) {
     for (const a of items.slice(0, 12)) {
       const main = h("div", { class: "li-main" });
       main.appendChild(h("div", { class: "li-title", text: a.callsign || a.title || "?" }));
-      main.appendChild(h("div", { class: "li-sub", text: `ALT ${a.alt_m != null ? Math.round(a.alt_m) + " m" : "—"} · SPD ${a.speed_kmh != null ? Math.round(a.speed_kmh) + " km/h" : "—"} · HDG ${a.heading_deg != null ? Math.round(a.heading_deg) + "\u00b0" : "—"}` }));
+      main.appendChild(h("div", { class: "li-sub", text: `ALT ${U.altM(a.alt_m)} · SPD ${U.speedKmh(a.speed_kmh)} · HDG ${a.heading_deg != null ? Math.round(a.heading_deg) + "\u00b0" : "—"}` }));
       const row = h("div", { class: "list-item" });
       row.appendChild(main);
       list.appendChild(row);
@@ -257,7 +408,7 @@ export async function render(root) {
       const row = h("div", { class: "list-item" });
       const main = h("div", { class: "li-main" });
       main.appendChild(h("div", { class: "li-title", text: `${s.name} (NORAD ${s.norad})` }));
-      main.appendChild(h("div", { class: "li-sub", text: `ALT ${Math.round(s.alt_km)} km · ELEV ${Math.round(s.elevation_deg)} deg over observer` }));
+      main.appendChild(h("div", { class: "li-sub", text: `ALT ${U.altKm(s.alt_km)} · ELEV ${Math.round(s.elevation_deg)} deg over observer` }));
       row.appendChild(main);
       list.appendChild(row);
     }
@@ -309,13 +460,13 @@ export async function render(root) {
     }
 
     if (live.length) {
-      wrap.appendChild(section("LIVE MEDIA REPORTS // GDELT", "Automated geocoded coding of current news. Locations and actor/event labels can be wrong.", live.slice(0, 10), "live"));
+      wrap.appendChild(section("LIVE MEDIA REPORTS // GDELT", "Automated geocoded coding of current news. Locations and actor/event labels can be wrong.", live.slice(0, 12), "live"));
     }
     if (verified.length) {
-      wrap.appendChild(section("VERIFIED EVENTS // UCDP CANDIDATE", "Monthly verified release with a lag of weeks, not a live warning.", verified.slice(0, 10), "verified"));
+      wrap.appendChild(section("VERIFIED EVENTS // UCDP CANDIDATE", "Monthly verified release with a lag of weeks, not a live warning.", verified.slice(0, 12), "verified"));
     }
     if (items.length) {
-      wrap.appendChild(section("CURRENT CONFLICT HEADLINES", "Wire and humanitarian reporting from the last 7 days. Confirm with the linked source.", items.slice(0, 12), "headline"));
+      wrap.appendChild(section("CURRENT CONFLICT HEADLINES", "Wire and humanitarian reporting from the last 7 days. Confirm with the linked source.", items.slice(0, 15), "headline"));
     }
     wrap.appendChild(h("div", { class: "tiny dim", text: "UCDP is a monthly verified dataset; GDELT is automated media coding. Neither is a confirmed targeting picture. Use the linked source and official warnings before acting." }));
     return wrap;
@@ -333,7 +484,7 @@ export async function render(root) {
       const row = h("div", { class: `list-item ${isHazardous ? "warn" : ""}` });
       const main = h("div", { class: "li-main" });
       main.appendChild(h("div", { class: "li-title", text: obj.name || "Unknown Object" }));
-      main.appendChild(h("div", { class: "li-sub", text: `${obj.diameter_meters.toFixed(0)}m · ${obj.miss_distance_km.toLocaleString()} km (${obj.miss_distance_ld.toFixed(2)} LD) · ${obj.velocity_kmh.toLocaleString()} km/h` }));
+      main.appendChild(h("div", { class: "li-sub", text: `${U.lengthM(obj.diameter_meters)} · ${U.distKm(obj.miss_distance_km)} (${obj.miss_distance_ld.toFixed(2)} LD) · ${U.speedKmh(obj.velocity_kmh)}` }));
       main.appendChild(h("div", { class: "li-sub", text: `${obj.threat_level} threat (${obj.threat_score}/100)${isHazardous ? " · HAZARDOUS" : ""}` }));
       row.appendChild(main);
       const tools = h("div", { class: "row gap-6 mt-6" });
@@ -358,7 +509,7 @@ export async function render(root) {
       main.appendChild(h("div", { class: "li-title", text: article.title || "Untitled" }));
       main.appendChild(h("div", { class: "li-sub", text: `${article.source || "Unknown"} · ${article.severity || "INFO"} · Relevance: ${article.relevance_score || 0}/100` }));
       if (article.description) {
-        main.appendChild(h("div", { class: "li-sub", text: article.description.slice(0, 120) + (article.description.length > 120 ? "..." : "") }));
+        main.appendChild(h("div", { class: "li-sub", text: article.description.slice(0, 140) + (article.description.length > 140 ? "…" : "") }));
       }
       if (article.published_at) {
         main.appendChild(h("div", { class: "li-sub text-xs", text: `Published: ${new Date(article.published_at).toLocaleString()}` }));
@@ -379,69 +530,29 @@ export async function render(root) {
       wrap.appendChild(emptyState("No disease tracking data available", "Disease data refreshes automatically.", "globe"));
       return wrap;
     }
-    
     const content = h("div", { class: "col gap-6" });
-    
-    // Header with severity badge
     const header = h("div", { class: "row gap-6 items-center" });
     header.appendChild(h("div", { class: "li-title", text: stats.disease || "Unknown Disease" }));
     header.appendChild(severityBadge(stats.severity || "INFO"));
     content.appendChild(header);
-    
-    // Key metrics
     const metrics = h("div", { class: "grid grid-2 gap-4 mt-4" });
-    
-    metrics.appendChild(h("div", { class: "stat-box" },
-      h("div", { class: "stat-label", text: "Total Cases" }),
-      h("div", { class: "stat-value", text: (stats.cases || 0).toLocaleString() })
-    ));
-    
-    metrics.appendChild(h("div", { class: "stat-box" },
-      h("div", { class: "stat-label", text: "Active Cases" }),
-      h("div", { class: "stat-value", text: (stats.active || 0).toLocaleString() })
-    ));
-    
-    metrics.appendChild(h("div", { class: "stat-box" },
-      h("div", { class: "stat-label", text: "Deaths" }),
-      h("div", { class: "stat-value text-red", text: (stats.deaths || 0).toLocaleString() })
-    ));
-    
-    metrics.appendChild(h("div", { class: "stat-box" },
-      h("div", { class: "stat-label", text: "Critical" }),
-      h("div", { class: "stat-value text-orange", text: (stats.critical || 0).toLocaleString() })
-    ));
-    
-    metrics.appendChild(h("div", { class: "stat-box" },
-      h("div", { class: "stat-label", text: "Recovered" }),
-      h("div", { class: "stat-value text-green", text: (stats.recovered || 0).toLocaleString() })
-    ));
-    
-    metrics.appendChild(h("div", { class: "stat-box" },
-      h("div", { class: "stat-label", text: "Tests" }),
-      h("div", { class: "stat-value", text: (stats.tests || 0).toLocaleString() })
-    ));
-    
+    for (const [label, value, cls] of [
+      ["Total Cases", (stats.cases || 0).toLocaleString(), ""],
+      ["Active Cases", (stats.active || 0).toLocaleString(), ""],
+      ["Deaths", (stats.deaths || 0).toLocaleString(), "text-red"],
+      ["Critical", (stats.critical || 0).toLocaleString(), "text-orange"],
+      ["Recovered", (stats.recovered || 0).toLocaleString(), "text-green"],
+      ["Tests", (stats.tests || 0).toLocaleString(), ""],
+    ]) {
+      metrics.appendChild(h("div", { class: "stat-box" },
+        h("div", { class: "stat-label", text: label }),
+        h("div", { class: `stat-value ${cls}`.trim(), text: value })));
+    }
     content.appendChild(metrics);
-    
-    // Additional metrics
-    if (stats.cases_per_million || stats.deaths_per_million) {
-      const additional = h("div", { class: "col gap-2 mt-4" });
-      additional.appendChild(h("div", { class: "li-sub", text: `Cases per million: ${stats.cases_per_million || 0}` }));
-      additional.appendChild(h("div", { class: "li-sub", text: `Deaths per million: ${stats.deaths_per_million || 0}` }));
-      additional.appendChild(h("div", { class: "li-sub", text: `Relevance score: ${stats.relevance_score || 0}/100` }));
-      content.appendChild(additional);
-    }
-    
-    // Last updated
-    if (stats.updated) {
-      content.appendChild(h("div", { class: "li-sub text-xs mt-4", text: `Last updated: ${new Date(stats.updated).toLocaleString()}` }));
-    }
-    
-    // Source link
+    if (stats.updated) content.appendChild(h("div", { class: "li-sub text-xs mt-4", text: `Last updated: ${new Date(stats.updated).toLocaleString()}` }));
     const tools = h("div", { class: "row gap-6 mt-6" });
     tools.appendChild(h("a", { class: "badge cyan", href: "https://disease.sh/", target: "_blank", rel: "noopener noreferrer", text: "SOURCE: Disease.sh" }));
     content.appendChild(tools);
-    
     wrap.appendChild(content);
     return wrap;
   }
@@ -465,15 +576,16 @@ export async function render(root) {
       return wrap;
     }
     const list = h("div", { class: "list" });
-    for (const ev of items.slice(0, 20)) {
+    for (const ev of items.slice(0, 25)) {
       const isCrit = ["CRITICAL", "SEVERE", "EXTREME"].includes(String(ev.severity || "INFO").toUpperCase());
       const dist = distFromOperator(ev);
       const row = h("div", { class: `list-item ${isCrit ? "alert" : ""}` });
       const main = h("div", { class: "li-main" });
       main.appendChild(h("div", { class: "li-title", text: ev.title || "Event" }));
-      main.appendChild(h("div", { class: "li-sub", text: `${ev.source || ""} · ${ev.severity || ""}${ev.mag != null ? ` · M${ev.mag}` : ""}${ev.place ? ` · ${ev.place}` : ""}${ev.depth_km != null ? ` · ${ev.depth_km} km depth` : ""}${ev.time ? ` · ${fmt.date(ev.time)}` : ""}${dist != null ? ` · ${Math.round(dist)} km from operator` : ""}` }));
+      main.appendChild(h("div", { class: "li-sub", text: `${ev.source || ""} · ${ev.severity || ""}${ev.mag != null ? ` · M${ev.mag}` : ""}${ev.place ? ` · ${ev.place}` : ""}${ev.depth_km != null ? ` · ${U.distKm(ev.depth_km)} depth` : ""}${ev.time ? ` · ${fmt.date(ev.time)}` : ""}${dist != null ? ` · ${U.distKm(dist)} from operator` : ""}` }));
       row.appendChild(main);
-      const tools = h("div", { class: "row gap-6 mt-6" });
+      const tools = h("div", { class: "row gap-6 mt-6 wrap" });
+      tools.appendChild(badge(fmt.ago(ev.time), "muted"));
       if (ev.lat != null && ev.lon != null) tools.appendChild(btn("LOG", { size: "sm", tone: "ghost", icon: "plus", onClick: () => logIncident(ev) }));
       if (ev.url) tools.appendChild(h("a", { class: "badge cyan", href: ev.url, target: "_blank", rel: "noopener noreferrer", text: "SOURCE" }));
       row.appendChild(tools);
@@ -497,24 +609,30 @@ export async function render(root) {
     } catch (err) { toast(err.message || "Could not log incident", "error"); }
   }
 
-  function newsCard(f) {
+  function newsCard(f, limit = 3) {
     const body = h("div", { class: "col gap-6" });
-    body.appendChild(h("div", { class: "tiny muted", text: `${f.kind.toUpperCase()} · fetched ${fmt.ago(f.fetched_at)} · ${f.count} cached item(s)${f.error ? ` · ${f.error}` : ""}` }));
+    body.appendChild(h("div", { class: "tiny muted", text: `${String(f.kind || "").toUpperCase()} · fetched ${fmt.ago(f.fetched_at)} · ${f.count ?? 0} cached${f.error ? ` · ${f.error}` : ""}` }));
     const items = f.items || [];
-    for (const it of items.slice(0, 3)) {
-      body.appendChild(h("div", { class: "small", text: it.title || "Feed item" }));
+    for (const it of items.slice(0, limit)) {
+      const line = h("div", { class: "small" });
+      if (it.url) {
+        line.appendChild(h("a", { href: it.url, target: "_blank", rel: "noopener noreferrer", text: it.title || "Feed item", style: { color: "inherit", textDecoration: "none" } }));
+      } else {
+        line.textContent = it.title || "Feed item";
+      }
+      body.appendChild(line);
     }
+    if (!items.length) body.appendChild(h("div", { class: "small muted", text: "No items cached yet." }));
     const card = h("div", { class: "panel", style: { padding: 0 } });
     const head = h("div", { class: "panel-head" });
-    head.appendChild(h("div", { class: "row gap-6" }));
-    head.firstChild.appendChild(h("div", { class: "dev-name", text: f.name }));
+    head.appendChild(h("div", { class: "dev-name", text: f.name }));
     head.appendChild(feedBadge(f.status));
     const tools = h("div", { class: "panel-tools row gap-4" });
     if (f.url) tools.appendChild(h("a", { class: "btn btn-sm btn-ghost", href: f.url, target: "_blank", rel: "noopener noreferrer", text: "SOURCE" }));
     tools.appendChild(btn("REFRESH", { size: "sm", tone: "ghost", onClick: () => refreshFeed(f) }));
     head.appendChild(tools);
     card.appendChild(head);
-    card.appendChild(h("div", { class: "panel-body flush" }, body));
+    card.appendChild(h("div", { class: "panel-body" }, body));
     return card;
   }
 
@@ -524,13 +642,13 @@ export async function render(root) {
       if (result.status === "OK") toast(`${f.name}: ${result.count ?? 0} items`);
       else toast(`${f.name}: ${result.error || result.status || "failed"}`, "error");
       render(root);
-    }).catch(() => {});
+    }).catch((err) => toast(err.message || "Refresh failed", "error"));
   }
 
   autoTimer = setInterval(async () => {
     if (autoBusy || document.hidden) return;
     if (!location.hash.startsWith("#/intel")) return;
-    if (document.querySelector(".modal.open, .modal")) return;
+    if (document.querySelector(".modal.open, .modal-backdrop")) return;
     autoBusy = true;
     const y = window.scrollY;
     try {

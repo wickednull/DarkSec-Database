@@ -7,9 +7,10 @@
   <meta name="theme-color" content="#050806">
   <title>DARKSEC // NIGHTWATCH</title>
   <link rel="icon" href="/ui/img/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/ui/css/app.css">
+  <link rel="stylesheet" href="/ui/css/app.css?v=toggle-1">
 </head>
 <body>
+  <a class="skip-link" href="#view">Skip to main content</a>
   <div class="boot" id="boot">
     <div class="boot-mark">DS</div>
     <div class="boot-text">DARKSEC NIGHTWATCH</div>
@@ -24,7 +25,7 @@
 
     <header class="topbar">
       <div class="class-stripe" aria-hidden="true"></div>
-      <button class="menu-btn icon-btn" id="menuBtn" aria-label="Open navigation" title="Navigation">
+      <button class="menu-btn icon-btn" id="menuBtn" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar" title="Navigation">
         <span data-icon="menu"></span>
       </button>
       <a class="brand" href="#/dashboard" aria-label="DarkSec dashboard">
@@ -52,6 +53,9 @@
         <div class="top-pill vault-pill" id="vaultPill" title="Vault status">
           <span data-icon="lock"></span><span id="vaultText">VAULT</span>
         </div>
+        <button class="icon-btn" id="assistantBtn" title="Delamain (local AI)" aria-label="Delamain">
+          <span data-icon="cpu"></span>
+        </button>
         <button class="icon-btn" id="searchBtn" title="Command palette (Ctrl+K)" aria-label="Command palette">
           <span data-icon="search"></span>
         </button>
@@ -85,9 +89,9 @@
     </aside>
     <div class="sidebar-scrim" id="sidebarScrim"></div>
 
-    <main class="main" id="view" tabindex="-1"></main>
+    <main class="main" id="view" tabindex="-1" aria-label="Main content"></main>
 
-    <footer class="statusbar">
+    <footer class="statusbar" role="status" aria-live="polite" aria-atomic="false">
       <div class="sb-left">
         <span class="sb-item"><span class="led" id="sbLed"></span><span id="sbStatus">SYSTEM NOMINAL</span></span>
         <span class="sb-item hide-sm">CPU <b id="sbCpu">--</b>%</span>
@@ -97,8 +101,8 @@
       <div class="sb-right">
         <span class="sb-item" id="sbReadiness">READINESS --</span>
         <span class="sb-item hide-sm" id="sbCoords">--</span>
-        <span class="sb-item" id="sbGps" title="Saved position source and age">GPS UNVERIFIED</span>
-        <span class="sb-item">LOCALHOST // TOKEN AUTH</span>
+        <span class="sb-item hide-sm" id="sbGps" title="Saved position source and age">GPS UNVERIFIED</span>
+        <span class="sb-item hide-xs">LOCALHOST // TOKEN AUTH</span>
       </div>
     </footer>
   </div>
@@ -107,6 +111,6 @@
   <div id="modalRoot"></div>
   <div id="paletteRoot"></div>
 
-  <script type="module" src="/ui/js/main.js"></script>
+  <script type="module" src="/ui/js/main.js?v=better-6"></script>
 </body>
 </html>

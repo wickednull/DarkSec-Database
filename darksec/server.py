@@ -9,8 +9,6 @@ only when the operator explicitly asks for them.
 """
 from __future__ import annotations
 
-import asyncio
-import base64
 import csv
 import io
 import json
@@ -19,29 +17,31 @@ import os
 import re
 import secrets
 import shutil
-import socket
 import sqlite3
 import subprocess
-import sys
 import time
-import zipfile
+
+import requests
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit
 
-import psutil
 from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
                                RedirectResponse, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, astro, autosync, calcs, config, feeds, geo, geocoding, intel, library, phonegps, sdr, tilecache
+from . import __version__, assistant, astro, autosync, config, feeds, geo, geocoding, intel, library, phonegps, sdr, sitrep, tilecache
 from .config import APP_NAME
+from .brief import build_brief
+from .calc_catalog import CALC_CATALOG, CALC_FUNCS
 from .db import Database, utcnow
 from .security import Vault
+from .status import hardware, system_info, readiness
+from .trips import parse_utc as _parse_utc, trip_items
 
 APP_CODENAME = "NIGHTWATCH"
 COOKIE = "darksec_session"
@@ -209,509 +209,6 @@ def _record_row(row: sqlite3.Row) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Hardware cache
-# --------------------------------------------------------------------------
-
-_hw_cache: dict[str, Any] = {"ts": 0.0, "data": None}
-
-
-def hardware(force: bool = False) -> dict:
-    now = time.time()
-    if not force and _hw_cache["data"] and now - _hw_cache["ts"] < 60:
-        return _hw_cache["data"]
-    data = sdr.detect()
-    _hw_cache.update(ts=now, data=data)
-    return data
-
-
-def system_info() -> dict:
-    vm = psutil.virtual_memory()
-    du = psutil.disk_usage(str(config.DATA_DIR))
-    try:
-        battery = psutil.sensors_battery()
-    except Exception:
-        battery = None
-    try:
-        boot = datetime.fromtimestamp(psutil.boot_time(), tz=timezone.utc).isoformat()
-    except Exception:
-        boot = None
-    return {
-        "hostname": socket.gethostname(),
-        "platform": sys.platform,
-        "python": sys.version.split()[0],
-        "cpu_count": psutil.cpu_count(logical=True),
-        "load_1m": round(os.getloadavg()[0], 2) if hasattr(os, "getloadavg") else None,
-        "memory_total": vm.total,
-        "memory_used": vm.used,
-        "memory_pct": vm.percent,
-        "disk_total": du.total,
-        "disk_used": du.used,
-        "disk_free": du.free,
-        "disk_pct": round(du.used / du.total * 100, 1) if du.total else None,
-        "battery_pct": round(battery.percent, 1) if battery else None,
-        "battery_plugged": battery.power_plugged if battery else None,
-        "boot_time": boot,
-        "uptime_s": int(time.time() - psutil.boot_time()) if boot else None,
-        "data_dir": str(config.DATA_DIR),
-        "db_bytes": config.DB_PATH.stat().st_size if config.DB_PATH.exists() else 0,
-        "recordings_bytes": sum(p.stat().st_size for p in Path(config.RECORDING_DIR).glob("*") if p.is_file()),
-    }
-
-
-# --------------------------------------------------------------------------
-# SITREP
-# --------------------------------------------------------------------------
-
-def readiness(db: Database) -> dict:
-    rows = db.query("SELECT * FROM indicators")
-    if not rows:
-        return {"score": None, "band": "NO DATA", "counts": {"green": 0, "amber": 0, "red": 0, "unknown": 0},
-                "categories": [], "updated": None}
-    counts = {"green": 0, "amber": 0, "red": 0, "unknown": 0}
-    cats: dict[str, dict] = {}
-    total_w = 0.0
-    weighted = 0.0
-    for r in rows:
-        status = int(r["status"])
-        counts[{0: "green", 1: "amber", 2: "red"}.get(status, "unknown")] += 1
-        c = cats.setdefault(r["category"], {"category": r["category"], "weight": 0.0, "risk": 0.0,
-                                            "count": 0, "assessed": 0})
-        c["count"] += 1
-        # Status 3 means "not assessed". Unknown indicators never contribute
-        # hazard or confidence, so they cannot inflate the readiness score.
-        if status in (0, 1, 2):
-            w = float(r["weight"] or 1)
-            total_w += w
-            weighted += w * status / 2.0
-            c["weight"] += w
-            c["risk"] += w * status / 2.0
-            c["assessed"] += 1
-    if total_w <= 0:
-        score = None
-        band = "NO DATA"
-    else:
-        score = round(max(0.0, min(100.0, (1.0 - weighted / total_w) * 100)), 0)
-        band = "NOMINAL" if score >= 80 else "DEGRADED" if score >= 60 else "ELEVATED" if score >= 40 else "CRITICAL"
-    for c in cats.values():
-        c["score"] = round((1 - c["risk"] / c["weight"]) * 100) if c["weight"] else None
-        c["risk"] = round(c["risk"], 2)
-        c["weight"] = round(c["weight"], 2)
-    return {"score": int(score) if score is not None else None, "band": band, "counts": counts,
-            "categories": sorted(cats.values(), key=lambda x: x["score"] if x["score"] is not None else 999),
-            "updated": max((r["updated"] or "" for r in rows), default=None)}
-
-
-def _parse_utc(value: Any) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def trip_items(db: Database) -> list[dict]:
-    """Return trip records with local check-in/return deadlines attached."""
-    now = datetime.now(timezone.utc)
-    rows = db.query(
-        "SELECT t.*, s.name AS start_waypoint_name, e.name AS end_waypoint_name "
-        "FROM trip_plans t "
-        "LEFT JOIN waypoints s ON s.id=t.start_waypoint_id "
-        "LEFT JOIN waypoints e ON e.id=t.end_waypoint_id "
-        "ORDER BY CASE t.status WHEN 'ACTIVE' THEN 0 WHEN 'PLANNED' THEN 1 ELSE 2 END, t.departure_at DESC"
-    )
-    out = []
-    for row in rows:
-        item = dict(row)
-        item["alert"] = item["status"]
-        item["alert_level"] = "muted"
-        item["next_checkin_at"] = None
-        item["minutes_to_checkin"] = None
-        item["minutes_overdue"] = 0
-        if item["status"] == "ACTIVE":
-            try:
-                interval = int(item.get("checkin_interval_min") or 60)
-            except (TypeError, ValueError):
-                interval = 60
-            interval = max(5, min(1440, interval))
-            last = _parse_utc(item.get("last_checkin_at") or item.get("started_at"))
-            next_checkin = last + timedelta(minutes=interval) if last else None
-            return_at = _parse_utc(item.get("return_at"))
-            if next_checkin:
-                item["next_checkin_at"] = next_checkin.isoformat(timespec="seconds")
-                delta_min = (next_checkin - now).total_seconds() / 60
-                item["minutes_to_checkin"] = int(delta_min) if delta_min >= 0 else None
-                item["minutes_overdue"] = max(0, int(-delta_min))
-            if return_at and now > return_at:
-                item["alert"] = "RETURN OVERDUE"
-                item["alert_level"] = "red"
-                item["return_minutes_overdue"] = max(0, int((now - return_at).total_seconds() / 60))
-            elif next_checkin and now > next_checkin:
-                item["alert"] = "CHECK-IN OVERDUE"
-                item["alert_level"] = "amber"
-            else:
-                item["alert"] = "ON TRACK"
-                item["alert_level"] = "green"
-        elif item["status"] == "PLANNED":
-            departure = _parse_utc(item.get("departure_at"))
-            if departure and departure < now:
-                item["alert"] = "DEPARTURE PASSED"
-                item["alert_level"] = "amber"
-        out.append(item)
-    return out
-
-
-def build_brief(db: Database) -> str:
-    s = db.all_settings()
-    r = readiness(db)
-    now = datetime.now(timezone.utc)
-    try:
-        coords = geo.format_coord(float(s["lat"]), float(s["lon"]))
-        grid = coords["mgrs"]
-    except Exception:
-        grid = "UNKNOWN"
-    tasks = db.query("SELECT * FROM tasks WHERE done=0 ORDER BY priority LIMIT 8")
-    trips = [t for t in trip_items(db) if t["status"] == "ACTIVE"]
-    logs = db.query("SELECT * FROM log_entries ORDER BY ts DESC LIMIT 6")
-    incidents = db.query("SELECT * FROM incidents WHERE resolved=0 ORDER BY ts DESC LIMIT 6")
-    low = db.query("SELECT * FROM inventory WHERE min_qty > 0 AND qty <= min_qty ORDER BY (qty-min_qty) LIMIT 10")
-    feed_summary = feeds.summary(db)
-    lib = library.stats(db)
-    almanac = None
-    try:
-        almanac = astro.celestial(float(s["lat"]), float(s["lon"]), float(s.get("elevation_m") or 0))
-    except Exception:
-        almanac = None
-
-    source = str(s.get("position_source") or "unverified").lower()
-    fix_at = s.get("position_fix_at") or s.get("position_updated_at")
-    age_text = "unknown age"
-    age_seconds = None
-    try:
-        fix_dt = datetime.fromisoformat(str(fix_at).replace("Z", "+00:00"))
-        if fix_dt.tzinfo is None:
-            fix_dt = fix_dt.replace(tzinfo=timezone.utc)
-        age_seconds = max(0, int((now - fix_dt).total_seconds()))
-        age_text = (f"{age_seconds // 3600}h {(age_seconds % 3600) // 60:02d}m"
-                    if age_seconds >= 3600 else f"{age_seconds // 60}m {age_seconds % 60:02d}s")
-    except (TypeError, ValueError):
-        pass
-    accuracy = s.get("position_accuracy_m")
-    try:
-        accuracy_text = f" ±{float(accuracy):.1f}m" if accuracy is not None else ""
-    except (TypeError, ValueError):
-        accuracy_text = ""
-    provenance = f"SOURCE: {source.upper()} · FIX AGE: {age_text}{accuracy_text}"
-    position_warning = None
-    if source == "unverified":
-        position_warning = "Position source is unverified; confirm the coordinate before navigating."
-    elif source in ("gpsd", "phone") and (age_seconds is None or age_seconds > 6 * 3600):
-        position_warning = "GPS fix is stale or has no usable age; refresh before navigating."
-    elif source in ("manual", "geocoded"):
-        position_warning = f"{source.capitalize()} reference only; no receiver accuracy guarantee."
-
-    lines = [
-        "DARKSEC // FIELD SITUATION REPORT",
-        "UNCLASSIFIED // FIELD OPERATIONS",
-        "=" * 58,
-        f"TIME (UTC): {now.isoformat(timespec='seconds')}",
-        f"TEAM: {s.get('team','')}    CALLSIGN: {s.get('callsign','')}    OPERATOR: {s.get('operator','') or '-'}",
-        f"POSITION: {float(s['lat']):.6f}, {float(s['lon']):.6f}   {grid}",
-        f"{provenance}",
-        *([f"WARNING: {position_warning}"] if position_warning else []),
-        f"READINESS: {r['band']} ({r['score'] if r['score'] is not None else 'N/A'}/100)   "
-        f"GREEN {r['counts']['green']} / AMBER {r['counts']['amber']} / RED {r['counts']['red']} / UNKNOWN {r['counts']['unknown']}",
-        "",
-        "1. SITUATION",
-    ]
-    if r["categories"]:
-        worst = sorted(r["categories"], key=lambda c: c["score"] if c["score"] is not None else 999)[:4]
-        for c in worst:
-            lines.append(f"   - {c['category']}: {c['score']}% ({c['count']} indicators)")
-    else:
-        lines.append("   - Readiness indicators not assessed.")
-    if incidents:
-        lines.append("   - OPEN INCIDENTS:")
-        for i in incidents[:5]:
-            lines.append(f"     * [{i['severity']}] {i['title']} ({i['ts']})")
-    if feed_summary["critical_count"]:
-        lines.append(f"   - INTEL: {feed_summary['critical_count']} critical feed item(s) cached. Confirm with official sources.")
-    else:
-        lines.append("   - INTEL: No critical cached feed items.")
-    lines += ["", "2. MISSION / TASKS"]
-    if tasks:
-        for t in tasks:
-            lines.append(f"   - [{t['priority']}] {t['title']}" + (f" (due {t['due']})" if t["due"] else ""))
-    else:
-        lines.append("   - No open tasks.")
-    lines += ["", "3. FIELD TRIPS / CHECK-INS"]
-    if trips:
-        for trip in trips:
-            lines.append(f"   - [{trip['alert']}] {trip['name']} · party {trip['party_size']} · "
-                         f"return {trip['return_at']} · contact {trip['emergency_contact'] or 'NOT SET'}")
-            if trip.get("next_checkin_at"):
-                lines.append(f"     next check-in due {trip['next_checkin_at']}; share this plan with the contact.")
-    else:
-        lines.append("   - No active trips.")
-    lines.append("   - Check-ins are local records only; no contact is automatically notified.")
-    lines += ["", "4. SUSTAINMENT"]
-    if low:
-        for item in low:
-            lines.append(f"   - LOW STOCK: {item['name']} {item['qty']} {item['unit']} (min {item['min_qty']})")
-    else:
-        lines.append("   - No inventory items below minimum.")
-    lines.append(f"   - Library: {lib['documents']} documents, {lib['text_indexed']} full-text indexed.")
-    if almanac:
-        lines.append(f"   - Sun: rise {almanac['sun']['next_rise']} set {almanac['sun']['next_set']}; "
-                     f"Moon {almanac['moon']['illumination_pct']}% {almanac['moon']['phase_name']}.")
-    lines += ["", "5. COMMAND / SIGNAL"]
-    lines.append(f"   - Vault: {'UNLOCKED' if False else 'SEE CONSOLE'}    OPSEC: {'ON' if s.get('opsec_mode') else 'OFF'}")
-    lines.append("   - Comms plan: use the SOI in COMMS. Maintain listening watch where lawful.")
-    lines += ["", "6. LOG (RECENT)"]
-    if logs:
-        for item in logs:
-            lines.append(f"   - {item['ts']} [{item['category']}] {item['title']}")
-    else:
-        lines.append("   - No entries.")
-    lines += ["", "NOTES",
-              "   Estimates and online feeds are not substitutes for instruments, official warnings,",
-              "   current maps, or qualified medical/legal advice. Verify before acting.",
-              "", "END OF REPORT // DARKSEC NIGHTWATCH"]
-    return "\n".join(lines)
-
-
-# --------------------------------------------------------------------------
-# Calculator catalog
-# --------------------------------------------------------------------------
-
-def _f(name: str, label: str, kind: str = "number", default: Any = None, unit: str = "",
-       options: list | None = None, minimum: float | None = None, maximum: float | None = None) -> dict:
-    out = {"name": name, "label": label, "type": kind, "unit": unit}
-    if default is not None:
-        out["default"] = default
-    if options:
-        out["options"] = options
-    if minimum is not None:
-        out["min"] = minimum
-    if maximum is not None:
-        out["max"] = maximum
-    return out
-
-
-CALC_CATALOG = [
-    # Weather
-    {"name": "wind_chill_c", "group": "WEATHER", "label": "Wind chill", "fields": [
-        _f("temp_c", "Air temperature", "number", 0, "°C"),
-        _f("wind_kmh", "Wind speed", "number", 20, "km/h")]},
-    {"name": "heat_index_c", "group": "WEATHER", "label": "Heat index", "fields": [
-        _f("temp_c", "Air temperature", "number", 32, "°C"),
-        _f("rh", "Relative humidity", "number", 60, "%", minimum=1, maximum=100)]},
-    {"name": "dew_point_c", "group": "WEATHER", "label": "Dew point", "fields": [
-        _f("temp_c", "Air temperature", "number", 20, "°C"),
-        _f("rh", "Relative humidity", "number", 60, "%", minimum=1, maximum=100)]},
-    {"name": "wet_bulb_c", "group": "WEATHER", "label": "Wet-bulb temperature", "fields": [
-        _f("temp_c", "Air temperature", "number", 30, "°C"),
-        _f("rh", "Relative humidity", "number", 50, "%", minimum=1, maximum=100)]},
-    {"name": "humidex", "group": "WEATHER", "label": "Humidex", "fields": [
-        _f("temp_c", "Air temperature", "number", 28, "°C"),
-        _f("dew_c", "Dew point", "number", 20, "°C")]},
-    {"name": "pressure_altitude_ft", "group": "WEATHER", "label": "Pressure altitude", "fields": [
-        _f("pressure_hpa", "Station pressure", "number", 1013.25, "hPa")]},
-    {"name": "density_altitude_ft", "group": "WEATHER", "label": "Density altitude", "fields": [
-        _f("pressure_alt_ft", "Pressure altitude", "number", 0, "ft"),
-        _f("temp_c", "Outside air temperature", "number", 15, "°C")]},
-    {"name": "lightning_distance_km", "group": "WEATHER", "label": "Lightning distance", "fields": [
-        _f("seconds_to_thunder", "Seconds from flash to thunder", "number", 10, "s", minimum=0)]},
-    {"name": "beaufort", "group": "WEATHER", "label": "Beaufort scale", "fields": [
-        _f("kmh", "Wind speed", "number", 30, "km/h")]},
-    {"name": "pressure_trend", "group": "WEATHER", "label": "3-hour pressure tendency", "fields": [
-        _f("hpa_now", "Pressure now", "number", 1013, "hPa"),
-        _f("hpa_3h_ago", "Pressure 3 h ago", "number", 1015, "hPa")]},
-    {"name": "solar_insolation", "group": "WEATHER", "label": "Clear-sky solar insolation", "fields": [
-        _f("lat", "Latitude", "number", 40, "°", minimum=-89, maximum=89),
-        _f("day_of_year", "Day of year (blank = today)", "number", None),
-        _f("tilt", "Array tilt (blank = latitude)", "number", None, "°"),
-        _f("clear_sky", "Clear-sky factor", "number", 0.75)]},
-    # Medical
-    {"name": "bmi", "group": "MEDICAL", "label": "Body mass index", "fields": [
-        _f("weight_kg", "Weight", "number", 75, "kg", minimum=1),
-        _f("height_cm", "Height", "number", 175, "cm", minimum=30)]},
-    {"name": "bsa_mosteller", "group": "MEDICAL", "label": "Body surface area (Mosteller)", "fields": [
-        _f("weight_kg", "Weight", "number", 75, "kg", minimum=1),
-        _f("height_cm", "Height", "number", 175, "cm", minimum=30)]},
-    {"name": "ibw_devine", "group": "MEDICAL", "label": "Ideal body weight (Devine)", "fields": [
-        _f("sex", "Sex", "select", "male", options=["male", "female"]),
-        _f("height_cm", "Height", "number", 175, "cm", minimum=120)]},
-    {"name": "mean_arterial_pressure", "group": "MEDICAL", "label": "Mean arterial pressure", "fields": [
-        _f("sys", "Systolic", "number", 120, "mmHg", minimum=40, maximum=300),
-        _f("dia", "Diastolic", "number", 80, "mmHg", minimum=20, maximum=200)]},
-    {"name": "shock_index", "group": "MEDICAL", "label": "Shock index", "fields": [
-        _f("hr", "Heart rate", "number", 80, "bpm", minimum=20, maximum=300),
-        _f("sys", "Systolic", "number", 120, "mmHg", minimum=40, maximum=300)]},
-    {"name": "qsofa", "group": "MEDICAL", "label": "qSOFA screen", "fields": [
-        _f("rr", "Respiratory rate", "number", 16, "/min", minimum=1, maximum=80),
-        _f("sys", "Systolic", "number", 120, "mmHg", minimum=40, maximum=300),
-        _f("altered_mental_status", "Altered mental status", "boolean", False)]},
-    {"name": "gcs", "group": "MEDICAL", "label": "Glasgow Coma Scale", "fields": [
-        _f("eye", "Eye (1-4)", "number", 4, minimum=1, maximum=4),
-        _f("verbal", "Verbal (1-5)", "number", 5, minimum=1, maximum=5),
-        _f("motor", "Motor (1-6)", "number", 6, minimum=1, maximum=6)]},
-    {"name": "news2", "group": "MEDICAL", "label": "NEWS2", "fields": [
-        _f("rr", "Respiratory rate", "number", 16, "/min"),
-        _f("spo2", "SpO₂", "number", 98, "%"),
-        _f("sys", "Systolic", "number", 120, "mmHg"),
-        _f("hr", "Heart rate", "number", 80, "bpm"),
-        _f("temp_c", "Temperature", "number", 37, "°C"),
-        _f("avpu", "AVPU", "select", "A", options=["A", "V", "P", "U"]),
-        _f("supplemental_o2", "Supplemental oxygen", "boolean", False),
-        _f("spo2_scale1", "SpO₂ scale 1", "boolean", True)]},
-    {"name": "iv_drip_rate", "group": "MEDICAL", "label": "IV drip rate", "fields": [
-        _f("volume_ml", "Volume", "number", 500, "mL", minimum=1),
-        _f("minutes", "Time", "number", 60, "min", minimum=1),
-        _f("drop_factor", "Drop factor", "number", 20, "gtt/mL", minimum=1)]},
-    {"name": "maintenance_fluid_ml_hr", "group": "MEDICAL", "label": "Maintenance fluids (4-2-1)", "fields": [
-        _f("weight_kg", "Weight", "number", 70, "kg", minimum=1)]},
-    {"name": "parkland_burn", "group": "MEDICAL", "label": "Parkland burn estimate", "fields": [
-        _f("weight_kg", "Weight", "number", 70, "kg", minimum=1),
-        _f("tbsa_pct", "TBSA burned", "number", 20, "%", minimum=1, maximum=100)]},
-    {"name": "rule_of_nines", "group": "MEDICAL", "label": "Rule of nines", "fields": [
-        _f("age_years", "Age", "number", 30, "years", minimum=0, maximum=120)]},
-    {"name": "pediatric_weight_estimate", "group": "MEDICAL", "label": "Paediatric weight estimate", "fields": [
-        _f("age_years", "Age", "number", 5, "years", minimum=0.1, maximum=18)]},
-    {"name": "epinephrine_anaphylaxis", "group": "MEDICAL", "label": "Epinephrine (anaphylaxis) reference", "fields": [
-        _f("weight_kg", "Weight", "number", 70, "kg", minimum=1)]},
-    {"name": "naloxone_dose", "group": "MEDICAL", "label": "Naloxone reference", "fields": []},
-    # Water / food
-    {"name": "water_requirement", "group": "WATER", "label": "Water requirement", "fields": [
-        _f("people", "People", "number", 2, minimum=1),
-        _f("days", "Days", "number", 3, minimum=1),
-        _f("climate", "Climate", "select", "temperate",
-           options=["temperate", "hot", "desert", "cold", "high_altitude"])]},
-    {"name": "bleach_dose", "group": "WATER", "label": "Bleach disinfection", "fields": [
-        _f("liters", "Water volume", "number", 1, "L", minimum=0.1),
-        _f("bleach_pct", "Sodium hypochlorite", "number", 6, "%", minimum=0.1, maximum=12),
-        _f("cloudy", "Cloudy water", "boolean", False)]},
-    {"name": "boil_water", "group": "WATER", "label": "Boil water time", "fields": [
-        _f("minutes_at_altitude_m", "Elevation", "number", 0, "m", minimum=0)]},
-    {"name": "ors_recipe", "group": "WATER", "label": "ORS recipe", "fields": [
-        _f("liters", "Volume", "number", 1, "L", minimum=0.1)]},
-    {"name": "ration_days", "group": "FOOD", "label": "Ration days", "fields": [
-        _f("calories", "Total calories available", "number", 20000, "kcal", minimum=1),
-        _f("people", "People", "number", 2, minimum=1),
-        _f("kcal_per_person_day", "Calories per person/day", "number", 2000, "kcal", minimum=500)]},
-    # Power
-    {"name": "solar_array_size", "group": "POWER", "label": "Solar array size", "fields": [
-        _f("load_kwh_day", "Daily load", "number", 3, "kWh", minimum=0.01),
-        _f("peak_sun_hours", "Peak sun hours", "number", 4, "h", minimum=0.1),
-        _f("derate", "System derate", "number", 0.75)]},
-    {"name": "battery_bank", "group": "POWER", "label": "Battery bank size", "fields": [
-        _f("load_kwh_day", "Daily load", "number", 3, "kWh", minimum=0.01),
-        _f("autonomy_days", "Autonomy", "number", 2, "days", minimum=0.5),
-        _f("dod", "Depth of discharge", "number", 0.5),
-        _f("voltage", "Bank voltage", "number", 12, "V")]},
-    {"name": "battery_runtime", "group": "POWER", "label": "Battery runtime", "fields": [
-        _f("ah", "Battery capacity", "number", 100, "Ah", minimum=1),
-        _f("voltage", "Voltage", "number", 12, "V", minimum=1),
-        _f("load_w", "Load", "number", 100, "W", minimum=1),
-        _f("dod", "Usable depth of discharge", "number", 0.5),
-        _f("inverter_eff", "Inverter efficiency", "number", 0.85)]},
-    {"name": "wire_size", "group": "POWER", "label": "Copper wire size", "fields": [
-        _f("amps", "Current", "number", 20, "A", minimum=0.1),
-        _f("one_way_m", "One-way run", "number", 5, "m", minimum=0.1),
-        _f("voltage", "System voltage", "number", 12, "V", minimum=1),
-        _f("max_drop_pct", "Maximum voltage drop", "number", 3, "%")]},
-    # CBRN
-    {"name": "fallout_rate", "group": "CBRN", "label": "Fallout dose rate", "fields": [
-        _f("rate0_usv_h", "Reference dose rate", "number", 1000, "µSv/h"),
-        _f("t0_h", "Reference time H+", "number", 1, "h", minimum=0.1),
-        _f("t_h", "Time of interest H+", "number", 7, "h", minimum=0.1),
-        _f("decay", "Decay exponent", "number", 1.2)]},
-    {"name": "fallout_dose", "group": "CBRN", "label": "Accumulated fallout dose", "fields": [
-        _f("rate0_usv_h", "Reference dose rate", "number", 1000, "µSv/h"),
-        _f("t0_h", "Start H+", "number", 1, "h", minimum=0.1),
-        _f("t1_h", "End H+", "number", 24, "h", minimum=0.1),
-        _f("decay", "Decay exponent", "number", 1.2)]},
-    {"name": "shelter_dose", "group": "CBRN", "label": "Sheltered dose", "fields": [
-        _f("dose_usv", "Unshielded dose", "number", 10000, "µSv"),
-        _f("protection_factor", "Protection factor", "number", 20, minimum=0.1)]},
-    {"name": "ki_dose", "group": "CBRN", "label": "KI thyroid blocking (reference)", "fields": [
-        _f("age_years", "Age", "number", 30, "years", minimum=0)]},
-    {"name": "radiation_convert", "group": "CBRN", "label": "Radiation unit conversion", "fields": [
-        _f("value", "Value", "number", 1),
-        _f("unit", "Unit", "select", "usv", options=["sv", "msv", "usv", "rem", "mrem", "rad", "gy"])]},
-    {"name": "decay_7_10", "group": "CBRN", "label": "7-10 decay rule", "fields": [
-        _f("rate_now_usv_h", "Dose rate now", "number", 1000, "µSv/h"),
-        _f("hours_elapsed", "Hours since detonation", "number", 7, "h", minimum=0.1)]},
-    # Comms
-    {"name": "radio_horizon_km", "group": "COMMS", "label": "Radio horizon", "fields": [
-        _f("h1_m", "Antenna 1 height", "number", 2, "m", minimum=0),
-        _f("h2_m", "Antenna 2 height", "number", 2, "m", minimum=0)]},
-    {"name": "dipole_length", "group": "COMMS", "label": "Half-wave dipole", "fields": [
-        _f("freq_mhz", "Frequency", "number", 146.52, "MHz", minimum=0.1)]},
-    {"name": "vertical_length", "group": "COMMS", "label": "Quarter-wave vertical", "fields": [
-        _f("freq_mhz", "Frequency", "number", 146.52, "MHz", minimum=0.1)]},
-    {"name": "loop_length", "group": "COMMS", "label": "Full-wave loop", "fields": [
-        _f("freq_mhz", "Frequency", "number", 14.2, "MHz", minimum=0.1)]},
-    {"name": "free_space_loss_db", "group": "COMMS", "label": "Free-space path loss", "fields": [
-        _f("freq_mhz", "Frequency", "number", 146.52, "MHz", minimum=0.1),
-        _f("km", "Distance", "number", 10, "km", minimum=0.01)]},
-    {"name": "link_budget", "group": "COMMS", "label": "Link budget", "fields": [
-        _f("tx_w", "Transmit power", "number", 5, "W", minimum=0.001),
-        _f("tx_gain_dbi", "TX antenna gain", "number", 2, "dBi"),
-        _f("rx_gain_dbi", "RX antenna gain", "number", 2, "dBi"),
-        _f("freq_mhz", "Frequency", "number", 146.52, "MHz", minimum=0.1),
-        _f("km", "Distance", "number", 10, "km", minimum=0.01),
-        _f("rx_sensitivity_dbm", "Receiver sensitivity", "number", -120, "dBm"),
-        _f("cable_loss_db", "Cable/connector loss", "number", 2, "dB")]},
-    {"name": "morse", "group": "COMMS", "label": "Morse encode", "fields": [
-        _f("text", "Text", "text", "SOS")]},
-    {"name": "phonetic", "group": "COMMS", "label": "Phonetic alphabet", "fields": [
-        _f("text", "Text", "text", "NIGHTWATCH")]},
-    {"name": "hf_outlook", "group": "COMMS", "label": "HF band outlook (heuristic)", "fields": [
-        _f("sfi", "Solar flux index", "number", 120),
-        _f("kp", "Kp index", "number", 2),
-        _f("sun_altitude_deg", "Sun altitude", "number", 30, "°")]},
-    {"name": "path_heading", "group": "COMMS", "label": "Path distance / bearing", "fields": [
-        _f("lat1", "From latitude", "number", 40, "°"),
-        _f("lon1", "From longitude", "number", -100, "°"),
-        _f("lat2", "To latitude", "number", 38, "°"),
-        _f("lon2", "To longitude", "number", -90, "°")]},
-    # Nav / misc
-    {"name": "pace_count", "group": "NAV", "label": "Pace count", "fields": [
-        _f("distance_m", "Distance", "number", 1000, "m", minimum=0),
-        _f("paces_per_100m", "Paces per 100 m", "number", 62, minimum=1)]},
-    {"name": "dead_reckoning", "group": "NAV", "label": "Dead reckoning", "fields": [
-        _f("lat", "Latitude", "number", 40, "°"),
-        _f("lon", "Longitude", "number", -100, "°"),
-        _f("bearing_deg", "Bearing", "number", 90, "°"),
-        _f("distance_m", "Distance", "number", 1000, "m", minimum=0)]},
-    {"name": "slope_distance", "group": "NAV", "label": "Slope distance", "fields": [
-        _f("horizontal_m", "Horizontal distance", "number", 100, "m", minimum=0),
-        _f("slope_deg", "Slope angle", "number", 15, "°", minimum=0, maximum=89)]},
-]
-
-CALC_FUNCS = {
-    name: getattr(calcs, name) for name in [
-        "wind_chill_c", "heat_index_c", "dew_point_c", "wet_bulb_c", "humidex",
-        "pressure_altitude_ft", "density_altitude_ft", "lightning_distance_km", "beaufort",
-        "pressure_trend", "solar_insolation", "bmi", "bsa_mosteller", "ibw_devine",
-        "mean_arterial_pressure", "shock_index", "qsofa", "gcs", "news2", "iv_drip_rate",
-        "maintenance_fluid_ml_hr", "parkland_burn", "rule_of_nines",
-        "pediatric_weight_estimate", "epinephrine_anaphylaxis", "naloxone_dose",
-        "water_requirement", "bleach_dose", "boil_water", "ors_recipe", "ration_days",
-        "solar_array_size", "battery_bank", "battery_runtime", "wire_size", "fallout_rate",
-        "fallout_dose", "shelter_dose", "ki_dose", "radiation_convert", "decay_7_10",
-        "radio_horizon_km", "dipole_length", "vertical_length", "loop_length",
-        "free_space_loss_db", "link_budget", "morse", "phonetic", "hf_outlook",
-        "path_heading", "pace_count", "dead_reckoning", "slope_distance",
-    ]
-}
-
-
-# --------------------------------------------------------------------------
 # App factory
 # --------------------------------------------------------------------------
 
@@ -765,19 +262,30 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             return True
         return False
 
+    loopback_names = {"127.0.0.1", "localhost", "::1"}
+    allowed_origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}",
+                       f"http://[::1]:{port}"}
+
+    def host_name(value: str) -> str | None:
+        if not value or "@" in value or any(ch in value for ch in " \t\r\n/\\"):
+            return None
+        try:
+            return urlsplit("//" + value).hostname
+        except Exception:
+            return None
+
+    def origin_allowed(value: str) -> bool:
+        return value.rstrip("/") in allowed_origins
+
     @app.middleware("http")
     async def guard(request: Request, call_next):
         path = request.url.path
         host = request.headers.get("host", "")
-        if host and not (host.startswith("127.0.0.1") or host.startswith("localhost")
-                         or host.startswith("[::1]")):
+        if host and host_name(host) not in loopback_names:
             return JSONResponse({"error": "Invalid host"}, status_code=400)
         origin = request.headers.get("origin")
-        if origin:
-            parsed = urlsplit(origin)
-            allowed_hosts = {host, f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
-            if parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
-                return JSONResponse({"error": "Cross-origin request denied"}, status_code=403)
+        if origin and not origin_allowed(origin):
+            return JSONResponse({"error": "Cross-origin request denied"}, status_code=403)
         # Token bootstrap: /?token=... sets the cookie and redirects.
         if path == "/" and request.query_params.get("token"):
             if secrets.compare_digest(request.query_params["token"], token):
@@ -798,12 +306,12 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     return resp
                 return JSONResponse({"error": "Authentication required"}, status_code=401)
             if request.method not in ("GET", "HEAD", "OPTIONS"):
-                # Cookie-authenticated mutation: require same-origin or explicit token header.
-                if origin:
-                    parsed = urlsplit(origin)
-                    if parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
-                        return JSONResponse({"error": "Cross-origin request denied"}, status_code=403)
-                elif request.headers.get("X-DarkSec-Token") != token:
+                # Cookie-authenticated mutation: require an exact same-origin
+                # Origin, an explicit launch-token header, or the CSRF header.
+                supplied_token = request.headers.get("X-DarkSec-Token", "")
+                if (supplied_token and secrets.compare_digest(supplied_token, token)) or origin:
+                    pass
+                else:
                     csrf_header = request.headers.get("X-DarkSec-CSRF", "")
                     if not csrf_header or not secrets.compare_digest(csrf_header, csrf):
                         return JSONResponse({"error": "CSRF check failed"}, status_code=403)
@@ -814,7 +322,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         resp.headers.setdefault("Permissions-Policy", "geolocation=(self), microphone=(), camera=()")
         resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
         resp.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
-        if path.startswith("/api/") or path == "/":
+        is_html = path == "/" or path == "/ui/" or path.endswith(".html")
+        if path.startswith("/api/") or is_html:
             resp.headers.setdefault(
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; "
@@ -822,7 +331,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
                 "form-action 'self'",
             )
-        if path.startswith("/api/"):
+        if path.startswith("/api/") or is_html:
             resp.headers.setdefault("Cache-Control", "no-store")
         return resp
 
@@ -904,6 +413,18 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         except Exception:
             almanac = None
         feed_summary = feeds.summary(d)
+        try:
+            local_threat = intel.threat_index(d, lat=lat, lon=lon)
+        except Exception:
+            local_threat = {}
+        try:
+            sit = sitrep.situational_brief(d, lat, lon, elevation_m=elevation,
+                                         ready=r,
+                                         inventory=[dict(x) for x in d.query("SELECT * FROM inventory ORDER BY name LIMIT 24")],
+                                         sun=almanac, threat=local_threat)
+        except Exception:
+            sit = {"stance": "UNKNOWN", "stance_reason": "Synthesis unavailable", "critical_near": 0,
+                   "events_within_radius": 0, "top_events": [], "actions": []}
         tasks = [dict(x) for x in d.query(
             "SELECT * FROM tasks WHERE done=0 ORDER BY CASE priority WHEN 'IMMEDIATE' THEN 0 "
             "WHEN 'PRIORITY' THEN 1 WHEN 'ROUTINE' THEN 2 ELSE 3 END, ts DESC LIMIT 8")]
@@ -912,14 +433,14 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             "SELECT * FROM incidents WHERE resolved=0 ORDER BY ts DESC LIMIT 6")]
         low = [dict(x) for x in d.query(
             "SELECT * FROM inventory WHERE min_qty > 0 AND qty <= min_qty ORDER BY (qty-min_qty) LIMIT 8")]
-        indicators = [dict(x) for x in d.query("SELECT * FROM indicators ORDER BY category, id")]
         try:
             coords = geo.format_coord(lat, lon)
         except Exception:
             coords = None
         return {
-            "readiness": r, "indicators": indicators, "tasks": tasks, "logs": logs,
+            "readiness": r, "tasks": tasks, "logs": logs,
             "incidents": incidents, "low_stock": low, "feeds": feed_summary,
+            "sitrep": sit,
             "trips": trip_items(d),
             "almanac": almanac, "coords": coords, "library": library.stats(d),
             "hardware": hardware(), "system": system_info(), "settings": s,
@@ -949,6 +470,80 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         detail = str(payload.get("detail") or "")[:2000]
         db(request).audit(action, detail, request.client.host if request.client else "")
         return {"ok": True}
+
+    # ------------------------------------------------------------ assistant (local Ollama)
+    @app.get("/api/assistant/status")
+    async def assistant_status(request: Request):
+        return await run_in_threadpool(assistant.status, db(request))
+
+    @app.get("/api/assistant/models")
+    async def assistant_models(request: Request):
+        return await run_in_threadpool(assistant.list_models, db(request))
+
+    @app.post("/api/assistant/chat")
+    async def assistant_chat(request: Request, payload: dict = Body(...)):
+        d = db(request)
+        prompt = str(payload.get("prompt") or payload.get("message") or "").strip()
+        if not prompt:
+            raise HTTPException(status_code=400, detail="prompt is required")
+        history = payload.get("history") if isinstance(payload.get("history"), list) else []
+        context = payload.get("context")
+        model = str(payload.get("model") or "").strip() or None
+        think = payload.get("think") if "think" in payload else None
+        # Do not audit full prompt/content by default (may contain sensitive notes).
+        d.audit("ASSISTANT_CHAT", json.dumps({"model": model or d.get_setting("ollama_model", ""), "prompt_chars": len(prompt), "has_context": bool(context), "think": think}), request.client.host if request.client else "")
+        try:
+            result = await run_in_threadpool(assistant.chat, d, prompt, history, context, model, think)
+            d.audit("ASSISTANT_OK", json.dumps({"model": result.get("model"), "chars": len(result.get("content") or "")}), request.client.host if request.client else "")
+            return result
+        except ValueError as e:
+            d.audit("ASSISTANT_ERR", f"400:{str(e)[:200]}")
+            raise HTTPException(status_code=400, detail=str(e))
+        except RuntimeError as e:
+            d.audit("ASSISTANT_ERR", f"502:{str(e)[:200]}")
+            raise HTTPException(status_code=502, detail=str(e))
+        except requests.exceptions.Timeout:
+            d.audit("ASSISTANT_ERR", "504:timeout")
+            raise HTTPException(status_code=504, detail="Ollama request timed out (model may still be loading or prompt too large for timeout). Increase assistant timeout in Settings.")
+        except requests.exceptions.ConnectionError as e:
+            d.audit("ASSISTANT_ERR", f"503:{str(e)[:200]}")
+            raise HTTPException(status_code=503, detail=f"Ollama connection failed: {e}")
+        except requests.exceptions.RequestException as e:
+            d.audit("ASSISTANT_ERR", f"502req:{str(e)[:200]}")
+            raise HTTPException(status_code=502, detail=f"Ollama request failed: {e}")
+        except Exception as e:
+            d.audit("ASSISTANT_ERR", f"500:{type(e).__name__}:{str(e)[:200]}")
+            raise HTTPException(status_code=500, detail=f"Assistant error: {type(e).__name__}: {e}")
+
+    @app.post("/api/assistant/chat/stream")
+    async def assistant_chat_stream(request: Request, payload: dict = Body(...)):
+        d = db(request)
+        prompt = str(payload.get("prompt") or payload.get("message") or "").strip()
+        if not prompt:
+            raise HTTPException(status_code=400, detail="prompt is required")
+        history = payload.get("history") if isinstance(payload.get("history"), list) else []
+        context = payload.get("context")
+        model = str(payload.get("model") or "").strip() or None
+        think = payload.get("think") if "think" in payload else None
+        use_model = model or d.get_setting("ollama_model", "")
+        d.audit("ASSISTANT_CHAT", json.dumps({"model": use_model, "prompt_chars": len(prompt), "has_context": bool(context), "think": think, "stream": True}), request.client.host if request.client else "")
+
+        def generate():
+            try:
+                for chunk in assistant.chat_stream(d, prompt, history, context, model, think):
+                    yield json.dumps(chunk, ensure_ascii=False, default=str) + "\n"
+                    if isinstance(chunk, dict) and chunk.get("type") == "done":
+                        try: d.audit("ASSISTANT_OK", json.dumps({"model": chunk.get("model"), "chars": len(chunk.get("content") or ""), "stream": True}), request.client.host if request.client else "")
+                        except Exception: pass
+                    if isinstance(chunk, dict) and chunk.get("type") == "error":
+                        try: d.audit("ASSISTANT_ERR", f"stream:{str(chunk.get('error',''))[:200]}")
+                        except Exception: pass
+            except Exception as e:
+                try: d.audit("ASSISTANT_ERR", f"stream500:{type(e).__name__}:{str(e)[:200]}")
+                except Exception: pass
+                yield json.dumps({"type": "error", "error": f"{type(e).__name__}: {str(e)[:400]}"}, ensure_ascii=False) + "\n"
+
+        return StreamingResponse(generate(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # ------------------------------------------------------------ settings
     @app.get("/api/settings")
@@ -991,16 +586,44 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     raise HTTPException(status_code=400, detail=f"{key} out of range")
                 value = f
             if key in ("sdr_tx_enabled", "sdr_tx_attested", "sdr_amp", "scanlines", "sound",
-                       "map_vector", "auto_deep_index", "feed_auto_refresh", "opsec_mode"):
+                       "map_vector", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think"):
                 value = bool(value)
             if key in ("callsign", "team", "operator", "timezone", "units", "date_format",
-                       "grid_format", "accent", "tile_source", "mbtiles_path", "epoch",
-                       "position_source", "position_updated_at", "position_fix_at"):
+                       "grid_format", "accent", "tile_source", "mbtiles_path", "dem_mbtiles_path",
+                       "dem_encoding", "epoch", "position_source", "position_updated_at", "position_fix_at",
+                       "ollama_base_url", "ollama_model"):
                 value = str(value)[:500]
-            if key == "mbtiles_path" and value:
+            if key == "assistant_system_prompt":
+                value = str(value or "")[:8000]
+            if key in ("assistant_timeout_sec", "assistant_num_ctx", "assistant_max_tokens"):
+                try:
+                    iv = int(float(value))
+                except Exception:
+                    raise HTTPException(status_code=400, detail=f"{key} must be a number")
+                if key == "assistant_timeout_sec":
+                    iv = max(5, min(1800, iv))
+                if key == "assistant_num_ctx":
+                    iv = max(512, min(32768, iv))
+                if key == "assistant_max_tokens":
+                    iv = max(128, min(8192, iv))
+                value = iv
+            if key == "assistant_temperature":
+                try:
+                    fv = float(value)
+                except Exception:
+                    raise HTTPException(status_code=400, detail="assistant_temperature must be a number")
+                value = max(0.0, min(2.0, fv))
+            if key == "ollama_base_url" and value:
+                v = str(value).strip()
+                if not v.startswith(("http://", "https://")):
+                    raise HTTPException(status_code=400, detail="ollama_base_url must start with http:// or https://")
+                value = v.rstrip("/")
+            if key in ("mbtiles_path", "dem_mbtiles_path") and value:
                 p = Path(str(value)).expanduser()
                 if not p.exists() or not p.is_file():
-                    raise HTTPException(status_code=400, detail="MBTiles file does not exist")
+                    raise HTTPException(status_code=400, detail=f"{key} file does not exist")
+            if key == "dem_encoding" and value and str(value) not in ("terrarium", "mapbox", "custom"):
+                raise HTTPException(status_code=400, detail="dem_encoding must be terrarium, mapbox, or custom")
             d.set_setting(key, value)
         d.audit("SETTINGS", f"Updated: {', '.join(sorted(payload))}",
                 request.client.host if request.client else "")
@@ -1013,49 +636,6 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         except (TypeError, ValueError):
             pass
         return updated
-
-    # ----------------------------------------------------------- indicators
-    @app.get("/api/indicators")
-    def indicators(request: Request):
-        d = db(request)
-        return {"items": [dict(x) for x in d.query("SELECT * FROM indicators ORDER BY category,id")],
-                "readiness": readiness(d)}
-
-    @app.patch("/api/indicators/{indicator_id}")
-    def indicator_update(request: Request, indicator_id: int, payload: dict = Body(...)):
-        d = db(request)
-        row = d.one("SELECT * FROM indicators WHERE id=?", (indicator_id,))
-        require(bool(row), "Indicator not found", 404)
-        data = {}
-        if "status" in payload:
-            status = int(payload["status"])
-            require(0 <= status <= 3, "Status must be 0 (green), 1 (amber), 2 (red) or 3 (unknown)")
-            data["status"] = status
-        if "trend" in payload:
-            require(payload["trend"] in ("up", "down", "flat", "unknown"), "Invalid trend")
-            data["trend"] = payload["trend"]
-        if "note" in payload:
-            data["note"] = str(payload["note"])[:2000]
-        if "weight" in payload:
-            data["weight"] = max(0.1, min(10.0, float(payload["weight"])))
-        data["updated"] = utcnow()
-        d.update("indicators", indicator_id, data)
-        d.execute("INSERT INTO indicator_history(indicator_id,ts,status,note) VALUES(?,?,?,?)",
-                  (indicator_id, utcnow(), int(data.get("status", row["status"])), data.get("note", "")))
-        d.audit("INDICATOR", f"{row['name']} -> {data}")
-        return {"ok": True, "readiness": readiness(d),
-                "item": dict(d.one("SELECT * FROM indicators WHERE id=?", (indicator_id,)))}
-
-    @app.post("/api/indicators/reset")
-    def indicators_reset(request: Request):
-        d = db(request)
-        require(d.one("SELECT count(*) c FROM indicators")["c"] == 0, "Indicators already exist")
-        from .db import INDICATOR_SEED
-        for category, name, weight in INDICATOR_SEED:
-            d.execute("INSERT INTO indicators(category,name,weight,status,trend,note,updated) "
-                      "VALUES(?,?,?,3,'unknown','',?)", (category, name, weight, utcnow()))
-        d.audit("INDICATORS_RESET", "Seed indicators restored")
-        return {"items": [dict(x) for x in d.query("SELECT * FROM indicators ORDER BY category,id")]}
 
     # ------------------------------------------------------------- records
     def _table(name: str) -> dict:
@@ -1261,7 +841,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     # ---------------------------------------------------------------- feeds
     @app.get("/api/feeds")
     def feeds_list(request: Request):
-        return {"feeds": feeds.list_feeds(db(request)), "summary": feeds.summary(db(request))}
+        d = db(request)
+        feed_rows = feeds.list_feeds(d)
+        return {"feeds": feed_rows, "summary": feeds.summary(d, feed_rows)}
 
     @app.post("/api/feeds/refresh")
     async def feeds_refresh(request: Request, payload: dict = Body(default={})):
@@ -1403,13 +985,19 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     "url": ev.get("url") or "", "summary": ev.get("summary") or "",
                 },
             })
+        maritime = intel.maritime_positions(d, limit=400)
+        cables = intel.cable_features(d, limit=1500)
+        cctv = intel.cctv_features(d, limit=1500)
         return {
             "type": "FeatureCollection",
             "generated_at": utcnow(),
-            "summary": intel.map_summary(events),
+            "summary": {**intel.map_summary(events), "maritime": len(maritime), "cables": len(cables), "cctv": len(cctv)},
             "features": features,
             "aircraft": intel.live_aircraft(db(request), limit=60),
             "satellites": intel.live_satellites(db(request), lat, lon, limit=30),
+            "maritime": maritime,
+            "cables": cables,
+            "cctv": cctv,
         }
 
     # -------------------------------------------------------------- library
@@ -1426,7 +1014,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
 
     @app.get("/api/library/search")
     def library_search(request: Request, q: str = "", category: str = "",
-                       limit: int = Query(40, ge=1, le=200)):
+                       limit: int = Query(40, ge=1, le=1000)):
         d = db(request)
         items = library.search(d, q, category or None, limit)
         return {"items": items, "query": q, "count": len(items)}
@@ -1701,6 +1289,213 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             raise HTTPException(status_code=400, detail="Unknown tile source")
         return tilecache.clear_cache(source)
 
+    # -------------------------------------------------------------- DEM / terrain (offline raster-dem tiles)
+    def _dem_mbtiles_tile(d: Database, z: int, x: int, y: int) -> bytes | None:
+        raw = d.get_setting("dem_mbtiles_path", "") or ""
+        path = Path(str(raw)).expanduser()
+        if not raw or not path.is_file():
+            return None
+        try:
+            import sqlite3 as _sqlite3
+            uri = f"file:{path}?mode=ro"
+            with _sqlite3.connect(uri, uri=True, timeout=2) as conn:
+                tile_row = (1 << z) - 1 - y
+                row = conn.execute(
+                    "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                    (z, x, tile_row),
+                ).fetchone()
+            return bytes(row[0]) if row else None
+        except Exception:
+            return None
+
+    @app.get("/api/map/dem/status")
+    def dem_status(request: Request):
+        d = db(request)
+        s = d.all_settings()
+        dem_path = Path(str(s.get("dem_mbtiles_path") or "")).expanduser()
+        dem_dir = config.MAP_TILE_DIR / "dem"
+        has_mbtiles = bool(str(s.get("dem_mbtiles_path") or "").strip()) and dem_path.is_file()
+        has_dir = dem_dir.is_dir() and any(dem_dir.rglob("*.png")) or (dem_dir.is_dir() and any(dem_dir.rglob("*.webp")))
+        available = bool(s.get("dem_enabled", True)) and (has_mbtiles or has_dir)
+        return {
+            "available": available,
+            "enabled": bool(s.get("dem_enabled", True)),
+            "encoding": str(s.get("dem_encoding") or "terrarium"),
+            "mbtiles": has_mbtiles,
+            "directory": has_dir,
+            "dem_mbtiles_path": str(s.get("dem_mbtiles_path") or ""),
+            "tile_url": "/api/map/dem/tiles/{z}/{x}/{y}.png" if available else None,
+            "note": "Provide local raster-dem tiles (Terrarium/Mapbox PNG) via dem_mbtiles_path or maps/tiles/dem/{z}/{x}/{y}.png. No elevation data is invented.",
+        }
+
+    @app.get("/api/map/dem/tiles/{z}/{x}/{y}.png")
+    def dem_tile(z: int, x: int, y: int, request: Request):
+        require(0 <= z <= 22 and x >= 0 and y >= 0, "Invalid tile coordinates")
+        d = db(request)
+        s = d.all_settings()
+        if not bool(s.get("dem_enabled", True)):
+            raise HTTPException(status_code=404, detail="DEM disabled")
+        # Filesystem DEM cache
+        for ext in ("png", "webp", "jpg"):
+            path = config.MAP_TILE_DIR / "dem" / str(z) / str(x) / f"{y}.{ext}"
+            if path.is_file():
+                try:
+                    data = path.read_bytes()
+                    return _tile_response(data, "dem")
+                except Exception:
+                    pass
+        data = _dem_mbtiles_tile(d, z, x, y)
+        if data:
+            return _tile_response(data, "dem-mbtiles")
+        raise HTTPException(status_code=404, detail="DEM tile not cached")
+
+    # -------------------------------------------------------------- map overlays (cacheable wind/rain/cloud)
+    def _overlay_row(d: Database, kind: str) -> dict | None:
+        row = d.one("SELECT * FROM map_overlay_cache WHERE kind=?", (kind,))
+        if not row:
+            return None
+        payload = None
+        if row["payload"]:
+            try:
+                payload = json.loads(row["payload"])
+            except Exception:
+                payload = None
+        meta = {}
+        if row["meta"]:
+            try:
+                meta = json.loads(row["meta"])
+            except Exception:
+                meta = {}
+        return {
+            "kind": row["kind"], "name": row["name"], "fetched_at": row["fetched_at"],
+            "status": row["status"], "error": row["error"], "meta": meta, "data": payload,
+        }
+
+    @app.get("/api/map/overlays/status")
+    def overlays_status(request: Request):
+        d = db(request)
+        kinds = ["wind", "rain", "cloud"]
+        rows = []
+        for k in kinds:
+            r = _overlay_row(d, k)
+            if r:
+                r.pop("data", None)
+                r["has_data"] = bool(d.one("SELECT 1 FROM map_overlay_cache WHERE kind=? AND payload IS NOT NULL AND payload!=''", (k,)))
+                rows.append(r)
+            else:
+                rows.append({"kind": k, "name": k.title(), "fetched_at": None, "status": "NEVER", "error": None, "meta": {}, "has_data": False})
+        return {"overlays": rows, "generated_at": utcnow()}
+
+    @app.get("/api/map/overlays/{kind}")
+    def overlay_get(kind: str, request: Request):
+        require(kind in ("wind", "rain", "cloud"), "Unknown overlay kind")
+        d = db(request)
+        row = _overlay_row(d, kind)
+        if not row or not row.get("data"):
+            return {"kind": kind, "fetched_at": None, "status": "NEVER", "meta": {}, "data": None,
+                    "note": "Overlay not cached. Use refresh to fetch/cache data when online."}
+        return {"kind": kind, "fetched_at": row.get("fetched_at"), "status": row.get("status"), "meta": row.get("meta") or {}, "data": row["data"]}
+
+    @app.post("/api/map/overlays/refresh")
+    def overlay_refresh(body: dict = Body(default={}), request: Request = None):
+        # Operator-triggered, online-only fetch around current/selected position. Cached in DB for offline reuse.
+        kind = str((body or {}).get("kind") or "all")
+        kinds = ["wind", "rain", "cloud"] if kind == "all" else [kind]
+        for k in kinds:
+            require(k in ("wind", "rain", "cloud"), f"Unknown overlay kind: {k}")
+        d = db(request)
+        s = d.all_settings()
+        try:
+            lat = float((body or {}).get("lat", s.get("lat")))
+            lon = float((body or {}).get("lon", s.get("lon")))
+        except Exception:
+            lat, lon = 0.0, 0.0
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (abs(lat) < 1e-9 and abs(lon) < 1e-9):
+            raise HTTPException(status_code=400, detail="Valid lat/lon (or configured operator position) required for overlay refresh")
+        span = max(1.0, min(30.0, float((body or {}).get("span_deg") or 8.0)))
+        steps = max(3, min(9, int((body or {}).get("steps") or 5)))
+        results = []
+        try:
+            import requests as _requests
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"requests unavailable: {e}")
+        lats = [lat + (i - (steps - 1) / 2) * (span / max(1, steps - 1)) for i in range(steps)]
+        lons = [lon + (i - (steps - 1) / 2) * (span / max(1, steps - 1)) for i in range(steps)]
+        lat_s = ",".join(f"{v:.4f}" for v in lats)
+        lon_s = ",".join(f"{v:.4f}" for v in lons)
+        for k in kinds:
+            try:
+                if k == "wind":
+                    url = ("https://api.open-meteo.com/v1/forecast?latitude=" + lat_s + "&longitude=" + lon_s +
+                           "&current=wind_speed_10m,wind_direction_10m,wind_gusts_10m&wind_speed_unit=kmh&timezone=UTC")
+                elif k == "rain":
+                    url = ("https://api.open-meteo.com/v1/forecast?latitude=" + lat_s + "&longitude=" + lon_s +
+                           "&current=precipitation,rain,showers,cloud_cover&timezone=UTC")
+                else:
+                    url = ("https://api.open-meteo.com/v1/forecast?latitude=" + lat_s + "&longitude=" + lon_s +
+                           "&current=cloud_cover,relative_humidity_2m&timezone=UTC")
+                resp = _requests.get(url, headers={"User-Agent": "DarkSecNightwatch/2.0", "Accept": "application/json"}, timeout=20)
+                resp.raise_for_status()
+                payload = resp.json()
+                # Open-Meteo returns arrays for multi-point current? Depending on API shape; normalize to per-point list.
+                def _arr(v, n):
+                    if isinstance(v, list):
+                        return v + [None] * max(0, n - len(v))
+                    return [v] * n
+                cur = payload.get("current") or {}
+                # For multi-lat/lon, API may return arrays at top-level in some forms; handle common case.
+                # Fallback: if scalar, replicate; if we got a single point, sample center only.
+                pts = []
+                # Try multi-point: build grid by pairing index-wise if arrays align with lat_s/lon_s count
+                lat_list = payload.get("latitude")
+                lon_list = payload.get("longitude")
+                cur_list = payload.get("current")
+                if isinstance(lat_list, list) and isinstance(lon_list, list) and isinstance(cur_list, list):
+                    for i, (la, lo, cc) in enumerate(zip(lat_list, lon_list, cur_list)):
+                        if not isinstance(cc, dict):
+                            continue
+                        pts.append({"lat": float(la), "lon": float(lo), **{kk: cc.get(kk) for kk in cc.keys()}})
+                elif isinstance(lat_list, list) and isinstance(lon_list, list) and isinstance(cur, dict):
+                    # current may be dict of arrays
+                    keys = list(cur.keys())
+                    for i, (la, lo) in enumerate(zip(lat_list, lon_list)):
+                        p = {"lat": float(la), "lon": float(lo)}
+                        for kk in keys:
+                            vv = cur.get(kk)
+                            p[kk] = vv[i] if isinstance(vv, list) and i < len(vv) else vv
+                        pts.append(p)
+                else:
+                    # single point fallback
+                    la1 = payload.get("latitude", lat)
+                    lo1 = payload.get("longitude", lon)
+                    if isinstance(la1, list): la1 = la1[0] if la1 else lat
+                    if isinstance(lo1, list): lo1 = lo1[0] if lo1 else lon
+                    pts.append({"lat": float(la1), "lon": float(lo1), **(cur if isinstance(cur, dict) else {})})
+                features = []
+                for p in pts:
+                    pla, plo = float(p.get("lat", 0)), float(p.get("lon", 0))
+                    props = {"kind": k, "source": "Open-Meteo", "time": payload.get("current", {}).get("time") if isinstance(payload.get("current"), dict) else utcnow()}
+                    if k == "wind":
+                        props.update({"wind_kmh": p.get("wind_speed_10m"), "wind_dir": p.get("wind_direction_10m"), "gust_kmh": p.get("wind_gusts_10m")})
+                    elif k == "rain":
+                        props.update({"precip_mm": p.get("precipitation"), "rain_mm": p.get("rain"), "showers_mm": p.get("showers"), "cloud_pct": p.get("cloud_cover")})
+                    else:
+                        props.update({"cloud_pct": p.get("cloud_cover"), "humidity_pct": p.get("relative_humidity_2m")})
+                    features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [plo, pla]}, "properties": props})
+                data = {"type": "FeatureCollection", "features": features, "meta": {"center": [lat, lon], "span_deg": span, "steps": steps, "source": "Open-Meteo", "kind": k}}
+                d.execute("INSERT INTO map_overlay_cache(kind,name,fetched_at,status,payload,error,meta) VALUES(?,?,?,?,?,?,?) "
+                          "ON CONFLICT(kind) DO UPDATE SET name=excluded.name,fetched_at=excluded.fetched_at,status='OK',payload=excluded.payload,error=NULL,meta=excluded.meta",
+                          (k, f"{k.title()} overlay (cached)", utcnow(), "OK", json.dumps(data), json.dumps(data.get("meta") or {})))
+                results.append({"kind": k, "status": "OK", "count": len(features)})
+            except Exception as exc:
+                d.execute("INSERT INTO map_overlay_cache(kind,name,fetched_at,status,payload,error,meta) VALUES(?,?,?,?,NULL,?,?) "
+                          "ON CONFLICT(kind) DO UPDATE SET fetched_at=excluded.fetched_at,status='ERROR',error=excluded.error",
+                          (k, f"{k.title()} overlay", utcnow(), "ERROR", str(exc)[:400], json.dumps({"center": [lat, lon]})))
+                results.append({"kind": k, "status": "ERROR", "error": str(exc)[:300]})
+        d.audit("MAP_OVERLAY_REFRESH", json.dumps({"kinds": kinds, "lat": lat, "lon": lon}), request.client.host if request and request.client else "")
+        return {"ok": True, "results": results, "generated_at": utcnow()}
+
+
     @app.get("/api/map/coords")
     def map_coords(request: Request, lat: float, lon: float):
         require(-90 <= lat <= 90 and -180 <= lon <= 180, "Invalid coordinates")
@@ -1875,9 +1670,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 autosync.engine.position_changed()
         except (TypeError, ValueError):
             pass
-        d.audit("PHONE_GPS_ACCEPT", f"phone GPS fix accepted; estimated accuracy={float(fix['accuracy_m']):.1f}m")
-        phonegps.pairing.stop()
-        return {k: fix.get(k) for k in ("lat", "lon", "accuracy_m", "timestamp", "received_at")} | {"saved": True}
+        d.audit("PHONE_GPS_ACCEPT", f"phone GPS fix accepted; estimated accuracy={float(fix['accuracy_m']):.1f}m; listener kept open")
+        return {k: fix.get(k) for k in ("lat", "lon", "accuracy_m", "timestamp", "received_at")} | {"saved": True, "listener_open": True}
 
     @app.post("/api/phone-gps/stop")
     def phone_gps_stop(request: Request):
@@ -2062,6 +1856,13 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         return {"ok": True}
 
     # ------------------------------------------------------------------ SDR
+    @app.get("/api/sdr/presets")
+    def sdr_presets():
+        path = config.PKG_DIR / "data" / "sdr_presets.json"
+        if not path.exists():
+            return {"presets": [], "note": "sdr_presets.json not found"}
+        return _cached_json(path)
+
     @app.get("/api/sdr/devices")
     def sdr_devices(force: bool = False):
         return hardware(force=force)

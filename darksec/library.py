@@ -7,14 +7,11 @@ stays responsive.
 from __future__ import annotations
 
 import html
-import os
 import re
 import shutil
 import subprocess
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config

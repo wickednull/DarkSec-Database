@@ -7,7 +7,7 @@ table, a propagation prediction or a radiation instrument.
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 # --------------------------------------------------------------------------
 # Weather

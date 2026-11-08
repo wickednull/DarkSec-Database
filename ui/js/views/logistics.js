@@ -7,6 +7,7 @@ import {
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { store } from "../store.js";
 import { kv, downloadText, readTextFile, printText } from "./shared.js";
+import * as U from "../units.js";
 
 let lastTab = "mission";
 let currentRoot = null;
@@ -412,9 +413,9 @@ function movementSection(root, waypoints) {
       const back = (Number(leg.bearing_deg) + 180) % 360;
       out.replaceChildren(
         kv([
-          ["DISTANCE", `${fmt.num(km, 2)} km`],
+          ["DISTANCE", U.distKm(km, 2)],
           ["BEARING", `${fmt.num(leg.bearing_deg, 1)}° · back ${fmt.num(back, 1)}°`],
-          ["PLANNED PACE", `${fmt.num(kmh, 1)} km/h · terrain ×${fmt.num(factor, 2)}`],
+          ["PLANNED PACE", `${U.speedKmh(kmh, 1)} · terrain ×${fmt.num(factor, 2)}`],
           ["MOVING TIME", fmt.duration(movingMin * 60)],
           ["REST", `${fmt.num(restMin, 0)} min`],
           ["TOTAL", fmt.duration(totalMin * 60)],

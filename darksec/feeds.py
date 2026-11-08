@@ -8,42 +8,117 @@ age indicator.
 from __future__ import annotations
 
 import csv
+import heapq
+import html
 import io
 import json
 import re
+import threading
 import xml.etree.ElementTree as ET
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 import requests
 
 from .db import Database, utcnow
 
-UA = {"User-Agent": "FieldConsole/2.0"}
+UA = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36 DarkSecNightwatch/2.0",
+    "Accept": "text/plain,text/xml,application/xml,application/json,*/*;q=0.8",
+}
 TIMEOUT = 15
 UCDP_TIMEOUT = 90
+
+CELESTRAK_HEADERS = [
+    {
+        "User-Agent": "DarkSecNightwatch/2.0 (+https://github.com/darksec; CelesTrak TLE cache)",
+        "Accept": "text/plain,*/*;q=0.8",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        "Accept": "text/plain,*/*;q=0.8",
+    },
+]
 
 # Fetch-age limits and data-age limits are different things. A feed can fetch
 # successfully while every item in it is months old (Safecast, WHO archives).
 # Both are surfaced so the UI never presents an old snapshot as current.
 STALE_AFTER = {
+    "gdacs": 3 * 3600,
     "gdelt_conflict": 2 * 3600,
+    "rsoe_edis": 3 * 3600,
     "ucdp_candidate": 50 * 86400,
     "celestrak_tle": 24 * 3600,
+    "crisisgroup": 24 * 3600,
+    "war_on_the_rocks": 24 * 3600,
     "smithsonian_volcano": 14 * 86400,
     "who_don": 14 * 86400,
     "safecast": 30 * 86400,
 }
 DATA_STALE_AFTER = {
+    "gdacs": 48 * 3600,
     "gdelt_conflict": 3 * 3600,
+    "rsoe_edis": 4 * 3600,
     "ucdp_candidate": 50 * 86400,
     "celestrak_tle": 24 * 3600,
+    "crisisgroup": 21 * 86400,
+    "war_on_the_rocks": 14 * 86400,
     "smithsonian_volcano": 14 * 86400,
     "who_don": 14 * 86400,
     "safecast": 30 * 86400,
 }
 DEFAULT_STALE_AFTER = 6 * 3600
+
+# Positional/telemetry feeds are useful as map layers but their timestamps are
+# not meaningful "latest intelligence" headlines; exclude them from summaries.
+SUMMARY_SKIP_KINDS = {"celestrak", "opensky", "air_quality", "weather",
+                      "maritime", "ais", "cables", "cctv", "geojson"}
+
+# Feed payloads can be several megabytes (CelesTrak carries ~16k TLEs,
+# OpenSky thousands of positions). Parsing them and walking every item's
+# timestamp on each API request made the dashboard and intel views CPU-bound.
+# Cache the decoded payload plus its newest timestamp, keyed by the feed row's
+# fetch metadata and payload length, so a refresh invalidates the entry.
+_PAYLOAD_CACHE: dict[tuple, tuple[dict | None, list[dict], datetime | None]] = {}
+_PAYLOAD_CACHE_LOCK = threading.Lock()
+
+
+def _decode_payload(db: Database, row) -> tuple[dict | None, list[dict], datetime | None]:
+    # Avoid pulling the full (sometimes multi-megabyte) payload blob on every
+    # request: list_feeds selects length(payload) as a cheap version marker and
+    # this helper only reads the blob on a cache miss.
+    key = (row["id"], row["fetched_at"], row["status"], row["url"],
+           row["payload_len"])
+    with _PAYLOAD_CACHE_LOCK:
+        cached = _PAYLOAD_CACHE.get(key)
+    if cached is not None:
+        return cached
+    blob = db.one("SELECT payload FROM feeds WHERE id=?", (row["id"],))
+    raw = (blob["payload"] if blob else "") or ""
+    payload = None
+    items: list[dict] = []
+    if raw:
+        try:
+            payload = json.loads(raw)
+            items = payload.get("items") or []
+        except Exception:
+            payload = None
+            items = []
+    latest_time = None
+    for item in items:
+        parsed = parse_time(item.get("time"))
+        if parsed is not None and (latest_time is None or parsed > latest_time):
+            latest_time = parsed
+    entry = (payload, items, latest_time)
+    with _PAYLOAD_CACHE_LOCK:
+        # Keep only the current blob for this feed; older refreshes are dead.
+        for old in [k for k in _PAYLOAD_CACHE if k[0] == row["id"] and k != key]:
+            _PAYLOAD_CACHE.pop(old, None)
+        _PAYLOAD_CACHE[key] = entry
+    return entry
 
 
 def parse_time(value) -> datetime | None:
@@ -103,6 +178,14 @@ def _age_seconds(value) -> int | None:
     if parsed is None:
         return None
     return max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+
+
+def _sanitize(text, limit: int = 500) -> str:
+    """Strip HTML/entities and collapse whitespace for display and storage."""
+    clean = re.sub(r"(?s)<[^>]+>", " ", str(text or ""))
+    clean = html.unescape(clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean[:limit]
 
 
 def _parse_usgs(payload: dict) -> list[dict]:
@@ -334,7 +417,6 @@ def _parse_opensky(payload: dict) -> list[dict]:
             continue
         callsign = str(st[1] or "").strip()
         country = str(st[2] or "").strip()
-        name = callsign or country or "AIRCRAFT"
         items.append({
             "title": callsign or country or "AIRCRAFT",
             "time": datetime.fromtimestamp(int(st[3] or 0), tz=timezone.utc).isoformat() if st[3] else utcnow(),
@@ -424,7 +506,7 @@ def _parse_air_quality(payload: dict) -> list[dict]:
         "source": "Open-Meteo",
         "severity": sev,
         "url": "https://air-quality-api.open-meteo.com/",
-        "summary": f"Open-Meteo air quality index (US AQI) for the operator position. "
+        "summary": "Open-Meteo air quality index (US AQI) for the operator position. "
                    "Apply local weather derating; do not use for evacuation decisions alone.",
     })
     return items
@@ -495,7 +577,12 @@ def _parse_gdacs(payload: dict) -> list[dict]:
         link = urls.get("report") if isinstance(urls, dict) else None
         items.append({
             "title": p.get("name") or p.get("description") or "Disaster alert",
-            "time": p.get("todate") or p.get("fromdate") or p.get("datemodified"),
+            # GDACS events can persist for long periods; datemodified reflects the
+            # latest alert update and is the right freshness signal for cache status.
+            "time": p.get("datemodified") or p.get("todate") or p.get("fromdate"),
+            "from_date": p.get("fromdate"),
+            "to_date": p.get("todate"),
+            "date_modified": p.get("datemodified"),
             "lat": coords[1] if len(coords) > 1 else None,
             "lon": coords[0] if coords else None,
             "severity": sev,
@@ -835,9 +922,267 @@ def _refresh_ucdp(db: Database, row) -> list[dict]:
     return items
 
 
+def _geom_representative_point(geom):
+    """Best-effort [lon, lat] for non-Point geometries so map layers can place a marker."""
+    if not isinstance(geom, dict):
+        return None
+    gtype = geom.get("type")
+    coords = geom.get("coordinates")
+    try:
+        if gtype == "Point" and isinstance(coords, (list, tuple)) and len(coords) >= 2:
+            return [float(coords[0]), float(coords[1])]
+        pts = []
+        def walk(v, depth=0):
+            if depth > 5 or len(pts) > 500:
+                return
+            if isinstance(v, (list, tuple)):
+                if len(v) >= 2 and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v[:2]):
+                    pts.append((float(v[0]), float(v[1])))
+                else:
+                    for x in v:
+                        walk(x, depth + 1)
+        walk(coords)
+        if not pts:
+            return None
+        # Use a middle sample to stay on-feature for lines; average as fallback.
+        mid = pts[len(pts) // 2]
+        return [mid[0], mid[1]]
+    except Exception:
+        return None
+
+def _parse_geojson_items(payload, source: str, kind: str, default_severity: str = "INFO") -> list[dict]:
+    """Scaffold parser for GeoJSON FeatureCollection or {items:[...]} feeds.
+    Expected item fields (best-effort): title/name, lat/lon or geometry Point,
+    time/timestamp, url, summary/description, severity, plus pass-through extras."""
+    items = []
+    raw_items = []
+    if isinstance(payload, dict) and payload.get("type") == "FeatureCollection":
+        raw_items = payload.get("features") or []
+        for feat in raw_items:
+            if not isinstance(feat, dict):
+                continue
+            props = feat.get("properties") or {}
+            geom = feat.get("geometry") or {}
+            coords = geom.get("coordinates") if geom.get("type") == "Point" else None
+            lat = lon = None
+            if isinstance(coords, (list, tuple)) and len(coords) >= 2:
+                try:
+                    lon, lat = float(coords[0]), float(coords[1])
+                except (TypeError, ValueError):
+                    lat = lon = None
+            if lat is None:
+                rp = _geom_representative_point(geom)
+                if rp and len(rp) >= 2:
+                    lon, lat = float(rp[0]), float(rp[1])
+            if lat is None:
+                for lk in ("lat", "latitude"):
+                    for ok in ("lon", "lng", "longitude"):
+                        if props.get(lk) is not None and props.get(ok) is not None:
+                            try:
+                                lat, lon = float(props[lk]), float(props[ok])
+                            except (TypeError, ValueError):
+                                pass
+            title = props.get("title") or props.get("name") or props.get("label") or props.get("id") or f"{kind} feature"
+            t = _iso_time(props.get("time") or props.get("timestamp") or props.get("updated") or props.get("date")) or ""
+            it = {
+                "title": str(title), "time": t, "source": source,
+                "severity": str(props.get("severity") or default_severity).upper(),
+                "url": props.get("url") or props.get("link") or "",
+                "summary": _sanitize(props.get("summary") or props.get("description") or "", 500),
+                "kind": kind,
+            }
+            if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
+                it["lat"], it["lon"] = lat, lon
+            for k in ("mmsi", "imo", "callsign", "vessel", "speed_kn", "course_deg", "heading_deg",
+                      "alt_m", "cable_id", "capacity", "operator", "camera_id", "status", "feed_url", "id"):
+                if props.get(k) is not None:
+                    it[k] = props.get(k)
+            items.append(it)
+        return items
+    if isinstance(payload, dict):
+        raw_items = payload.get("items") or payload.get("data") or payload.get("results") or []
+    elif isinstance(payload, list):
+        raw_items = payload
+    for it in raw_items:
+        if not isinstance(it, dict):
+            continue
+        lat = lon = None
+        for lk in ("lat", "latitude"):
+            for ok in ("lon", "lng", "longitude"):
+                if it.get(lk) is not None and it.get(ok) is not None:
+                    try:
+                        lat, lon = float(it[lk]), float(it[ok])
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            if lat is not None:
+                break
+        geom = it.get("geometry") or {}
+        coords = geom.get("coordinates") if isinstance(geom, dict) and geom.get("type") == "Point" else None
+        if lat is None and isinstance(coords, (list, tuple)) and len(coords) >= 2:
+            try:
+                lon, lat = float(coords[0]), float(coords[1])
+            except (TypeError, ValueError):
+                pass
+        if lat is None and isinstance(geom, dict):
+            rp = _geom_representative_point(geom)
+            if rp and len(rp) >= 2:
+                lon, lat = float(rp[0]), float(rp[1])
+        title = it.get("title") or it.get("name") or it.get("label") or it.get("mmsi") or it.get("id") or f"{kind} item"
+        row = {
+            "title": str(title),
+            "time": _iso_time(it.get("time") or it.get("timestamp") or it.get("updated") or it.get("date")) or "",
+            "source": source,
+            "severity": str(it.get("severity") or default_severity).upper(),
+            "url": it.get("url") or it.get("link") or "",
+            "summary": _sanitize(it.get("summary") or it.get("description") or "", 500),
+            "kind": kind,
+        }
+        if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
+            row["lat"], row["lon"] = lat, lon
+        for k in ("mmsi", "imo", "callsign", "vessel", "speed_kn", "course_deg", "heading_deg",
+                  "alt_m", "cable_id", "capacity", "operator", "camera_id", "status", "feed_url", "id"):
+            if it.get(k) is not None:
+                row[k] = it.get(k)
+        items.append(row)
+    return items
+
+
+_RSOE_CARD_RE = re.compile(
+    r'<div class="event-card\s+(\w+)"[^>]*>.*?'
+    r'<h5 class="title">\s*(.*?)\s*</h5>.*?'
+    r'<td class="eventDate">\s*(.*?)\s*</td>.*?'
+    r'<td class="location">\s*(.*?)\s*</td>.*?'
+    r'<td class="details">\s*<a href="([^"]+)"',
+    re.S,
+)
+_RSOE_SEVERITY = {"red": "CRITICAL", "orange": "SEVERE", "yellow": "ALERT", "blue": "INFO"}
+_RSOE_SEVERITY_RANK = {"CRITICAL": 0, "SEVERE": 1, "ALERT": 2, "INFO": 3}
+
+
+def _parse_rsoe(text: str, source: str = "RSOE EDIS") -> list[dict]:
+    """Parse the public RSOE EDIS event-list HTML.
+
+    The list page embeds category headings followed by event cards containing
+    title, UTC date, location, colour-coded severity and a details URL. The
+    list itself has no coordinates, so _refresh_rsoe() enriches the highest
+    priority cards from their detail pages.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for chunk in str(text or "").split('<h4 class="categoryNameMobil">')[1:]:
+        raw_category, _, rest = chunk.partition("</h4>")
+        category = _sanitize(raw_category, 80)
+        for match in _RSOE_CARD_RE.finditer(rest):
+            colour, title, date, location, url = match.groups()
+            title = _sanitize(title, 300)
+            url = url.strip()
+            event_id = ""
+            id_match = re.search(r"/details/(\d+)", url)
+            if id_match:
+                event_id = id_match.group(1)
+            if not title or (event_id and event_id in seen):
+                continue
+            if event_id:
+                seen.add(event_id)
+            place = _sanitize(location, 160)
+            summary = f"{category} · {place}" if category else place
+            out.append({
+                "id": event_id or title,
+                "title": title,
+                "time": _iso_time(date) or "",
+                "source": source,
+                "severity": _RSOE_SEVERITY.get(colour.lower(), "INFO"),
+                "url": url,
+                "summary": summary[:500],
+                "kind": "rsoe",
+                "category": category,
+                "location": place,
+            })
+
+    def _ts(value):
+        parsed = parse_time(value)
+        return parsed.timestamp() if parsed else 0.0
+
+    out.sort(key=lambda item: (_RSOE_SEVERITY_RANK.get(item.get("severity"), 9), -_ts(item.get("time"))))
+    return out[:400]
+
+
+def _get_text_with_fallbacks(url: str, header_sets: list[dict], timeout: int = TIMEOUT) -> str:
+    last_exc: Exception | None = None
+    for headers in header_sets:
+        try:
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            return resp.text
+        except requests.HTTPError as exc:
+            last_exc = exc
+            status = getattr(exc.response, "status_code", None)
+            if status in (403, 429) and headers is not header_sets[-1]:
+                continue
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if headers is not header_sets[-1]:
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("request failed")
+
+
+def _rsoe_enrich(items: list[dict], limit: int = 40) -> None:
+    """Fetch detail pages for the most significant events to add coordinates.
+
+    One request per event is expensive, so only the top few by severity/time
+    are enriched. Unenriched events still appear in the cached intel list.
+    """
+    targets = items[:max(0, limit)]
+
+    def fetch(item: dict) -> None:
+        try:
+            resp = requests.get(item["url"], headers=UA, timeout=10)
+            resp.raise_for_status()
+            text = resp.text
+            point = re.search(
+                r'id="location"[^>]*value="POINT\(\s*([-0-9.]+)\s+([-0-9.]+)\s*\)"',
+                text,
+            )
+            if point:
+                lon, lat = float(point.group(1)), float(point.group(2))
+                if -90 <= lat <= 90 and -180 <= lon <= 180:
+                    item["lat"], item["lon"] = lat, lon
+            desc = re.search(r'<div class="event-description">\s*<p>(.*?)</p>', text, re.S)
+            if desc:
+                detail = _sanitize(desc.group(1), 400)
+                if detail and detail != "-":
+                    base = item.get("summary") or ""
+                    item["summary"] = (detail + (f" · {base}" if base else ""))[:500]
+        except Exception:
+            return
+
+    if targets:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            list(pool.map(fetch, targets))
+
+
+def _refresh_rsoe(db: Database, row) -> list[dict]:
+    """Fetch the RSOE EDIS list page and enrich a subset with coordinates."""
+    url = (row["url"] or "").strip() or "https://rsoe-edis.org/eventList"
+    resp = requests.get(url, headers=UA, timeout=TIMEOUT)
+    resp.raise_for_status()
+    items = _parse_rsoe(resp.text, row["name"])
+    if not items:
+        raise RuntimeError("RSOE EDIS returned no parsable events")
+    _rsoe_enrich(items, limit=40)
+    return items
+
+
 def _normalize(kind: str, raw: str, source: str = "RSS") -> list[dict]:
     if kind == "rss":
         return _parse_rss(raw, source)
+    if kind == "rsoe":
+        return _parse_rsoe(raw, source)
     payload = json.loads(raw)
     if kind == "usgs":
         return _parse_usgs(payload)
@@ -861,6 +1206,14 @@ def _normalize(kind: str, raw: str, source: str = "RSS") -> list[dict]:
         return _parse_eonet(payload)
     if kind == "safecast":
         return _parse_safecast(payload)
+    if kind in ("maritime", "ais", "cables", "cctv", "geojson"):
+        return _parse_geojson_items(payload, source, kind)
+    # Unknown structured kind: best-effort scaffold parse.
+    if isinstance(payload, (dict, list)):
+        try:
+            return _parse_geojson_items(payload, source, kind)
+        except Exception:
+            return []
     return []
 
 
@@ -869,11 +1222,16 @@ def _feed_url(db: Database, row) -> str:
     fid = row["id"]
     url = row["url"]
     s = db.all_settings()
+    lat_raw = s.get("lat")
+    lon_raw = s.get("lon")
     try:
-        lat = float(s.get("lat") if s.get("lat") is not None else 0.0)
-        lon = float(s.get("lon") if s.get("lon") is not None else 0.0)
+        lat = float(lat_raw) if lat_raw is not None and str(lat_raw).strip() != "" else None
+        lon = float(lon_raw) if lon_raw is not None and str(lon_raw).strip() != "" else None
     except (TypeError, ValueError):
-        lat, lon = 0.0, 0.0
+        lat = lon = None
+    needs_position = fid in ("open_meteo_air", "open_meteo_weather", "safecast")
+    if needs_position and (lat is None or lon is None or not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0)):
+        raise ValueError("operator position is missing or invalid; set a valid latitude/longitude before refreshing this feed")
     if fid == "open_meteo_air":
         return ("https://air-quality-api.open-meteo.com/v1/air-quality"
                 f"?latitude={lat:.4f}&longitude={lon:.4f}"
@@ -895,6 +1253,182 @@ def _feed_url(db: Database, row) -> str:
         return ("https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH"
                 f"?fromDate={start}&toDate={today}&eventlist=EQ,TC,FL,VO,DR")
     return url
+
+
+def _refresh_overpass_cctv(db: Database, row) -> list[dict]:
+    """Operator-triggered OSM surveillance camera locations via Overpass (ODbL). Locations only, no previews/streams."""
+    s = db.all_settings()
+    try:
+        lat = float(s.get("lat")); lon = float(s.get("lon"))
+    except Exception:
+        lat = lon = None
+    if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("operator position is missing or invalid; set a valid latitude/longitude before refreshing CCTV locations")
+    radius_m = 25000  # 25km default; keep Overpass load reasonable
+    query = f"""[out:json][timeout:25];
+(
+  node["man_made"="surveillance"](around:{radius_m},{lat:.5f},{lon:.5f});
+  way["man_made"="surveillance"](around:{radius_m},{lat:.5f},{lon:.5f});
+  relation["man_made"="surveillance"](around:{radius_m},{lat:.5f},{lon:.5f});
+);
+out center tags;"""
+    resp = requests.post("https://overpass-api.de/api/interpreter", data={"data": query}, headers=UA, timeout=40)
+    resp.raise_for_status()
+    data = resp.json()
+    items = []
+    for el in (data.get("elements") or []):
+        tags = el.get("tags") or {}
+        ela = el.get("lat") if el.get("lat") is not None else (el.get("center") or {}).get("lat")
+        elo = el.get("lon") if el.get("lon") is not None else (el.get("center") or {}).get("lon")
+        try:
+            ela = float(ela); elo = float(elo)
+        except Exception:
+            continue
+        if not (-90 <= ela <= 90 and -180 <= elo <= 180):
+            continue
+        surveillance_type = str(tags.get("surveillance:type") or tags.get("camera:type") or tags.get("surveillance") or "surveillance")
+        camera_type = str(tags.get("camera:type") or "")
+        brand = str(tags.get("brand") or tags.get("manufacturer") or "")
+        operator_name = str(tags.get("operator") or tags.get("owner") or "")
+        direction = str(tags.get("camera:direction") or tags.get("direction") or "")
+        surveillance_zone = str(tags.get("surveillance:zone") or tags.get("surveillance:kind") or "")
+        tag_blob = " ".join(f"{k}={v}" for k, v in tags.items()).lower()
+        st_low = surveillance_type.lower()
+        is_alpr = (
+            st_low in {"alpr", "anpr", "lpr", "license_plate", "number_plate", "plate_recognition"}
+            or "alpr" in st_low or "anpr" in st_low
+            or "license_plate" in tag_blob or "number_plate" in tag_blob
+            or any(x in tag_blob for x in ("flock safety", "flock=", "brand=flock", "manufacturer=flock"))
+        )
+        is_flock_tagged = any(x in tag_blob for x in ("flock safety", "flock=", "brand=flock", "manufacturer=flock", "operator=flock"))
+        kind_label = "ALPR/surveillance camera" if is_alpr else "CCTV/surveillance camera"
+        title = tags.get("name") or tags.get("ref") or kind_label
+        if is_alpr and "alpr" not in title.lower() and "anpr" not in title.lower():
+            title = f"{title} [ALPR]"
+        summary_bits = [f"surveillance:type={surveillance_type}"] if surveillance_type else []
+        if camera_type:
+            summary_bits.append(f"camera:type={camera_type}")
+        if brand:
+            summary_bits.append(f"brand/manufacturer={brand}")
+        if operator_name:
+            summary_bits.append(f"operator={operator_name}")
+        if direction:
+            summary_bits.append(f"direction={direction}")
+        if surveillance_zone:
+            summary_bits.append(f"zone={surveillance_zone}")
+        if is_flock_tagged:
+            summary_bits.append("OSM tags mention Flock (community-mapped; verify on OSM)")
+        if not summary_bits:
+            summary_bits = [f"{k}={v}" for k, v in list(tags.items())[:8]]
+        items.append({
+            "title": title,
+            "time": _iso_time(tags.get("survey:date") or tags.get("check_date") or tags.get("source:date")) or utcnow(),
+            "source": "OpenStreetMap (Overpass, ODbL)",
+            "severity": "INFO",
+            "url": f"https://www.openstreetmap.org/{el.get('type','node')}/{el.get('id')}",
+            "summary": _sanitize("; ".join(summary_bits), 700),
+            "kind": "cctv",
+            "lat": ela, "lon": elo,
+            "camera_id": str(el.get("id")),
+            "status": tags.get("surveillance") or tags.get("camera:mount") or tags.get("man_made") or "unknown",
+            "alpr": bool(is_alpr),
+            "flock_tagged": bool(is_flock_tagged),
+            "surveillance_type": _sanitize(surveillance_type, 80),
+            "camera_type": _sanitize(camera_type, 80),
+            "brand": _sanitize(brand, 120),
+            "operator_name": _sanitize(operator_name, 120),
+            "direction": _sanitize(direction, 40),
+            "surveillance_zone": _sanitize(surveillance_zone, 80),
+        })
+    return items[:2000]
+
+
+def _refresh_local_geojson_scaffold(db: Database, row, kind: str, names: tuple[str, ...]) -> list[dict]:
+    """Load a user-provided local GeoJSON file for scaffold layers (cables, etc.)."""
+    from . import config as _config
+    candidates = []
+    for base in (_config.DATA_DIR / "maps", _config.DATA_DIR / "overlays", _config.MAP_TILE_DIR.parent / "data", _config.RESOURCE_ROOT / "maps" / "data"):
+        for name in names:
+            candidates.append(base / name)
+    for p in candidates:
+        try:
+            if p.is_file() and p.stat().st_size <= 15_000_000:
+                raw = p.read_text(encoding="utf-8", errors="ignore")
+                payload = json.loads(raw)
+                items = _parse_geojson_items(payload, row["name"], kind)
+                if items:
+                    return items
+        except Exception:
+            continue
+    raise RuntimeError("not configured: set feed URL to a GeoJSON/JSON endpoint, or place a local file at fielddata/maps/submarine-cables.geojson (or maps/data/*).")
+
+
+
+
+CABLE_GEOJSON_URLS = [
+    "https://www.submarinecablemap.com/api/v3/landing-point/landing-point-geo.json",
+    "https://www.submarinecablemap.com/api/v3/cable/cable-geo.json",
+    "https://raw.githubusercontent.com/telegeography/www.submarinecablemap.com/master/public/api/v3/landing-point/landing-point-geo.json",
+    "https://raw.githubusercontent.com/telegeography/www.submarinecablemap.com/master/web/public/api/v3/landing-point/landing-point-geo.json",
+]
+CABLE_GEOJSON_LICENSE = "TeleGeography Submarine Cable Map data (CC BY-NC-SA 3.0). Attribution required; review terms before commercial/redistributed use."
+
+def _ensure_submarine_cables_geojson() -> "Path | None":
+    """Download and cache public submarine cable/landing-point GeoJSON when missing.
+    Prefers landing points (Point features) for the current map layer; cached locally
+    for offline use after the first successful fetch."""
+    from . import config as _config
+    target = _config.DATA_DIR / "maps" / "submarine-cables.geojson"
+    try:
+        if target.is_file() and target.stat().st_size > 1024:
+            return target
+    except Exception:
+        pass
+    target.parent.mkdir(parents=True, exist_ok=True)
+    for url in CABLE_GEOJSON_URLS:
+        try:
+            resp = requests.get(url, headers=UA, timeout=45)
+            resp.raise_for_status()
+            raw = resp.text
+            payload = json.loads(raw)
+            if isinstance(payload, dict) and payload.get("type") == "FeatureCollection" and isinstance(payload.get("features"), list):
+                target.write_text(raw, encoding="utf-8")
+                return target
+            if isinstance(payload, dict) and isinstance(payload.get("features"), list):
+                payload.setdefault("type", "FeatureCollection")
+                target.write_text(json.dumps(payload), encoding="utf-8")
+                return target
+        except Exception:
+            continue
+    return target if target.is_file() else None
+
+
+def _refresh_maritime_scaffold(db: Database, row) -> list[dict]:
+    """Load operator-provided maritime/AIS data from local GeoJSON/JSON files.
+    Global real-time AIS usually requires a keyed/provider source; this makes the
+    layer work with cached/exported data or a configured GeoJSON/JSON URL."""
+    from . import config as _config
+    names = ("ais.geojson", "ais.json", "maritime.geojson", "maritime.json", "vessels.geojson", "vessels.json")
+    candidates = []
+    for base in (_config.DATA_DIR / "maps", _config.DATA_DIR / "overlays", _config.MAP_TILE_DIR.parent / "data", _config.RESOURCE_ROOT / "maps" / "data"):
+        for name in names:
+            candidates.append(base / name)
+    for p in candidates:
+        try:
+            if p.is_file() and p.stat().st_size <= 15_000_000:
+                raw = p.read_text(encoding="utf-8", errors="ignore")
+                payload = json.loads(raw)
+                items = _parse_geojson_items(payload, row["name"], "maritime")
+                if items:
+                    return items
+        except Exception:
+            continue
+    raise RuntimeError(
+        "Maritime/AIS is not configured. Provide an operator/provider GeoJSON or JSON feed URL "
+        "(Settings -> Intelligence feeds -> maritime_ais) or place a local file at "
+        "fielddata/maps/ais.geojson (or ais.json, maritime.geojson, vessels.geojson, maps/data/*). "
+        "Real-time global AIS typically requires an AIS provider/API key; exported snapshots work offline."
+    )
 
 
 def refresh(db: Database, feed_id: str | None = None) -> list[dict]:
@@ -919,21 +1453,109 @@ def refresh(db: Database, feed_id: str | None = None) -> list[dict]:
                         continue
                 except Exception:
                     pass
+            url = (row["url"] or "").strip()
+            fid = row["id"]
+            # Built-in public-source fallbacks for scaffold layers (operator-triggered, cached).
+            if not url and fid == "public_cctv":
+                items = _refresh_overpass_cctv(db, row)
+                db.execute(
+                    "UPDATE feeds SET fetched_at=?, status='OK', payload=?, error=NULL WHERE id=?",
+                    (utcnow(), json.dumps({"items": items, "fetched_at": utcnow(), "source_note": "OpenStreetMap via Overpass API (locations only; no live previews)"}), row["id"]),
+                )
+                results.append({"id": row["id"], "status": "OK", "count": len(items)})
+                continue
+            if not url and fid == "infra_cables":
+                try:
+                    items = _refresh_local_geojson_scaffold(db, row, kind="cables", names=("submarine-cables.geojson", "cables.geojson", "subsea-cables.geojson"))
+                    note = "Local GeoJSON file"
+                except Exception:
+                    cached = _ensure_submarine_cables_geojson()
+                    if not cached or not cached.is_file():
+                        raise RuntimeError("submarine cables not available: could not find a local GeoJSON file and could not download the public dataset (check connectivity). You can also place fielddata/maps/submarine-cables.geojson")
+                    items = _parse_geojson_items(json.loads(cached.read_text(encoding="utf-8", errors="ignore")), row["name"], "cables")
+                    note = CABLE_GEOJSON_LICENSE
+                db.execute(
+                    "UPDATE feeds SET fetched_at=?, status='OK', payload=?, error=NULL WHERE id=?",
+                    (utcnow(), json.dumps({"items": items, "fetched_at": utcnow(), "source_note": note}), row["id"]),
+                )
+                results.append({"id": row["id"], "status": "OK", "count": len(items)})
+                continue
+            if not url and fid == "maritime_ais":
+                items = _refresh_maritime_scaffold(db, row)
+                db.execute(
+                    "UPDATE feeds SET fetched_at=?, status='OK', payload=?, error=NULL WHERE id=?",
+                    (utcnow(), json.dumps({"items": items, "fetched_at": utcnow(), "source_note": "Local GeoJSON/JSON file"}), row["id"]),
+                )
+                results.append({"id": row["id"], "status": "OK", "count": len(items)})
+                continue
+            if not url and row["kind"] not in ("gdelt", "ucdp", "rsoe"):
+                raise RuntimeError("feed not configured (set a source URL in feed settings/integration)")
             if row["kind"] == "gdelt":
                 items = _refresh_gdelt(db, row)
             elif row["kind"] == "ucdp":
                 items = _refresh_ucdp(db, row)
+            elif row["kind"] == "rsoe":
+                items = _refresh_rsoe(db, row)
             else:
                 url = _feed_url(db, row)
-                resp = requests.get(url, headers=UA, timeout=TIMEOUT)
-                resp.raise_for_status()
-                raw = resp.text
+                if not str(url or "").strip():
+                    # Allow local scaffold files even when resolved URL is empty
+                    if fid == "infra_cables":
+                        try:
+                            items = _refresh_local_geojson_scaffold(db, row, kind="cables", names=("submarine-cables.geojson", "cables.geojson", "subsea-cables.geojson"))
+                            note = "Local GeoJSON file"
+                        except Exception:
+                            cached = _ensure_submarine_cables_geojson()
+                            if not cached or not cached.is_file():
+                                raise RuntimeError("submarine cables not available")
+                            items = _parse_geojson_items(json.loads(cached.read_text(encoding="utf-8", errors="ignore")), row["name"], "cables")
+                            note = CABLE_GEOJSON_LICENSE
+                        db.execute("UPDATE feeds SET fetched_at=?, status='OK', payload=?, error=NULL WHERE id=?",
+                                   (utcnow(), json.dumps({"items": items, "fetched_at": utcnow(), "source_note": note}), row["id"]))
+                        results.append({"id": row["id"], "status": "OK", "count": len(items)})
+                        continue
+                    if fid == "maritime_ais":
+                        items = _refresh_maritime_scaffold(db, row)
+                        db.execute("UPDATE feeds SET fetched_at=?, status='OK', payload=?, error=NULL WHERE id=?",
+                                   (utcnow(), json.dumps({"items": items, "fetched_at": utcnow(), "source_note": "Local GeoJSON/JSON file"}), row["id"]))
+                        results.append({"id": row["id"], "status": "OK", "count": len(items)})
+                        continue
+                    raise RuntimeError("feed not configured (set a source URL in feed settings/integration)")
                 if row["kind"] == "celestrak":
-                    items = _parse_celestrak(raw)
+                    try:
+                        raw = _get_text_with_fallbacks(url, CELESTRAK_HEADERS + [UA], timeout=max(TIMEOUT, 45))
+                        items = _parse_celestrak(raw)
+                    except requests.HTTPError as exc:
+                        # CelesTrak returns 403 with this message when the TLE set
+                        # has not changed since the last successful download. That
+                        # is not a failure: the cached set is still current.
+                        if (getattr(exc.response, "status_code", None) == 403
+                                and "has not updated" in getattr(exc.response, "text", "").lower()):
+                            cached = db.one("SELECT payload FROM feeds WHERE id=?", (row["id"],))
+                            payload = {}
+                            if cached and cached["payload"]:
+                                try:
+                                    payload = json.loads(cached["payload"])
+                                except Exception:
+                                    payload = {}
+                            items = payload.get("items") or []
+                            db.execute(
+                                "UPDATE feeds SET fetched_at=?, status='OK', error=NULL WHERE id=?",
+                                (utcnow(), row["id"]),
+                            )
+                            results.append({"id": row["id"], "status": "OK", "count": len(items),
+                                            "note": "provider reports no update since last download"})
+                            continue
+                        raise
                 else:
+                    resp = requests.get(url, headers=UA, timeout=TIMEOUT)
+                    resp.raise_for_status()
+                    raw = resp.text
                     items = _normalize(row["kind"], raw, row["name"])
                 if not items and raw.lstrip().lower().startswith(("<!doctype", "<html")):
                     raise RuntimeError("provider returned an HTML page instead of a feed")
+                if not items and row["kind"] in ("weather", "air_quality"):
+                    raise RuntimeError("provider response contained no usable current conditions")
             db.execute(
                 "UPDATE feeds SET fetched_at=?, status='OK', payload=?, error=NULL WHERE id=?",
                 (utcnow(), json.dumps({"items": items, "fetched_at": utcnow()}), row["id"]),
@@ -951,15 +1573,9 @@ def refresh(db: Database, feed_id: str | None = None) -> list[dict]:
 def list_feeds(db: Database, item_limit: int | None = 30) -> list[dict]:
     now = datetime.now(timezone.utc)
     out = []
-    for row in db.query("SELECT * FROM feeds ORDER BY name"):
-        payload = None
-        items = []
-        if row["payload"]:
-            try:
-                payload = json.loads(row["payload"])
-                items = payload.get("items", [])
-            except Exception:
-                payload = None
+    for row in db.query("SELECT id,name,url,kind,fetched_at,status,error,"
+                        "length(payload) AS payload_len FROM feeds ORDER BY name"):
+        payload, items, latest_time = _decode_payload(db, row)
         age = None
         if row["fetched_at"]:
             try:
@@ -970,13 +1586,6 @@ def list_feeds(db: Database, item_limit: int | None = 30) -> list[dict]:
         # Safecast still answers HTTP 200 but its newest public measurement is
         # years old; WHO's RSS also carries a 2020 archive.
         data_age = None
-        latest_time = None
-        for item in items:
-            parsed = parse_time(item.get("time"))
-            if parsed is None:
-                continue
-            if latest_time is None or parsed > latest_time:
-                latest_time = parsed
         if latest_time is not None:
             data_age = max(0, int((now - latest_time).total_seconds()))
         status = row["status"] or "NEVER"
@@ -999,15 +1608,29 @@ def list_feeds(db: Database, item_limit: int | None = 30) -> list[dict]:
     return out
 
 
-def summary(db: Database) -> dict:
-    feeds = list_feeds(db)
-    critical = [i for f in feeds for i in f["items"] if i.get("severity") in ("CRITICAL", "SEVERE", "EXTREME")]
+def summary(db: Database, feeds: list[dict] | None = None) -> dict:
+    # The caller usually supplies a display-limited feed list. Critical counts
+    # and the latest-headline strip should still inspect every cached item, so
+    # read the full set separately (payload decoding is cached).
+    display = feeds if feeds is not None else list_feeds(db, item_limit=0)
+    full = list_feeds(db, item_limit=None)
+    # Count critical items per feed with a cap. UCDP alone can carry hundreds
+    # of monthly conflict events; showing that raw total on the dashboard is
+    # noisy and not actionable. The cap keeps the indicator meaningful while
+    # readiness scoring remains saturated for a genuinely critical picture.
+    critical_count = 0
+    for f in full:
+        n = sum(1 for i in (f.get("items") or [])
+                if str(i.get("severity") or "INFO").upper() in ("CRITICAL", "SEVERE", "EXTREME"))
+        critical_count += min(10, n)
+    headline_items = [i for f in full if f.get("kind") not in SUMMARY_SKIP_KINDS
+                      for i in (f.get("items") or [])]
+    latest = heapq.nlargest(
+        12, headline_items,
+        key=lambda x: parse_time(x.get("time")) or datetime.min.replace(tzinfo=timezone.utc),
+    )
     return {
-        "feeds": feeds,
-        "critical_count": len(critical),
-        "latest": sorted(
-            [i for f in feeds for i in f["items"]],
-            key=lambda x: x.get("time") or "",
-            reverse=True,
-        )[:12],
+        "feeds": display,
+        "critical_count": critical_count,
+        "latest": latest,
     }

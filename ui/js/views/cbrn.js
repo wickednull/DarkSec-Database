@@ -7,6 +7,7 @@ import {
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { calculatorGrid } from "../calculators.js";
 import { kv, referenceSection, positionConfidence } from "./shared.js";
+import * as U from "../units.js";
 
 const CBRN_AUTO_MS = 60_000;
 let cbrnTimer = null;
@@ -88,7 +89,7 @@ function cbrnLivePanel(live) {
   radiation.appendChild(kv([
     ["Local instrument", rad.local ? `${fmt.num(rad.local.dose_rate_usv_h, 2)} µSv/h · ${fmt.ago(rad.local.ts)}` : "no local reading"],
     ["Nearest public report", nearest
-      ? `${fmt.num(nearest.value, 1)} ${nearest.unit}${nearest.distance_km != null ? ` · ${Math.round(nearest.distance_km)} km` : ""} · measured ${fmt.ago(nearest.time)} (${fmt.date(nearest.time, false)})`
+      ? `${fmt.num(nearest.value, 1)} ${nearest.unit}${nearest.distance_km != null ? ` · ${U.distKm(nearest.distance_km)}` : ""} · measured ${fmt.ago(nearest.time)} (${fmt.date(nearest.time, false)})`
       : "—"],
     ["Public reports nearby", `${(rad.public || []).length} cached`],
   ]));

@@ -14,7 +14,6 @@ import time
 
 import requests
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 
 NEWSAPI_BASE_URL = "https://newsapi.org/v2"
 

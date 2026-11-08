@@ -7,25 +7,27 @@ import { openRecordForm } from "./records.js";
 import { positionConfidence } from "./views/shared.js";
 
 import * as dashboard from "./views/dashboard.js";
-import * as mapView from "./views/map.js";
+import * as mapView from "./views/map.js?v=map-upgrade-8";
 import * as library from "./views/library.js";
 import * as manual from "./views/manual.js";
 import * as navView from "./views/nav.js";
 import * as comms from "./views/comms.js";
 import * as sdr from "./views/sdr.js";
 import * as medical from "./views/medical.js";
-import * as supply from "./views/supply.js";
+import * as supply from "./views/supply.js?v=better-5";
 import * as cbrn from "./views/cbrn.js";
 import * as security from "./views/security.js";
 import * as logistics from "./views/logistics.js";
 import * as weather from "./views/weather.js";
-import * as intel from "./views/intel.js";
-import * as settings from "./views/settings.js";
+import * as intel from "./views/intel.js?v=better-5";
+import * as assistant from "./views/assistant.js?v=better-6";
+import * as settings from "./views/settings.js?v=better-6";
 
 const ROUTES = {
   dashboard: { title: "Situation Report", group: "COMMAND", icon: "dashboard", view: dashboard },
   map: { title: "Map & Terrain", group: "COMMAND", icon: "map", view: mapView },
   intel: { title: "Global Threat & Live Intel", group: "COMMAND", icon: "warning", view: intel },
+  assistant: { title: "Delamain (Local AI)", group: "COMMAND", icon: "cpu", view: assistant },
   library: { title: "Document Library", group: "COMMAND", icon: "library", view: library },
   manual: { title: "Field Manual", group: "COMMAND", icon: "book", view: manual },
   nav: { title: "Navigation", group: "OPERATIONS", icon: "compass", view: navView },
@@ -41,7 +43,7 @@ const ROUTES = {
 };
 
 const NAV_ORDER = [
-  ["COMMAND", ["dashboard", "map", "intel", "library", "manual"]],
+  ["COMMAND", ["dashboard", "map", "intel", "assistant", "library", "manual"]],
   ["OPERATIONS", ["nav", "comms", "sdr", "medical", "supply", "cbrn", "security", "logistics", "weather"]],
   ["SYSTEM", ["settings"]],
 ];
@@ -52,6 +54,15 @@ let statusTimer = null;
 let syncTimer = null;
 let syncLastSuccess = null;
 let paletteOpen = false;
+let palettePreviousFocus = null;
+
+function restorePaletteFocus() {
+  const el = palettePreviousFocus;
+  palettePreviousFocus = null;
+  if (el && typeof el.focus === "function" && el.isConnected) {
+    try { el.focus(); } catch {}
+  }
+}
 let coordTimer = null;
 let netDown = false;
 let lastStatus = null;
@@ -172,6 +183,7 @@ function bindChrome() {
   if (menu) menu.addEventListener("click", () => {
     sidebar.classList.toggle("open");
     scrim.classList.toggle("open", sidebar.classList.contains("open"));
+    menu.setAttribute("aria-expanded", sidebar.classList.contains("open") ? "true" : "false");
   });
   if (scrim) scrim.addEventListener("click", () => {
     sidebar.classList.remove("open");
@@ -182,6 +194,8 @@ function bindChrome() {
     scrim.classList.remove("open");
   }));
 
+  const assistantBtn = document.getElementById("assistantBtn");
+  if (assistantBtn) assistantBtn.addEventListener("click", () => { location.hash = "#/assistant"; closeSidebar(); });
   const searchBtn = document.getElementById("searchBtn");
   if (searchBtn) searchBtn.addEventListener("click", openPalette);
 
@@ -225,8 +239,12 @@ function isTyping(el) {
 }
 
 function closeSidebar() {
-  document.getElementById("sidebar")?.classList.remove("open");
-  document.getElementById("sidebarScrim")?.classList.remove("open");
+  const sidebar = document.getElementById("sidebar");
+  const scrim = document.getElementById("sidebarScrim");
+  const menu = document.getElementById("menuBtn");
+  sidebar?.classList.remove("open");
+  scrim?.classList.remove("open");
+  menu?.setAttribute("aria-expanded", "false");
 }
 
 function applyAppearance() {
@@ -459,9 +477,11 @@ function authLost() {
 
 function parseRoute() {
   const raw = location.hash.replace(/^#\/?/, "") || "dashboard";
-  const [id, qs] = raw.split("?");
+  const [id0, qs] = raw.split("?");
+  let id = id0;
   const params = {};
   if (qs) for (const [k, v] of new URLSearchParams(qs)) params[k] = v;
+  if (id === "mapgl") { id = "map"; if (!params.renderer) params.renderer = "gl"; }
   return { id: ROUTES[id] ? id : "dashboard", params };
 }
 
@@ -478,7 +498,10 @@ async function route() {
   store.setView(id);
   document.title = `DARKSEC // ${routeDef.title}`;
   document.querySelectorAll(".nav a").forEach((a) => {
-    a.classList.toggle("active", a.dataset.nav === id);
+    const isActive = a.dataset.nav === id;
+    a.classList.toggle("active", isActive);
+    if (isActive) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
   });
   closeSidebar();
   const shell = h("div", { class: "view" });
@@ -496,6 +519,10 @@ async function route() {
         h("div", { class: "row mt-10" }, btn("RETRY", { tone: "primary", onClick: () => route() })))),
     );
   }
+  requestAnimationFrame(() => {
+    const main = document.getElementById("view");
+    if (main) try { main.focus({ preventScroll: true }); } catch {}
+  });
   view.focus({ preventScroll: true });
   view.scrollTop = 0;
   window.scrollTo(0, 0);
@@ -509,6 +536,7 @@ function commandList() {
     commands.push({ type: "VIEW", title: r.title, subtitle: r.group, icon: r.icon, run: () => { location.hash = `#/${id}`; } });
   }
   commands.push(
+    { type: "ACTION", title: "Open Delamain", subtitle: "Local AI assistant (Ollama)", icon: "cpu", run: () => { location.hash = "#/assistant"; } },
     { type: "ACTION", title: "New log entry", subtitle: "Record an observation", icon: "note", run: () => openRecordForm({ table: "log_entries" }) },
     { type: "ACTION", title: "New task", subtitle: "Add to mission list", icon: "check", run: () => openRecordForm({ table: "tasks" }) },
     { type: "ACTION", title: "New waypoint", subtitle: "Drop a coordinate", icon: "pin", run: () => openRecordForm({ table: "waypoints", defaults: currentPosition() }) },
@@ -585,6 +613,7 @@ export function printText(text, title = "DARKSEC") {
 function openPalette() {
   if (paletteOpen) return;
   paletteOpen = true;
+  palettePreviousFocus = document.activeElement;
   const root = document.getElementById("paletteRoot");
   const backdrop = h("div", { class: "palette-backdrop" });
   const palette = h("div", { class: "palette", role: "dialog", "aria-modal": "true", "aria-label": "Command palette" });
@@ -612,6 +641,7 @@ function openPalette() {
     paletteOpen = false;
     backdrop.remove();
     document.removeEventListener("keydown", keyHandler, true);
+    restorePaletteFocus();
   }
   function setActive(i) {
     active = Math.max(0, Math.min(items.length - 1, i));
@@ -682,6 +712,15 @@ function openPalette() {
   });
   function keyHandler(e) {
     if (e.key === "Escape") { e.preventDefault(); close(); return; }
+    if (e.key === "Tab") {
+      const focusables = [search, ...results.querySelectorAll("button")].filter((el) => el.offsetParent !== null);
+      if (!focusables.length) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      return;
+    }
     if (e.key === "ArrowDown") { e.preventDefault(); setActive(active + 1); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setActive(active - 1); }
     else if (e.key === "Enter") { e.preventDefault(); activate(active); }
@@ -698,6 +737,7 @@ function closePalette() {
   if (root && root.firstChild) {
     root.replaceChildren();
     paletteOpen = false;
+    restorePaletteFocus();
   }
 }
 

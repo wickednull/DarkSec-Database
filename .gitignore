@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / Electron
+node_modules/
+dist/
+build/
+*.asar
+
+# Runtime data (never commit operator data)
+fielddata/
+/tmp/
+
+# Generated map tiles
+maps/tiles/cache/
+
+# OS
+.DS_Store
+Thumbs.db

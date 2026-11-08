@@ -38,7 +38,7 @@
     <div class="sub">LOCAL HTTPS · TEMPORARY SESSION · NO CLOUD RELAY</div>
   </header>
   <div class="box warn">
-    Only share location with the DarkSec computer you chose. Keep this page open; updates stop when this session expires or you tap STOP. The desktop will not save a fix until its operator accepts it.
+      Only share location with the DarkSec computer you chose. Keep this page open; the session stays alive while this page is connected and will stop when you leave it, tap STOP, or the operator stops the session. The desktop saves a fix only when its operator accepts it (accepting does not close this connection).
   </div>
   <div id="status" class="box status">Checking secure connection…</div>
   <div class="fix">
@@ -59,9 +59,13 @@
   const token = new URLSearchParams(location.search).get('t');
   let watchId = null;
   let statusTimer = null;
+  let pingTimer = null;
+  let pollTimer = null;
   let lastSent = 0;
   let wakeLock = null;
   let active = false;
+  let stopping = false;
+  let checkFailures = 0;
   history.replaceState(null, '', '/');
 
   function status(message, tone = '') {
@@ -70,18 +74,26 @@
   }
 
   async function request(path, options = {}) {
-    const response = await fetch(path, {
-      ...options,
-      cache: 'no-store',
-      credentials: 'same-origin',
-      headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) },
-    });
-    if (!response.ok) throw new Error((await response.text()).slice(0, 180) || `Request failed (${response.status})`);
-    return response;
+    const controller = new AbortController();
+    const timeoutMs = options.timeoutMs || 10000;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(path, {
+        ...options,
+        cache: 'no-store',
+        credentials: 'same-origin',
+        signal: controller.signal,
+        headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) },
+      });
+      if (!response.ok) throw new Error((await response.text()).slice(0, 180) || `Request failed (${response.status})`);
+      return response;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async function sendFix(position) {
-    if (!active) return;
+    if (!active || stopping) return;
     const now = Date.now();
     if (now - lastSent < 4000) return;
     const c = position.coords;
@@ -102,11 +114,15 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        timeoutMs: 12000,
       });
       lastSent = now;
-      status('Fix sent. Review the position and accuracy on the DarkSec desktop.', 'good');
+      checkFailures = 0;
+      status('Fix sent. Keep this page open; the desktop can accept fresh fixes while this connection stays active.', 'good');
     } catch (error) {
-      status(`Send failed: ${error.message}`, 'bad');
+      if (!active || stopping) return;
+      const msg = (error && error.message) ? error.message : 'network/TLS issue';
+      status(`Send retrying (${msg}). Check phone is on the same Wi-Fi/LAN, page stays open, and the local certificate was accepted.`, 'bad');
     }
   }
 
@@ -119,31 +135,43 @@
     status(messages[error.code] || `Location error: ${error.message}`, 'bad');
   }
 
-  async function stop(sendStop = true) {
+  async function stop(sendStop = true, finalMessage = 'Sharing stopped. You can close this page.', tone = '') {
+    if (stopping) return;
+    stopping = true;
     active = false;
     if (watchId !== null) navigator.geolocation.clearWatch(watchId);
     watchId = null;
     if (statusTimer) clearInterval(statusTimer);
+    if (pingTimer) clearInterval(pingTimer);
+    if (pollTimer) clearInterval(pollTimer);
     statusTimer = null;
+    pingTimer = null;
+    pollTimer = null;
     if (wakeLock) { try { await wakeLock.release(); } catch {} }
     wakeLock = null;
     startButton.disabled = true;
     stopButton.disabled = true;
-    if (sendStop && token) { try { await request('/stop', { method: 'POST' }); } catch {} }
-    status('Sharing stopped. You can close this page.', '');
+    if (sendStop && token) { try { await request('/stop', { method: 'POST', timeoutMs: 4000 }); } catch {} }
+    status(finalMessage, tone);
   }
 
   async function checkSession() {
+    if (!active || stopping) return;
     try {
-      const response = await request('/status');
+      const response = await request('/status', { timeoutMs: 8000 });
       const state = await response.json();
+      checkFailures = 0;
       if (state.state === 'expired' || state.state === 'stopped') {
-        await stop(false);
-        status('This session has ended. Start a new session on the desktop.', 'bad');
+        await stop(false, 'This session ended on the desktop. Start a new session in Settings.', 'bad');
       }
-    } catch {
-      await stop(false);
-      status('The desktop session is no longer reachable. Stop and re-pair from Settings.', 'bad');
+    } catch (error) {
+      if (!active || stopping) return;
+      checkFailures += 1;
+      if (checkFailures >= 8) {
+        await stop(false, 'The desktop session is no longer reachable. Keep this page open only after re-pairing from Settings.', 'bad');
+      } else {
+        status(`Connection hiccup (${checkFailures}/8). Keeping GPS active and retrying…`, 'bad');
+      }
     }
   }
 
@@ -154,16 +182,39 @@
       return;
     }
     active = true;
+    stopping = false;
+    checkFailures = 0;
     startButton.disabled = true;
     stopButton.disabled = false;
     status('Requesting phone location permission…');
     try {
       if (navigator.wakeLock?.request) wakeLock = await navigator.wakeLock.request('screen');
     } catch {}
-    watchId = navigator.geolocation.watchPosition(sendFix, positionError, {
-      enableHighAccuracy: true, maximumAge: 2000, timeout: 20000,
+    document.addEventListener('visibilitychange', async () => {
+      if (!active || stopping) return;
+      if (document.visibilityState === 'visible') {
+        try { if (!wakeLock && navigator.wakeLock?.request) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+        checkSession();
+      }
     });
-    statusTimer = setInterval(checkSession, 2500);
+    window.addEventListener('pagehide', () => { if (token) navigator.sendBeacon && navigator.sendBeacon('/stop', ''); });
+    watchId = navigator.geolocation.watchPosition(sendFix, positionError, {
+      enableHighAccuracy: true, maximumAge: 0, timeout: 20000,
+    });
+    // Fallback: some browsers/devices fire watchPosition rarely when stationary.
+    // Periodically request a fresh fix so the desktop keeps receiving updates and
+    // the accepted fix does not go stale while the phone page stays open.
+    const pollFix = () => {
+      if (!active || stopping) return;
+      navigator.geolocation.getCurrentPosition(sendFix, () => {}, {
+        enableHighAccuracy: true, maximumAge: 0, timeout: 15000,
+      });
+    };
+    pollFix();
+    pollTimer = setInterval(pollFix, 8000);
+    statusTimer = setInterval(checkSession, 5000);
+    pingTimer = setInterval(() => { if (active && !stopping) request('/ping', { timeoutMs: 6000 }).catch(() => {}); }, 15000);
+    checkSession();
   });
 
   stopButton.addEventListener('click', () => stop(true));

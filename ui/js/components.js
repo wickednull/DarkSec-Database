@@ -18,6 +18,10 @@ export function h(tag, props = null, ...children) {
         for (const [evt, handler] of Object.entries(value)) node.addEventListener(evt, handler);
       } else if (key === "attrs" && typeof value === "object") {
         for (const [attr, val] of Object.entries(value)) if (val !== null && val !== undefined) node.setAttribute(attr, val);
+      } else if (/^on[A-Z]/.test(key) && typeof value === "function") {
+        // Accept React-style `onClick` props as real listeners. Setting them
+        // as attributes would create an inline handler that CSP blocks.
+        node.addEventListener(key.slice(2).toLowerCase(), value);
       } else if (key in node && !["list", "type", "form", "size"].includes(key)) {
         try { node[key] = value; } catch { node.setAttribute(key, value); }
       } else {
@@ -108,9 +112,13 @@ export function emptyState(text, sub = "", iconName = "info") {
     sub ? h("div", { text: sub }) : null);
 }
 
+let fieldSeq = 0;
 export function field(label, control, hint = "") {
+  if (label && control && !control.id) {
+    control.id = `field-${++fieldSeq}`;
+  }
   return h("div", { class: "field" },
-    label ? h("label", {}, label) : null,
+    label ? h("label", { for: control?.id || undefined }, label) : null,
     control,
     hint ? h("div", { class: "hint", text: hint }) : null);
 }
@@ -139,6 +147,15 @@ export function checkbox(label, checked = false, onChange = null) {
   const inp = h("input", { type: "checkbox", checked: !!checked });
   if (onChange) inp.addEventListener("change", () => onChange(inp.checked));
   return h("label", { class: "check" }, inp, h("span", { text: label }));
+}
+
+export function toggle(label, checked = false, onChange = null, opts = {}) {
+  const { disabled = false, size = "", title = "" } = opts || {};
+  const inp = h("input", { type: "checkbox", class: "toggle-input", checked: !!checked, disabled, attrs: { role: "switch", "aria-checked": checked ? "true" : "false" } });
+  const track = h("span", { class: `toggle-track ${size}`.trim(), "aria-hidden": "true" }, h("span", { class: "toggle-thumb" }));
+  const sync = () => inp.setAttribute("aria-checked", inp.checked ? "true" : "false");
+  inp.addEventListener("change", () => { sync(); if (onChange) onChange(inp.checked); });
+  return h("label", { class: `toggle ${disabled ? "disabled" : ""}`.trim(), title }, inp, track, label ? h("span", { class: "toggle-label", text: label }) : null);
 }
 
 export function tabs(items, active, onSelect) {
@@ -225,16 +242,33 @@ export function modal({ title, sub = "", body, actions = [], wide = false, narro
   }
   backdrop.appendChild(box);
   root.appendChild(backdrop);
+  const previousFocus = document.activeElement;
   let closed = false;
+  function focusables() {
+    return [...box.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+      'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )].filter((el) => el.offsetParent !== null);
+  }
   function close() {
     if (closed) return;
     closed = true;
-    document.removeEventListener("keydown", esc);
+    document.removeEventListener("keydown", onKey);
     backdrop.remove();
+    if (previousFocus && typeof previousFocus.focus === "function") previousFocus.focus();
     if (onClose) onClose();
   }
-  function esc(e) { if (e.key === "Escape") close(); }
-  document.addEventListener("keydown", esc);
+  function onKey(e) {
+    if (e.key === "Escape") { close(); return; }
+    if (e.key !== "Tab") return;
+    const items = focusables();
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+  document.addEventListener("keydown", onKey);
   backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) close(); });
   const focusable = box.querySelector("input, textarea, select, button");
   setTimeout(() => focusable && focusable.focus(), 50);

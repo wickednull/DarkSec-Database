@@ -11,7 +11,6 @@ an HttpOnly cookie and removed from the address bar.
 from __future__ import annotations
 
 import argparse
-import json
 import secrets
 import socket
 import sys

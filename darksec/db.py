@@ -33,25 +33,6 @@ CREATE TABLE IF NOT EXISTS audit (
     ip TEXT
 );
 
-CREATE TABLE IF NOT EXISTS indicators (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    category TEXT NOT NULL,
-    name TEXT NOT NULL,
-    weight REAL NOT NULL DEFAULT 1,
-    status INTEGER NOT NULL DEFAULT 0,
-    trend TEXT NOT NULL DEFAULT 'unknown',
-    note TEXT DEFAULT '',
-    updated TEXT
-);
-CREATE TABLE IF NOT EXISTS indicator_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    indicator_id INTEGER NOT NULL,
-    ts TEXT NOT NULL,
-    status INTEGER NOT NULL,
-    note TEXT,
-    FOREIGN KEY(indicator_id) REFERENCES indicators(id) ON DELETE CASCADE
-);
-
 CREATE TABLE IF NOT EXISTS log_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -297,37 +278,52 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Cached map overlay snapshots (wind/rain/cloud grids, operator-triggered refresh).
+-- Payload is JSON (GeoJSON FeatureCollection or {points:[...], meta:{...}}).
+CREATE TABLE IF NOT EXISTS map_overlay_cache (
+    kind TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    fetched_at TEXT,
+    status TEXT DEFAULT 'NEVER',
+    payload TEXT,
+    error TEXT,
+    meta TEXT
+);
+
+-- Query indexes are created in _ensure_indexes() so an older database with a
+-- missing column cannot stop the application from starting.
 """
 
-INDICATOR_SEED = [
-    ("POWER", "Grid stability", 3.0),
-    ("POWER", "Fuel availability", 3.0),
-    ("POWER", "Backup power readiness", 2.5),
-    ("WATER", "Municipal water pressure", 3.0),
-    ("WATER", "Stored water (days)", 3.0),
-    ("WATER", "Alternative source access", 2.0),
-    ("FOOD", "Food stock (days)", 3.0),
-    ("FOOD", "Local resupply", 2.5),
-    ("FOOD", "Production / foraging", 1.5),
-    ("COMMS", "Telecom / internet", 2.0),
-    ("COMMS", "Radio coverage", 2.5),
-    ("COMMS", "Emergency broadcasts", 2.0),
-    ("SECURITY", "Local incident rate", 3.0),
-    ("SECURITY", "Perimeter readiness", 2.5),
-    ("SECURITY", "Community relations", 1.5),
-    ("HEALTH", "Medical supplies", 3.0),
-    ("HEALTH", "Clinical access", 2.0),
-    ("HEALTH", "Public health alerts", 2.0),
-    ("MOBILITY", "Vehicle fuel", 2.5),
-    ("MOBILITY", "Route status", 2.5),
-    ("MOBILITY", "Evacuation readiness", 2.0),
-    ("ENVIRONMENT", "Severe weather risk", 2.0),
-    ("ENVIRONMENT", "Air quality", 1.5),
-    ("ENVIRONMENT", "Radiation background", 2.5),
-    ("FINANCE", "Cash on hand", 2.0),
-    ("FINANCE", "Bank / payment access", 2.0),
-    ("FINANCE", "Supply chain", 2.5),
+
+# Query indexes for the views that sort/filter the record tables. Without
+# these, SQLite scans every row each time the dashboard, audit log or vitals
+# trend is opened as the operator's history grows.
+INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_action ON audit(action)",
+    "CREATE INDEX IF NOT EXISTS idx_log_ts ON log_entries(ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_log_category ON log_entries(category)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_done_priority ON tasks(done, priority)",
+    "CREATE INDEX IF NOT EXISTS idx_vitals_patient_ts ON vitals(patient_id, ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_weather_ts ON weather_log(ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_water_ts ON water_log(ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_power_ts ON power_log(ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_rad_ts ON rad_log(ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_radio_ts ON radio_log(ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_incidents_resolved_ts ON incidents(resolved, ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_name ON inventory(name)",
+    "CREATE INDEX IF NOT EXISTS idx_inventory_stock ON inventory(qty, min_qty)",
+    "CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_log_category_ts ON log_entries(category, ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_waypoints_created ON waypoints(created DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_trip_status ON trip_plans(status, departure_at)",
+    "CREATE INDEX IF NOT EXISTS idx_sdr_recordings_ts ON sdr_recordings(ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_library_category ON library_docs(category)",
+    "CREATE INDEX IF NOT EXISTS idx_library_rel_path ON library_docs(rel_path)",
+    "CREATE INDEX IF NOT EXISTS idx_feeds_kind ON feeds(kind)",
 ]
+
 
 FEED_SEED = [
     ("usgs_quakes", "USGS Significant Earthquakes", "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson", "usgs"),
@@ -336,6 +332,7 @@ FEED_SEED = [
     ("nws_alerts", "NWS Active Alerts (US)", "https://api.weather.gov/alerts/active?status=actual&message_type=alert", "nws"),
     ("gdacs", "GDACS Disaster Alerts", "https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH", "gdacs"),
     ("eonet", "NASA EONET Natural Events", "https://eonet.gsfc.nasa.gov/api/v3/events?status=open&days=30", "eonet"),
+    ("rsoe_edis", "RSOE EDIS Global Disaster Events", "https://rsoe-edis.org/eventList", "rsoe"),
     ("safecast", "Safecast Radiation Reports", "https://api.safecast.org/measurements.json", "safecast"),
     ("smithsonian_volcano", "Smithsonian/USGS Volcanic Activity", "https://volcano.si.edu/news/WeeklyVolcanoRSS.xml", "rss"),
     ("who_don", "WHO News (English)", "https://www.who.int/rss-feeds/news-english.xml", "rss"),
@@ -347,13 +344,25 @@ FEED_SEED = [
     ("france24_world", "France24 World", "https://www.france24.com/en/rss", "rss"),
     ("dw_news", "Deutsche Welle World", "https://rss.dw.com/rdf/rss-en-all", "rss"),
     ("aljazeera_world", "Al Jazeera English", "https://www.aljazeera.com/xml/rss/all.xml", "rss"),
-    ("crisisgroup", "International Crisis Group", "https://www.crisisgroup.org/rss", "rss"),
+    ("crisisgroup", "International Crisis Group", "https://www.crisisgroup.org/rss.xml", "rss"),
+    ("thehackernews", "The Hacker News (Cybersecurity)", "https://feeds.feedburner.com/TheHackersNews", "rss"),
+    ("bbc_middle_east", "BBC Middle East", "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml", "rss"),
+    ("twz_defense", "The War Zone (Defense/Conflict)", "https://www.twz.com/feed", "rss"),
+    ("breaking_defense", "Breaking Defense", "https://breakingdefense.com/feed/", "rss"),
+    ("defense_one", "Defense One", "https://www.defenseone.com/rss/all/", "rss"),
+    ("long_war_journal", "Long War Journal", "https://www.longwarjournal.org/feed", "rss"),
+    ("war_on_the_rocks", "War on the Rocks", "https://warontherocks.com/feed/", "rss"),
     ("gdelt_conflict", "GDELT Live Conflict Events (media-derived)",
      "https://data.gdeltproject.org/gdeltv2/lastupdate.txt", "gdelt"),
     ("ucdp_candidate", "UCDP Candidate Conflict Events (monthly verified)",
      "https://ucdp.uu.se/downloads/", "ucdp"),
     ("open_meteo_air", "Open-Meteo Air Quality", "https://air-quality-api.open-meteo.com/v1/air-quality", "air_quality"),
     ("open_meteo_weather", "Open-Meteo Local Weather", "https://api.open-meteo.com/v1/forecast", "weather"),
+    # Scaffolding: operator-configurable or future integration points.
+    # Set a real URL/kind config per deployment; empty URL refreshes report not configured.
+    ("maritime_ais", "Maritime / AIS Positions (scaffold)", "", "maritime"),
+    ("infra_cables", "Subsea/Data/Power Cables (scaffold)", "", "cables"),
+    ("public_cctv", "Public CCTV / Camera Feeds (scaffold)", "", "cctv"),
 ]
 
 
@@ -365,6 +374,7 @@ class Database:
     def __init__(self, path: str | None = None):
         self.path = str(path or config.DB_PATH)
         self._lock = threading.RLock()
+        self.migration_warnings: list[str] = []
         self.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -373,6 +383,7 @@ class Database:
         self.conn.commit()
         self._seed()
         self._migrate()
+        self._ensure_indexes()
         self._fts_rebuild_if_needed()
 
     # ------------------------------------------------------------------ core
@@ -454,17 +465,6 @@ class Database:
 
     # -------------------------------------------------------------- migrations
     def _migrate(self) -> None:
-        # Earlier builds seeded every indicator as status 0 (GREEN), which made
-        # a never-assessed install report 100/100 NOMINAL. Move unassessed
-        # installs to status 3 (UNKNOWN). Installs with any assessment history
-        # are left untouched so real operator judgements are preserved.
-        if self.one("SELECT 1 FROM meta WHERE key='indicator_unknown_v1'") is None:
-            history = self.one("SELECT count(*) c FROM indicator_history")
-            if (history["c"] or 0) == 0:
-                self.execute("UPDATE indicators SET status=3")
-            self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('indicator_unknown_v1',?)",
-                         (utcnow(),))
-
         # Auto-sync used to be an inert preference (the old build only fetched
         # on explicit request). Adopt the automatic behaviour once, and add the
         # interval setting, without disturbing other operator choices.
@@ -498,14 +498,78 @@ class Database:
             self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('feeds_v3',?)",
                          (utcnow(),))
 
+        # Feed reliability fixes: Crisis Group canonical RSS path, and ensure
+        # CelesTrak uses the modern gp.php TLE endpoint.
+        if self.one("SELECT 1 FROM meta WHERE key='feeds_v4'") is None:
+            self.execute(
+                "UPDATE feeds SET url=?, name=? WHERE id='crisisgroup'",
+                ("https://www.crisisgroup.org/rss.xml", "International Crisis Group"),
+            )
+            self.execute(
+                "UPDATE feeds SET url=?, kind=?, name=? WHERE id='celestrak_tle'",
+                ("https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle",
+                 "celestrak", "CelesTrak Active Satellite TLE"),
+            )
+            self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('feeds_v4',?)",
+                         (utcnow(),))
+
+        # Delamain prompt refinement: older defaults were easy for small local
+        # models to overgeneralize into refusals. Upgrade only saved prompts that
+        # still look like the previous app default; leave custom operator prompts.
+        # This check is migration-only (no provider/model provenance claims).
+        new_default = config.default_settings()["assistant_system_prompt"]
+        if self.one("SELECT 1 FROM meta WHERE key='assistant_prompt_v4'") is None:
+            try:
+                cur = str(self.get_setting("assistant_system_prompt", "") or "")
+                cur_lower = cur.lower()
+                looks_old_default = (
+                    (
+                        cur.startswith("Your name is Delamain")
+                        or cur.startswith("You are Delamain")
+                        or "your name is delamain" in cur_lower
+                        or "you are delamain" in cur_lower
+                    )
+                    and "Answer any lawful question helpfully and directly" not in cur
+                    and "For simple questions" in cur
+                )
+                if looks_old_default:
+                    self.set_setting("assistant_system_prompt", new_default)
+            except Exception:
+                pass
+            self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_prompt_v4',?)",
+                         (utcnow(),))
+
+        # Longer answers by default: early installs saved 512 tokens, which cuts
+        # off many useful responses. Raise very low saved values to the current
+        # default once; leave operator-chosen higher values untouched.
+        if self.one("SELECT 1 FROM meta WHERE key='assistant_max_tokens_v1'") is None:
+            try:
+                current = self.get_setting("assistant_max_tokens", None)
+                try:
+                    value = int(float(current)) if current is not None else None
+                except (TypeError, ValueError):
+                    value = None
+                if value is None or value <= 512:
+                    self.set_setting("assistant_max_tokens", config.default_settings()["assistant_max_tokens"])
+            except Exception:
+                pass
+            self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_max_tokens_v1',?)",
+                         (utcnow(),))
+
+    # ------------------------------------------------------------------ indexes
+    def _ensure_indexes(self) -> None:
+        """Create query indexes, tolerating older schemas with missing columns."""
+        with self._lock:
+            for sql in INDEXES:
+                try:
+                    self.conn.execute(sql)
+                except sqlite3.OperationalError:
+                    continue
+            self.conn.commit()
+
     # ------------------------------------------------------------------ seed
     def _seed(self) -> None:
         if self.one("SELECT 1 FROM meta WHERE key='seeded'") is None:
-            for category, name, weight in INDICATOR_SEED:
-                self.execute(
-                    "INSERT INTO indicators(category,name,weight,status,trend,note,updated) VALUES(?,?,?,3,'unknown','',?)",
-                    (category, name, weight, utcnow()),
-                )
             for fid, name, url, kind in FEED_SEED:
                 self.execute(
                     "INSERT OR IGNORE INTO feeds(id,name,url,kind,status) VALUES(?,?,?,?,'NEVER')",

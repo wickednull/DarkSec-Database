@@ -8,7 +8,9 @@
     "start": "electron .",
     "backend": "python3 -m darksec",
     "start:web": "python3 -m darksec --open",
-    "check": "node --check main.js && node --check preload.js && python3 -m py_compile darksec/*.py",
+    "check": "node --check main.js && node --check preload.js && node tools/check-js.mjs && python3 -m py_compile darksec/*.py && python3 tools/selfcheck.py",
+    "test": "python3 -m pytest",
+    "check:all": "npm run check && npm run test",
     "dist": "electron-builder"
   },
   "keywords": [

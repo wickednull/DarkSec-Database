@@ -39,9 +39,9 @@ export async function render(root, params) {
   const alerts = h("div", { class: "col" });
   const r = dash.readiness || {};
   if (r.score === null || r.score === undefined) {
-    alerts.appendChild(alertStrip("READINESS UNASSESSED — set each indicator below after checking the current situation. Unknown indicators are not counted as green.", "amber"));
+    alerts.appendChild(alertStrip("READINESS NOT COMPUTABLE — automated operational signals unavailable for this area.", "amber"));
   } else if (r.score < 60) {
-    alerts.appendChild(alertStrip(`READINESS ${r.score}/100 — ${r.band}. Review degraded categories and correct the lowest-scoring indicators first.`, r.score < 40 ? "red" : ""));
+    alerts.appendChild(alertStrip(`READINESS ${r.score}/100 — ${r.band}. Automated operational risk is elevated; review recommended actions and signals.`, r.score < 40 ? "red" : ""));
   }
   if (dash.feeds?.critical_count) {
     alerts.appendChild(alertStrip(`${dash.feeds.critical_count} critical cached feed item(s). Confirm with official sources before acting.`, "red"));
@@ -102,7 +102,12 @@ export async function render(root, params) {
     badge(dash.settings?.callsign || "NIGHTWATCH", "cyan"),
     badge(dash.settings?.team || "UNASSIGNED", "muted")));
   const now = new Date();
-  copy.appendChild(h("h2", { text: r.band === "NOMINAL" ? "HOLD THE LINE" : r.band === "CRITICAL" ? "IMMEDIATE ACTION" : r.band === "NO DATA" ? "UNASSESSED — ASSESS NOW" : "DEGRADED — ADAPT" }));
+  const headline = r.band === "NOMINAL" ? "HOLD THE LINE"
+    : r.band === "CRITICAL" ? "IMMEDIATE ACTION"
+    : r.band === "ELEVATED" ? "ELEVATED — WATCH"
+    : r.band === "NO DATA" ? "UNASSESSED — ASSESS NOW"
+    : "DEGRADED — ADAPT";
+  copy.appendChild(h("h2", { text: headline }));
   copy.appendChild(h("p", {
     title: positionInfo.text,
     text: `${now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })} local · ${dash.coords?.mgrs || "GRID UNKNOWN"} · ` +
@@ -110,17 +115,19 @@ export async function render(root, params) {
   }));
 
   const bars = h("div", { class: "cat-bars" });
-  for (const c of (r.categories || []).slice(0, 6)) {
+  for (const c of (r.categories || []).slice(0, 8)) {
     const bar = h("div", { class: "cat-bar" });
     bar.appendChild(h("span", { text: c.category }));
     const track = h("div", { class: "bar" });
     const fill = h("span", { text: "" });
-    fill.style.width = `${Math.max(0, Math.min(100, c.score ?? 0))}%`;
-    if ((c.score ?? 0) < 40) fill.classList.add("red");
-    else if ((c.score ?? 0) < 60) fill.classList.add("amber");
+    const sc = c.score ?? null;
+    fill.style.width = `${sc == null ? 0 : Math.max(0, Math.min(100, sc))}%`;
+    if (sc == null) fill.classList.add("muted");
+    else if (sc < 40) fill.classList.add("red");
+    else if (sc < 60) fill.classList.add("amber");
     track.appendChild(fill);
     bar.appendChild(track);
-    bar.appendChild(h("b", { text: `${c.score ?? "—"}%` }));
+    bar.appendChild(h("b", { text: `${sc == null ? "—" : Math.round(sc)}%` }));
     bars.appendChild(bar);
   }
   copy.appendChild(bars);
@@ -149,6 +156,28 @@ export async function render(root, params) {
   hero.append(gaugeWrap, copy);
   root.appendChild(hero);
 
+  /* --------------------------------------------------- recommended actions */
+  const sit = dash.sitrep || {};
+  const sitActions = sit.actions || [];
+  if (sitActions.length) {
+    const actList = h("div", { class: "col gap-6" });
+    for (const a of sitActions.slice(0, 6)) {
+      const row = h("div", { class: `list-item ${a.urgency === 0 ? "alert" : a.urgency <= 2 ? "warn" : ""}` });
+      const main = h("div", { class: "li-main" });
+      main.appendChild(h("div", { class: "li-title", text: a.text }));
+      row.appendChild(main);
+      actList.appendChild(row);
+    }
+    root.appendChild(panel({
+      title: "RECOMMENDED ACTIONS",
+      sub: `SITREP SYNTHESIS · STANCE ${sit.stance || "UNKNOWN"}`,
+      icon: "target",
+      tools: [btn("SITREP", { icon: "print", onClick: () => showBrief() })],
+      body: actList,
+      cls: "mt-14",
+    }));
+  }
+
   /* ------------------------------------------------------------ stats */
   const stats = h("div", { class: "grid grid-4 mt-14" });
   stats.appendChild(stat("Open tasks", String((dash.tasks || []).length).padStart(2, "0"), "Mission list", (dash.tasks || []).some((t) => t.priority === "IMMEDIATE") ? "acc" : ""));
@@ -164,16 +193,6 @@ export async function render(root, params) {
   /* ------------------------------------------------------------- grid */
   const grid = h("div", { class: "panel-grid grid-2 mt-14" });
   root.appendChild(grid);
-
-  /* indicators */
-  const indPanel = panel({
-    title: "Readiness indicators",
-    sub: "Click to cycle GREEN → AMBER → RED · shift-click to annotate",
-    icon: "target",
-    body: buildIndicators(dash.indicators || [], () => render(root, params)),
-    cls: "span-2",
-  });
-  grid.appendChild(indPanel);
 
   /* tasks */
   const taskList = h("div", { class: "list" });
@@ -373,90 +392,6 @@ export async function render(root, params) {
 
 function updateBadgesFrom(dash) {
   /* main.js owns nav badge updates; nothing to do for dashboard beyond local stats. */
-}
-
-function buildIndicators(indicators, reload) {
-  const wrap = h("div", { class: "col" });
-  const byCat = {};
-  for (const ind of indicators) (byCat[ind.category] = byCat[ind.category] || []).push(ind);
-  const cats = Object.keys(byCat).sort();
-  for (const cat of cats) {
-    wrap.appendChild(h("div", { class: "side-label", text: cat }));
-    const grid = h("div", { class: "ind-grid" });
-    for (const ind of byCat[cat]) {
-      const row = h("div", { class: "ind", dataset: { s: String(ind.status) }, role: "button", tabindex: "0", title: ind.note || "Click to cycle; shift-click to annotate" });
-      row.appendChild(h("span", { class: "dot" }));
-      row.appendChild(h("span", { class: "name", text: ind.name }));
-      row.appendChild(h("span", { class: "cat", text: `w${fmt.num(ind.weight, 1)}` }));
-      row.appendChild(h("span", { class: `trend ${ind.trend}`, text: ind.trend === "up" ? "▲" : ind.trend === "down" ? "▼" : ind.trend === "flat" ? "■" : "?" }));
-      grid.appendChild(row);
-      const note = h("div", { class: "ind-note", text: ind.note || "" });
-      const box = h("div", { class: "col gap-4" }, row, note);
-      wrap.appendChild(box);
-
-      row.addEventListener("click", async (e) => {
-        if (e.shiftKey) {
-          editIndicator(ind, reload);
-          return;
-        }
-        const next = (Number(ind.status) + 1) % 4;
-        try {
-          await api.patch(`/api/indicators/${ind.id}`, { status: next });
-          row.dataset.s = String(next);
-          toast(`${ind.name} → ${["GREEN", "AMBER", "RED", "UNKNOWN"][next]}`);
-          setTimeout(reload, 250);
-        } catch (err) { toast(err.message, "error"); }
-      });
-      row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); row.click(); } });
-    }
-  }
-  return wrap;
-}
-
-function editIndicator(ind, reload) {
-  let status = Number(ind.status);
-  let trend = ind.trend || "unknown";
-  const statusButtons = h("div", { class: "pill-row" });
-  const statuses = [["GREEN", 0], ["AMBER", 1], ["RED", 2], ["UNKNOWN", 3]];
-  const renderStatus = () => {
-    statusButtons.replaceChildren();
-    for (const [label, v] of statuses) {
-      const b = btn(label, { size: "sm", tone: v === status ? "primary" : "ghost" });
-      if (v === status) {
-        if (v === 1) b.classList.add("btn-amber");
-        if (v === 2) b.classList.add("btn-danger");
-      }
-      b.addEventListener("click", () => { status = v; renderStatus(); });
-      statusButtons.appendChild(b);
-    }
-  };
-  renderStatus();
-  const trendSel = h("select", { class: "select" });
-  for (const t of ["unknown", "up", "down", "flat"]) {
-    const o = h("option", { value: t, text: t.toUpperCase() });
-    if (t === trend) o.selected = true;
-    trendSel.appendChild(o);
-  }
-  const note = textarea({ value: ind.note || "", rows: 3, placeholder: "Evidence, source, time observed…" });
-  const weight = h("input", { class: "input", type: "number", step: "0.1", min: "0.1", max: "10", value: ind.weight });
-  const body = h("div", { class: "col" },
-    h("div", { class: "small muted", text: `${ind.category} · ${ind.name}` }),
-    h("div", { class: "field" }, h("label", { text: "Status" }), statusButtons),
-    h("div", { class: "form-grid" },
-      h("div", { class: "field" }, h("label", { text: "Trend" }), trendSel),
-      h("div", { class: "field" }, h("label", { text: "Weight" }), weight)),
-    h("div", { class: "field" }, h("label", { text: "Note" }), note));
-  const m = modal({
-    title: "Annotate indicator", narrow: true, body,
-    actions: [btn("CANCEL", { tone: "ghost", onClick: () => m.close() }), btn("SAVE", { tone: "primary", onClick: async () => {
-      try {
-        await api.patch(`/api/indicators/${ind.id}`, { status, trend, note: note.value, weight: weight.value });
-        toast("Indicator updated");
-        m.close();
-        reload();
-      } catch (err) { toast(err.message, "error"); }
-    } })],
-  });
 }
 
 async function refreshFeeds(root, params) {

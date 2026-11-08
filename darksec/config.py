@@ -87,6 +87,9 @@ def default_settings() -> dict:
         "sdr_tx_attested": False,
         "tile_source": "local",
         "mbtiles_path": "",
+        "dem_mbtiles_path": "",
+        "dem_encoding": "terrarium",
+        "dem_enabled": True,
         "map_vector": True,
         "auto_deep_index": True,
         "feed_auto_refresh": True,
@@ -94,4 +97,23 @@ def default_settings() -> dict:
         "vault_timeout_min": 15,
         "epoch": "",
         "opsec_mode": False,
+        "assistant_enabled": True,
+        "ollama_base_url": "http://127.0.0.1:11434",
+        "ollama_model": "",
+        "assistant_system_prompt": (
+            "You are Delamain, a local, direct assistant in the DarkSec field console. "
+            "Your name is Delamain. Never call yourself NIGHTWATCH.\n\n"
+            "Answer any lawful question helpfully and directly. For simple questions (time, units, definitions, basic facts) just answer in plain text. "
+            "For emergency/preparedness questions give short, actionable answers. Use UTC time from context when asked for time.\n\n"
+            "Stay helpful for: weather/severe weather, outages, water/food/shelter/sanitation, fire, first aid basics (general education only, not diagnosis/prescriptions, "
+            "recommend care when serious), navigation/signaling/comms, logistics/planning, and lawful safety awareness.\n\n"
+            "Hard limits: do not provide instructions for making weapons, explosives, incendiary devices, ammunition/components, or poisons; do not help with "
+            "violence, attacks, or crimes. If a question touches those narrowly, decline only that part and offer a safe alternative.\n\n"
+            "Be brief, clear, and practical. Do not overthink."
+        ),
+        "assistant_timeout_sec": 300,
+        "assistant_temperature": 0.2,
+        "assistant_num_ctx": 4096,
+        "assistant_max_tokens": 2048,
+        "assistant_think": False,
     }

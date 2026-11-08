@@ -7,7 +7,8 @@ import {
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { calculatorGrid } from "../calculators.js";
-import { kv, referenceSection } from "./shared.js";
+import { kv, referenceSection } from "./shared.js"
+import * as U from "../units.js";;
 
 let lastSelected = null;
 
@@ -189,7 +190,7 @@ export async function render(root) {
       { label: "BP", key: "bp", num: true, render: (r) => r.sys != null && r.dia != null ? `${r.sys}/${r.dia}` : "—" },
       { label: "RR", key: "rr", num: true },
       { label: "SpO₂", key: "spo2", num: true, render: (r) => r.spo2 != null ? `${fmt.num(r.spo2, 0)}%` : "—" },
-      { label: "TEMP", key: "temp_c", num: true, render: (r) => r.temp_c != null ? `${fmt.num(r.temp_c, 1)}°C` : "—" },
+      { label: "TEMP", key: "temp_c", num: true, render: (r) => U.tempC(r.temp_c) },
       { label: "AVPU", key: "avpu" },
       { label: "NOTE", key: "note", render: (r) => r.note || "—" },
     ], { empty: "No vitals recorded", emptyIcon: "pulse" }),
@@ -236,7 +237,7 @@ async function loadVitals(patientId, target) {
       { data: ordered.map((v) => v.dia), color: "#ffb02e" },
     ], legend: ["SYS", "DIA"] },
     { title: "SpO₂ (%)", series: [{ data: ordered.map((v) => v.spo2), color: "#5dff9a" }] },
-    { title: "TEMPERATURE (°C)", series: [{ data: ordered.map((v) => v.temp_c), color: "#ffb02e" }] },
+    { title: `TEMPERATURE (${U.tempUnit()})`, series: [{ data: ordered.map((v) => v.temp_c != null ? (U.isImperial() ? v * 9/5+32 : v) : null), color: "#ffb02e" }] },
   ];
   const canvases = [];
   for (const chart of charts) {
@@ -265,7 +266,7 @@ async function loadVitals(patientId, target) {
     ["HR / RR", `${latest.hr ?? "—"} bpm / ${latest.rr ?? "—"} /min`],
     ["BP", latest.sys != null && latest.dia != null ? `${latest.sys}/${latest.dia} mmHg` : "—"],
     ["SpO₂", latest.spo2 != null ? `${fmt.num(latest.spo2, 0)} %` : "—"],
-    ["Temperature", latest.temp_c != null ? `${fmt.num(latest.temp_c, 1)} °C` : "—"],
+    ["Temperature", U.tempC(latest.temp_c)],
     ["Glucose", latest.glucose != null ? fmt.num(latest.glucose, 1) : "—"],
     ["Pain / AVPU", `${latest.pain ?? "—"} / ${latest.avpu || "—"}`],
     ["Note", latest.note || "—"],

@@ -16,7 +16,10 @@ database.
 ## What is included
 
 - **SITREP dashboard** — readiness indicator, almanac, feeds, tasks, incidents,
-  recent logs, low stock and system state.
+  recent logs, low stock and system state. Readiness is a transparent local
+  estimate: threats weigh 40%, sustainment 30%, intel coverage 15% and position
+  quality 15%. Critical cached headlines count as threat context, not as an
+  intel-coverage failure.
 - **Document library** — metadata + full-text search (SQLite FTS5) over the
   existing PDF/EPUB/etc. collection, with a bundled PDF.js reader.
 - **Field manual** — 16 local Markdown guides, 40 quick-reference cards and 13
@@ -152,7 +155,9 @@ loopback-only. Scan its QR with the phone camera, review the self-signed
 certificate warning, and continue only on a network you trust and when the IP
 matches the selected interface. Grant browser location permission and tap
 **START GPS SHARING**. The desktop displays age/accuracy and requires an
-explicit **ACCEPT FIX**; no position is saved before acceptance.
+explicit **ACCEPT FIX**; no position is saved before acceptance. A phone fix is
+treated as current for 24 hours before it is flagged stale (GPS receiver fixes use a
+6-hour limit).
 
 The page has no third-party assets and makes no cloud requests. Its temporary
 bearer token is removed from the address bar after load; location updates are
@@ -217,6 +222,8 @@ Use **SYNC NOW** for a one-shot refresh even when automatic sync is disabled.
 - NOAA SWPC Kp and R/S/G space-weather scales
 - NWS active alerts
 - GDACS disaster alerts and NASA EONET natural events
+- RSOE EDIS global disaster events (severity-coded event list with enriched
+  coordinates for the highest-priority events)
 - Smithsonian/USGS volcanic activity
 - Safecast community radiation measurements
 - WHO general news RSS (not a dedicated outbreak-alert feed)
@@ -317,10 +324,18 @@ sole source for a life-safety decision.
 ## Development checks
 
 ```bash
-npm run check                                  # JS/Node/Python syntax
-for f in ui/js/*.js ui/js/views/*.js; do node --check "$f"; done
-python3 -m py_compile darksec/*.py
+python3 -m pip install -r requirements-dev.txt   # pytest, httpx, pyflakes
+npm run check            # Electron/JS syntax + Python compile + offline self-check
+npm run test             # API regression suite (uses a throwaway database)
+npm run check:all        # both of the above
+python3 tools/selfcheck.py   # parsers, schema, config and assistant sanitizer
+node tools/check-js.mjs      # every ui/js module without starting a browser
 ```
+
+The self-check and the pytest suite build throwaway databases; they never
+touch `fielddata/` and do not require network access or Ollama. The pytest
+fixtures live in `tests/conftest.py`; add API-level regression tests there when
+changing a route contract.
 
 Run the backend against a throwaway data directory while testing:
 

@@ -33,7 +33,11 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from . import config
 from .db import utcnow
 
-PAIR_SECONDS = 5 * 60
+# The phone page polls /status and posts /fix while it is open. Keep the
+# session alive on activity so scanning the QR code does not "lose connection"
+# until the phone actually leaves the page (or the operator stops/accepts).
+PAIR_IDLE_SECONDS = 10 * 60
+PAIR_EXTEND_SECONDS = 10 * 60
 FIX_FRESH_SECONDS = 30
 MIN_FIX_INTERVAL_SECONDS = 1.0
 MAX_BODY_BYTES = 4096
@@ -115,7 +119,7 @@ class PhoneGpsBridge:
             self._write_certificate(normalized_ip, cert_path, key_path)
             session_id = secrets.token_urlsafe(12)
             token = secrets.token_urlsafe(32)
-            expires_epoch = time.time() + PAIR_SECONDS
+            expires_epoch = time.time() + PAIR_IDLE_SECONDS
             expires_at = datetime.fromtimestamp(expires_epoch, timezone.utc).isoformat(timespec="seconds")
             bridge = self
 
@@ -127,21 +131,22 @@ class PhoneGpsBridge:
                     return
 
                 def _send(self, code: int, body: bytes, content_type: str) -> None:
-                    self.send_response(code)
-                    self.send_header("Content-Type", content_type)
-                    self.send_header("Content-Length", str(len(body)))
-                    self.send_header("Cache-Control", "no-store, max-age=0")
-                    self.send_header("Pragma", "no-cache")
-                    self.send_header("X-Content-Type-Options", "nosniff")
-                    self.send_header("Referrer-Policy", "no-referrer")
-                    self.send_header("Permissions-Policy", "geolocation=(self)")
-                    self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'")
-                    self.send_header("Connection", "close")
-                    self.end_headers()
+                    self.close_connection = True
                     try:
+                        self.send_response(code)
+                        self.send_header("Content-Type", content_type)
+                        self.send_header("Content-Length", str(len(body)))
+                        self.send_header("Cache-Control", "no-store, max-age=0")
+                        self.send_header("Pragma", "no-cache")
+                        self.send_header("X-Content-Type-Options", "nosniff")
+                        self.send_header("Referrer-Policy", "no-referrer")
+                        self.send_header("Permissions-Policy", "geolocation=(self)")
+                        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'")
+                        self.send_header("Connection", "close")
+                        self.end_headers()
                         self.wfile.write(body)
-                    except (BrokenPipeError, ConnectionResetError):
-                        pass
+                    except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError):
+                        self.close_connection = True
 
                 def _authorized(self, allow_query: bool = False) -> bool:
                     if self.headers.get("Host", "").lower() != f"{normalized_ip}:{httpd.server_address[1]}".lower():
@@ -172,9 +177,14 @@ class PhoneGpsBridge:
                         if not self._authorized():
                             self._send(401, b"Unauthorized", "text/plain; charset=utf-8")
                             return
+                        bridge.touch()
                         state = bridge.status()
-                        body = json.dumps({"state": state["state"], "expires_at": expires_at}, separators=(",", ":")).encode()
+                        body = json.dumps({"state": state["state"], "expires_at": state.get("expires_at")}, separators=(",", ":")).encode()
                         self._send(200, body, "application/json; charset=utf-8")
+                        return
+                    if path == "/ping" and self._authorized():
+                        bridge.touch()
+                        self._send(200, b"{\"ok\":true}", "application/json; charset=utf-8")
                         return
                     self._send(404, b"Not found", "text/plain; charset=utf-8")
 
@@ -187,6 +197,7 @@ class PhoneGpsBridge:
                     if path != "/fix" or not self._authorized():
                         self._send(404, b"Not found", "text/plain; charset=utf-8")
                         return
+                    bridge.touch()
                     try:
                         length = int(self.headers.get("Content-Length", "0"))
                     except ValueError:
@@ -230,9 +241,7 @@ class PhoneGpsBridge:
                 self._state = "waiting"
                 self._error = None
                 self._starting = False
-                self._timer = threading.Timer(PAIR_SECONDS, self._expire)
-                self._timer.daemon = True
-                self._timer.start()
+                self._schedule_expiry_locked(expires_epoch - time.time())
             thread.start()
             return {
                 "session_id": session_id,
@@ -282,6 +291,34 @@ class PhoneGpsBridge:
         os.chmod(cert_path, 0o600)
         os.chmod(key_path, 0o600)
 
+    def _schedule_expiry_locked(self, seconds: float) -> None:
+        """(Re)arm the idle-expiry timer. Caller must hold self._lock."""
+        if self._timer:
+            try:
+                self._timer.cancel()
+            except Exception:
+                pass
+        self._timer = threading.Timer(max(1.0, float(seconds)), self._expire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _touch_locked(self) -> None:
+        """Extend the session while the phone page is actively connected."""
+        session = self._session
+        if not session or self._httpd is None:
+            return
+        now = time.time()
+        if now >= session["expires_epoch"]:
+            return
+        expires_epoch = now + PAIR_EXTEND_SECONDS
+        session["expires_epoch"] = expires_epoch
+        session["expires_at"] = datetime.fromtimestamp(expires_epoch, timezone.utc).isoformat(timespec="seconds")
+        self._schedule_expiry_locked(expires_epoch - now)
+
+    def touch(self) -> None:
+        with self._lock:
+            self._touch_locked()
+
     def qr_payload(self, session_id: str) -> str:
         with self._lock:
             session = self._session
@@ -296,6 +333,7 @@ class PhoneGpsBridge:
                 raise PhoneGpsError("Phone GPS session expired.", 410)
             if not secrets.compare_digest(str(token), session["token"]):
                 raise PhoneGpsError("Unauthorized", 401)
+            self._touch_locked()
             try:
                 lat = float(payload["lat"])
                 lon = float(payload["lon"])
@@ -324,6 +362,7 @@ class PhoneGpsBridge:
             self._last_receive = now
             self._state = "receiving"
             self._error = None
+            self._touch_locked()
             return fix
 
     def status(self) -> dict:

@@ -169,7 +169,7 @@ class Vault:
         kit remains useful after a compromise.
         """
         tables = [
-            "audit", "indicator_history", "log_entries", "tasks",
+            "audit", "log_entries", "tasks",
             "patients", "vitals", "weather_log", "water_log", "power_log", "rad_log",
             "waypoints", "tracks", "radio_log", "notes", "incidents", "inventory",
             "caches", "comms_plans", "opords", "trip_plans", "sdr_jobs", "sdr_recordings",
@@ -177,11 +177,9 @@ class Vault:
         ]
         for table in tables:
             self.db.execute(f"DELETE FROM {table}")
-        # Indicators and feed definitions are part of the baseline kit, not
-        # operator data. Reset their state and cached intel instead of deleting
-        # them, so the console stays usable immediately after a purge.
-        self.db.execute("UPDATE indicators SET status=3, trend='unknown', note='', updated=?",
-                        (time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),))
+        # Feed definitions are part of the baseline kit, not operator data.
+        # Reset their state and cached intel instead of deleting them, so the
+        # console stays usable immediately after a purge.
         self.db.execute("UPDATE feeds SET status='NEVER', fetched_at=NULL, payload=NULL, error=NULL")
         for key in ("vault_salt", "vault_check", "vault_kdf"):
             self.db.execute("DELETE FROM settings WHERE key=?", (key,))
@@ -204,9 +202,8 @@ class Vault:
         PDF files themselves are never deleted by the application.
         """
         result = self.purge_operator_data()
-        # Keep the meta/seed markers: indicator and feed definitions are
-        # baseline kit data. Deleting meta would make the next start seed a
-        # second copy of them.
+        # Keep the meta/seed markers: feed definitions are baseline kit data.
+        # Deleting meta would make the next start seed a second copy of them.
         for table in ("library_fts", "library_docs"):
             try:
                 self.db.execute(f"DELETE FROM {table}")

@@ -3,11 +3,13 @@
    local files or an operator-supplied MBTiles archive. No tile server is
    contacted. Everything else is waypoints and tracks in the local database. */
 import { api, download } from "../api.js";
+import * as mapGl from "./map-gl.js?v=map-upgrade-8";
 import { store } from "../store.js";
 import {
   h, panel, pageHead, btn, iconBtn, icon, badge, toast, modal, field, input, select,
   emptyState, loading, fmt, alertStrip, checkbox, confirmDialog,
 } from "../components.js";
+import * as U from "../units.js";
 import { openRecordForm, deleteRecord } from "../records.js";
 import { downloadText, readTextFile, positionConfidence } from "./shared.js";
 
@@ -46,14 +48,20 @@ function bearingDeg(a, b) {
 }
 
 function niceDistance(m) {
-  if (m <= 0) return { m: 10, label: "10 m" };
+  if (m <= 0) return { m: U.isImperial() ? 3.048 : 10, label: U.distM(10) };
   const units = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000,
     50000, 100000, 200000, 500000, 1000000, 2000000, 5000000];
-  for (const u of units) if (u >= m) return { m: u, label: u >= 1000 ? `${u / 1000} km` : `${u} m` };
-  return { m: units[units.length - 1], label: `${units[units.length - 1] / 1000} km` };
+  for (const u of units) if (u >= m) return { m: u, label: U.distM(u) };
+  return { m: units[units.length - 1], label: U.distM(units[units.length - 1]) };
 }
 
 export async function render(root, params = {}) {
+  const want = params.renderer || params.mode || localStorage.getItem("darksec.map.renderer") || "2d";
+  if (want === "gl" || want === "3d") {
+    try { localStorage.setItem("darksec.map.renderer", "gl"); } catch {}
+    return mapGl.render(root, { ...params, renderer: "gl" });
+  }
+  try { localStorage.setItem("darksec.map.renderer", "2d"); } catch {}
   root.replaceChildren(loading("INITIALISING OFFLINE MAP"));
   let layers, waypoints, tracks, coordNow;
   const settings = store.settings || {};
@@ -64,9 +72,14 @@ export async function render(root, params = {}) {
   let intelFeatures = [];
   let intelAircraft = [];
   let intelSats = [];
+  let intelMaritime = [];
+  let intelCables = [];
+  let intelCctv = [];
   let intelSummaryData = null;
   let sunInfo = null;
   let declInfo = null;
+  let selectedIntel = null; // { kind: 'event'|'aircraft'|'sat'|'maritime'|'cable'|'cctv', data, feature? }
+  let intelMaxAgeHours = 0; // 0 = all
   try {
     const [l, w, t, intel, cel, dec] = await Promise.all([
       api.get("/api/map/layers").catch(() => ({ vector: [], raster: [] })),
@@ -82,6 +95,9 @@ export async function render(root, params = {}) {
     intelFeatures = (intel && intel.features) || [];
     intelAircraft = (intel && intel.aircraft) || [];
     intelSats = (intel && intel.satellites) || [];
+    intelMaritime = (intel && intel.maritime) || [];
+    intelCables = (intel && intel.cables) || [];
+    intelCctv = (intel && intel.cctv) || [];
     intelSummaryData = (intel && intel.summary) || null;
     sunInfo = cel;
     declInfo = dec;
@@ -102,7 +118,7 @@ export async function render(root, params = {}) {
     countries: true, states: true, land: true, lakes: true, rivers: true,
     places: true, graticule: true, tracks: true, waypoints: true,
     basemap: true, labels: true,
-    intelEvents: true, intelConflict: true, intelAircraft: true, intelSats: true, intelDayNight: true,
+    intelEvents: true, intelConflict: true, intelAircraft: true, intelSats: true, intelMaritime: true, intelCables: true, intelCctv: true, intelDayNight: true,
   };
   const raster = (layers.raster || []);
   let tileAvailable = !!(raster.length || settings.mbtiles_path);
@@ -132,8 +148,10 @@ export async function render(root, params = {}) {
   root.appendChild(pageHead({
     kicker: "COMMAND // TERRAIN",
     title: "Map & Terrain",
-    desc: `Bundled vector terrain, local raster tiles, waypoints/tracks and all cached points intelligence. Position marker: ${positionInfo.mapLabel}. Conflict diamonds are monthly UCDP verified or live media-derived GDELT reports; both can be imprecise. Works offline.`,
+    desc: `Bundled vector terrain, local raster tiles, waypoints/tracks and cached intelligence. Position: ${positionInfo.mapLabel}. Click intel/aircraft/satellites for details. Use intel age filter in Layers. Works offline.`,
     actions: [
+      btn("2D CANVAS", { icon: "map", tone: "primary", onClick: () => { location.hash = "#/map?renderer=2d"; } }),
+      btn("3D GL", { icon: "layers", onClick: () => { location.hash = "#/map?renderer=gl"; } }),
       btn("IMPORT GPX", { icon: "upload", onClick: importGpx }),
       btn("EXPORT GPX", { icon: "download", onClick: () => download("/api/map/gpx/export", "darksec-waypoints.gpx") }),
       btn("NEW WAYPOINT", { icon: "plus", tone: "primary", onClick: () => addWaypoint() }),
@@ -189,6 +207,8 @@ export async function render(root, params = {}) {
   shell.appendChild(scaleWrap);
   const readout = h("div", { class: "map-readout" });
   shell.appendChild(readout);
+  const mapPopup = h("div", { class: "map-popup", hidden: true });
+  shell.appendChild(mapPopup);
   layout.appendChild(shell);
 
   const side = h("div", { class: "map-side" });
@@ -230,6 +250,9 @@ export async function render(root, params = {}) {
     ["waypoints", "Waypoints"], ["labels", "Labels"],
     ["intelEvents", "Hazard / disaster events"], ["intelConflict", "Conflict events"],
     ["intelAircraft", "Live aircraft"], ["intelSats", "Satellites"],
+    ["intelMaritime", "Maritime / AIS"],
+    ["intelCables", "Cables / landing points"],
+    ["intelCctv", "CCTV / cameras (OSM)"],
     ["intelDayNight", "Day / night"],
   ];
   for (const [key, label] of layerDefs) {
@@ -243,10 +266,20 @@ export async function render(root, params = {}) {
   }
   cacheStatusEl = h("div", { class: "map-cache-status tiny muted", text: cacheStatusText() });
   const intelSummaryEl = h("div", { class: "map-cache-status tiny", text: "Intel not loaded" });
+  const ageFilter = select([
+    { value: "0", label: "Intel age: all cached" },
+    { value: "6", label: "Intel age: last 6 hours" },
+    { value: "24", label: "Intel age: last 24 hours" },
+    { value: "72", label: "Intel age: last 3 days" },
+    { value: "168", label: "Intel age: last 7 days" },
+    { value: "720", label: "Intel age: last 30 days" },
+  ], "0");
+  ageFilter.addEventListener('change', () => { intelMaxAgeHours = Number(ageFilter.value)||0; draw(); renderIntel(); });
   side.appendChild(panel({
     title: "Layers", icon: "layers",
     body: h("div", { class: "col" },
       layerRows,
+      h("div", { class: "mt-8" }, field("INTEL AGE FILTER", ageFilter)),
       intelSummaryEl,
       h("div", { class: "tiny dim mt-10", text: `${raster.length} raster source(s) · MBTiles ${settings.mbtiles_path ? "configured" : "not configured"}` }),
       cacheStatusEl,
@@ -284,7 +317,10 @@ export async function render(root, params = {}) {
       ["Conflict (GDELT live)", "#ffb02e", "diamond"],
       ["Aircraft", "#48d7ff", "ring"],
       ["Satellite", "#c78bff", "ring"],
-      ["Night side", "rgba(0,0,0,.55)", "square"],
+      ["Maritime / AIS", "#35c9ff", "dot"],
+      ["Cables / landing points", "#ffd166", "dot"],
+      ["CCTV / cameras (OSM)", "#b7ff6a", "dot"],
+      ["Night/terminator", "rgba(148,197,255,.6)", "dot"],
     ]],
   ];
   for (const [group, items] of legendGroups) {
@@ -370,10 +406,14 @@ export async function render(root, params = {}) {
     if (visible.intelConflict) drawIntelConflict(ctx, w, hh);
     if (visible.intelAircraft) drawIntelAircraft(ctx, w, hh);
     if (visible.intelSats) drawIntelSats(ctx, w, hh);
+    if (visible.intelMaritime) drawIntelMaritime(ctx, w, hh);
+    if (visible.intelCables) drawIntelCables(ctx, w, hh);
+    if (visible.intelCctv) drawIntelCctv(ctx, w, hh);
     if (visible.intelDayNight) drawIntelDayNight(ctx, w, hh);
     drawPosition(ctx, w, hh);
     drawMeasure(ctx, w, hh);
     updateScale(w, hh);
+    positionMapPopup();
   }
 
   /* ------------------------------------------------------- offline map packs */
@@ -435,9 +475,9 @@ export async function render(root, params = {}) {
 
     const sourceSel = select([], activeSource, { id: "dl-source" });
     const radiusSel = select([
-      { value: "5", label: "5 km radius" }, { value: "10", label: "10 km radius" },
-      { value: "25", label: "25 km radius" }, { value: "50", label: "50 km radius" },
-      { value: "100", label: "100 km radius" }, { value: "viewport", label: "Current viewport only" },
+      { value: "5", label: `${U.distKm(5)} radius` }, { value: "10", label: `${U.distKm(10)} radius` },
+      { value: "25", label: `${U.distKm(25)} radius` }, { value: "50", label: `${U.distKm(50)} radius` },
+      { value: "100", label: `${U.distKm(100)} radius` }, { value: "viewport", label: "Current viewport only" },
     ], "25");
     const zoomSel = select([
       { value: "12", label: "Zoom 8–12 (regional)" }, { value: "13", label: "Zoom 9–13" },
@@ -808,98 +848,316 @@ export async function render(root, params = {}) {
   }
 
   function drawIntel(ctx, vw, vh) {
+    const maxAge = Number(intelMaxAgeHours)||0;
     for (const f of intelFeatures) {
       const g = f.geometry;
       if (!g || g.type !== "Point") continue;
       const p = f.properties || {};
       if (p.kind === "conflict" || p.feed_id === "gdelt_conflict" || p.feed_id === "ucdp_candidate") continue;
-      const lat = g.coordinates[1], lon = g.coordinates[0];
-      if (lat == null || lon == null) continue;
+      if (maxAge > 0 && p.age_hours != null && Number(p.age_hours) > maxAge) continue;
+      const lat = Number(g.coordinates[1]), lon = Number(g.coordinates[0]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const selected = selectedIntel?.kind === 'event' && selectedIntel.feature === f;
+      if (selected) {
+        const sp = latLonToScreen(lat, lon);
+        if (sp.x >= -24 && sp.y >= -24 && sp.x <= vw + 24 && sp.y <= vh + 24) {
+          ctx.save();
+          ctx.strokeStyle = '#ffffff';
+          ctx.fillStyle = 'rgba(255,255,255,.12)';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.arc(sp.x, sp.y, 8.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.strokeStyle = 'rgba(93,255,154,.35)';
+          ctx.beginPath(); ctx.arc(sp.x, sp.y, 13, 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
+        }
+      }
       intelPoint(ctx, vw, vh, lat, lon, p.severity, p.mag);
+      if (selected) {
+        const sp = latLonToScreen(lat, lon);
+        if (sp.x >= -24 && sp.y >= -24 && sp.x <= vw + 24 && sp.y <= vh + 24) {
+          ctx.save();
+          ctx.font = 'bold 9px JetBrains Mono, monospace';
+          ctx.textBaseline = 'top';
+          ctx.strokeStyle = 'rgba(0,0,0,.75)';
+          ctx.lineWidth = 3;
+          const label = String(p.title || 'Event').slice(0, 42);
+          ctx.strokeText(label, sp.x + 11, sp.y - 8);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(label, sp.x + 11, sp.y - 8);
+          ctx.restore();
+        }
+      }
     }
   }
 
   function drawIntelConflict(ctx, vw, vh) {
+    const maxAge = Number(intelMaxAgeHours)||0;
     for (const f of intelFeatures) {
       const g = f.geometry;
       if (!g || g.type !== "Point") continue;
       const p = f.properties || {};
       if (!(p.kind === "conflict" || p.feed_id === "gdelt_conflict" || p.feed_id === "ucdp_candidate")) continue;
+      if (maxAge > 0 && p.age_hours != null && Number(p.age_hours) > maxAge) continue;
       const lat = Number(g.coordinates[1]), lon = Number(g.coordinates[0]);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      const s = latLonToScreen(lat, lon);
-      if (s.x < -20 || s.y < -20 || s.x > vw + 20 || s.y > vh + 20) continue;
+      const sp = latLonToScreen(lat, lon);
+      if (sp.x < -20 || sp.y < -20 || sp.x > vw + 20 || sp.y > vh + 20) continue;
       const age = Number(p.age_hours);
       const recent = !Number.isFinite(age) || age <= 24;
       const fatalities = Number(p.fatalities) || 0;
       const size = p.verified && fatalities > 0 ? 2.6 + Math.min(4.5, Math.sqrt(fatalities)) : 2.6;
       const color = p.severity === "CRITICAL" ? "#ff5c5c" : (p.verified ? "#ff8a3d" : "#ffb02e");
+      const selected = selectedIntel?.kind === 'event' && selectedIntel.feature === f;
       ctx.save();
       ctx.globalAlpha = recent ? 0.95 : 0.5;
-      ctx.translate(s.x, s.y);
+      ctx.translate(sp.x, sp.y);
       ctx.rotate(Math.PI / 4);
       ctx.fillStyle = color;
       ctx.fillRect(-size, -size, size * 2, size * 2);
+      if (selected) {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(-size - 2, -size - 2, (size + 2) * 2, (size + 2) * 2);
+      }
       ctx.restore();
-      if (view.zoom >= 7 && (recent || p.severity === "CRITICAL")) {
-        ctx.globalAlpha = recent ? 0.95 : 0.6;
-        ctx.font = "8px JetBrains Mono, monospace";
+      if (selected) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,255,255,.8)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, size + 9, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      }
+      if (view.zoom >= 7 && (recent || p.severity === "CRITICAL" || selected)) {
+        ctx.globalAlpha = recent || selected ? 0.95 : 0.6;
+        ctx.font = `${selected ? 'bold ' : ''}8px JetBrains Mono, monospace`;
         ctx.textBaseline = "top";
-        ctx.fillStyle = color;
-        ctx.fillText(`${p.verified ? "VERIFIED" : "LIVE"}${fatalities ? ` ${fatalities} KILLED` : ""}`, s.x + 7, s.y + 2);
+        ctx.fillStyle = selected ? '#fff' : color;
+        const label = selected ? String(p.title || 'Conflict').slice(0, 44) : `${p.verified ? "VERIFIED" : "LIVE"}${fatalities ? ` ${fatalities} KILLED` : ""}`;
+        if (selected) { ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.lineWidth = 3; ctx.strokeText(label, sp.x + 9, sp.y + 2); }
+        ctx.fillText(label, sp.x + 9, sp.y + 2);
         ctx.globalAlpha = 1;
       }
     }
   }
 
   function drawIntelAircraft(ctx, w, hh) {
-    for (const a of (intelAircraft || []).slice(0, 60)) {
+    const showLabels = view.zoom >= 5;
+    for (const a of (intelAircraft || []).slice(0, 120)) {
       const s = latLonToScreen(Number(a.lat), Number(a.lon));
-      if (s.x < -20 || s.y < -20 || s.x > w + 20 || s.y > hh + 20) continue;
-      ctx.strokeStyle = "#48d7ff";
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(s.x, s.y, 2.5, 0, Math.PI * 2); ctx.stroke();
-      ctx.fillStyle = "rgba(72,215,255,.9)";
-      ctx.beginPath(); ctx.arc(s.x, s.y, 1.6, 0, Math.PI * 2); ctx.fill();
+      if (s.x < -24 || s.y < -24 || s.x > w + 24 || s.y > hh + 24) continue;
+      const hdg = Number(a.heading_deg);
+      const sel = selectedIntel?.kind === 'aircraft' && selectedIntel.data === a;
+      ctx.save();
+      ctx.translate(s.x, s.y);
+      if (Number.isFinite(hdg)) ctx.rotate(hdg * Math.PI / 180);
+      ctx.strokeStyle = sel ? '#fff' : '#48d7ff';
+      ctx.fillStyle = sel ? 'rgba(255,255,255,.95)' : 'rgba(72,215,255,.9)';
+      ctx.lineWidth = sel ? 1.6 : 1;
+      ctx.beginPath();
+      ctx.moveTo(0, -5); ctx.lineTo(3.5, 4); ctx.lineTo(0, 2); ctx.lineTo(-3.5, 4); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      ctx.restore();
+      if (showLabels && (a.callsign || sel)) {
+        ctx.font = `${sel ? 'bold ' : ''}8px JetBrains Mono, monospace`;
+        ctx.fillStyle = sel ? '#fff' : 'rgba(72,215,255,.85)';
+        ctx.textBaseline = 'top';
+        const label = String(a.callsign || 'ACFT').trim();
+        ctx.fillText(label, s.x + 7, s.y + 2);
+      }
     }
   }
 
   function drawIntelSats(ctx, w, hh) {
-    for (const s of (intelSats || []).slice(0, 60)) {
-      const lat = Number(s.lat), lon = Number(s.lon);
+    const showLabels = view.zoom >= 3;
+    for (const sat of (intelSats || []).slice(0, 80)) {
+      const lat = Number(sat.lat), lon = Number(sat.lon);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      const s2 = latLonToScreen(lat, lon);
-      if (s2.x < -20 || s2.y < -20 || s2.x > w + 20 || s2.y > hh + 20) continue;
-      ctx.strokeStyle = "#c78bff";
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(s2.x, s2.y, 2, 0, Math.PI * 2); ctx.stroke();
-      ctx.fillStyle = "rgba(199,139,255,.9)";
-      ctx.beginPath(); ctx.arc(s2.x, s2.y, 1.2, 0, Math.PI * 2); ctx.fill();
+      const sp = latLonToScreen(lat, lon);
+      if (sp.x < -24 || sp.y < -24 || sp.x > w + 24 || sp.y > hh + 24) continue;
+      const sel = selectedIntel?.kind === 'sat' && selectedIntel.data === sat;
+      ctx.strokeStyle = sel ? '#fff' : '#c78bff';
+      ctx.fillStyle = sel ? 'rgba(255,255,255,.95)' : 'rgba(199,139,255,.9)';
+      ctx.lineWidth = sel ? 1.5 : 1;
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, sel ? 3.2 : 2.2, 0, Math.PI * 2); ctx.stroke(); ctx.fill();
+      ctx.strokeStyle = sel ? 'rgba(255,255,255,.35)' : 'rgba(199,139,255,.25)';
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, sel ? 8 : 5, 0, Math.PI * 2); ctx.stroke();
+      if (showLabels && (sat.name || sel)) {
+        ctx.font = `${sel ? 'bold ' : ''}8px JetBrains Mono, monospace`;
+        ctx.fillStyle = sel ? '#fff' : 'rgba(199,139,255,.85)';
+        ctx.textBaseline = 'top';
+        ctx.fillText(String(sat.name || `NORAD ${sat.norad || '?'}`).slice(0, 18), sp.x + 8, sp.y + 2);
+      }
     }
   }
 
+
+
+  function drawSimpleIntelPoints(ctx, w, hh, items, opts = {}) {
+    const { color = '#35c9ff', selKind = '', limit = 1500, labelKey = 'title', labelZoom = 9 } = opts;
+    const showLabels = view.zoom >= labelZoom;
+    for (const it of (items || []).slice(0, limit)) {
+      const lat = Number(it.lat), lon = Number(it.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const sp = latLonToScreen(lat, lon);
+      if (sp.x < -24 || sp.y < -24 || sp.x > w + 24 || sp.y > hh + 24) continue;
+      const sel = selectedIntel?.kind === selKind && selectedIntel.data === it;
+      ctx.save();
+      ctx.fillStyle = sel ? '#ffffff' : color;
+      ctx.strokeStyle = sel ? '#ffffff' : 'rgba(0,0,0,.45)';
+      ctx.lineWidth = sel ? 1.4 : 1;
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, sel ? 4 : 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      if (sel) {
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.45;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, 9, 0, Math.PI * 2); ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      ctx.restore();
+      if ((showLabels || sel) && (it[labelKey] || it.name || sel)) {
+        ctx.save();
+        ctx.font = `${sel ? 'bold ' : ''}8px JetBrains Mono, monospace`;
+        ctx.textBaseline = 'top';
+        const label = String(it[labelKey] || it.name || it.vessel || it.callsign || it.camera_id || it.cable_id || 'ITEM').slice(0, 28);
+        if (sel) { ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.lineWidth = 3; ctx.strokeText(label, sp.x + 8, sp.y + 2); }
+        ctx.fillStyle = sel ? '#fff' : color;
+        ctx.fillText(label, sp.x + 8, sp.y + 2);
+        ctx.restore();
+      }
+    }
+  }
+
+  function drawIntelMaritime(ctx, w, hh) {
+    drawSimpleIntelPoints(ctx, w, hh, intelMaritime, { color: '#35c9ff', selKind: 'maritime', labelKey: 'title', labelZoom: 7 });
+  }
+  function drawIntelCables(ctx, w, hh) {
+    drawSimpleIntelPoints(ctx, w, hh, intelCables, { color: '#ffd166', selKind: 'cable', labelKey: 'title', labelZoom: 5 });
+  }
+  function drawIntelCctv(ctx, w, hh) {
+    if (!visible.intelCctv) return;
+    const showLabels = view.zoom >= 11;
+    // Split so ALPR cameras are visually distinct but still use the same clickable data.
+    const normal = [], alpr = [];
+    for (const it of (intelCctv || [])) (it && it.alpr ? alpr : normal).push(it);
+    drawSimpleIntelPoints(ctx, w, hh, normal, { color: '#b7ff6a', selKind: 'cctv', labelKey: 'title', labelZoom: 11 });
+    // ALPR overlay: draw in a distinct color and mark labels when visible/selected.
+    ctx.save();
+    for (const it of alpr) {
+      const lat = Number(it.lat), lon = Number(it.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const sp = latLonToScreen(lat, lon);
+      if (sp.x < -20 || sp.x > w + 20 || sp.y < -20 || sp.y > hh + 20) continue;
+      const sel = selectedIntel && selectedIntel.kind === 'cctv' && selectedIntel.data === it;
+      ctx.save();
+      ctx.globalAlpha = sel ? 1 : 0.92;
+      ctx.fillStyle = sel ? '#ffffff' : '#ff66cc';
+      ctx.strokeStyle = sel ? '#ffffff' : 'rgba(0,0,0,.5)';
+      ctx.lineWidth = sel ? 1.4 : 1;
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, sel ? 4.5 : 3.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      if (sel) {
+        ctx.strokeStyle = '#ff66cc'; ctx.globalAlpha = 0.5;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, 10, 0, Math.PI * 2); ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      ctx.restore();
+      if ((showLabels || sel) && (it.title || sel)) {
+        ctx.save();
+        ctx.font = `${sel ? 'bold ' : ''}8px JetBrains Mono, monospace`;
+        ctx.textBaseline = 'top';
+        const base = String(it.title || it.camera_id || 'ALPR').slice(0, 28);
+        const label = /ALPR|ANPR/i.test(base) ? base : `${base} [ALPR]`;
+        if (sel) { ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.lineWidth = 3; ctx.strokeText(label, sp.x + 8, sp.y + 2); }
+        ctx.fillStyle = sel ? '#fff' : '#ff9adf';
+        ctx.fillText(label, sp.x + 8, sp.y + 2);
+        ctx.restore();
+      }
+    }
+    ctx.restore();
+  }
+
+  function solarPosition(date = new Date()) {
+    const start = Date.UTC(date.getUTCFullYear(), 0, 0);
+    const diff = date.getTime() - start;
+    const dayOfYear = Math.floor(diff / 86400000);
+    const decl = -23.44 * Math.cos((360 / 365) * (dayOfYear + 10) * Math.PI / 180);
+    const utcH = date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600;
+    let subLon = -15 * (utcH - 12);
+    subLon = ((subLon + 180) % 360 + 360) % 360 - 180;
+    return { decl, subLon };
+  }
+
+  function terminatorLat(lon, decl, subLon) {
+    const d = decl * Math.PI / 180;
+    const h = (lon - subLon) * Math.PI / 180;
+    const tanD = Math.tan(d);
+    if (Math.abs(tanD) < 1e-8) return 0;
+    const lat = Math.atan(-Math.cos(h) / tanD) * 180 / Math.PI;
+    return Math.max(-85, Math.min(85, lat));
+  }
+
   function drawIntelDayNight(ctx, w, hh) {
-    const sun = sunInfo;
-    const dec = Number(declInfo?.declination_deg);
-    const sunObj = sun?.sun;
-    const utcRaw = sunObj?.utc || sun?.utc || new Date().toISOString();
-    const utc = new Date(String(utcRaw).replace("Z", "+00:00"));
-    const utcH = utc.getUTCHours() + utc.getUTCMinutes() / 60 + utc.getUTCSeconds() / 3600;
-    const lambdaSolar = 15 * (12 - utcH);
-    const delta = (view.lon - lambdaSolar) * Math.PI / 180;
-    const decRad = (dec * Math.PI) / 180;
-    const tanDec = Math.tan(decRad);
-    let phi = 0;
-    if (Number.isFinite(dec) && Math.abs(tanDec) > 1e-6) phi = Math.atan2(Math.cos(decRad) * Math.cos(delta), tanDec);
-    const latTerm = (phi * 180) / Math.PI;
-    if (!Number.isFinite(latTerm)) return;
-    const s = latLonToScreen(Math.max(-85, Math.min(85, latTerm)), view.lon);
-    ctx.strokeStyle = "rgba(148,197,255,0.55)";
-    ctx.lineWidth = 1;
+    const now = new Date();
+    const { decl, subLon } = solarPosition(now);
+    const sunUpNorth = decl >= 0; // subsolar in north => north side of terminator tends to day? opposite: night is away from sun
+    // Sample terminator across visible longitudes (with padding)
+    const tl = screenToLatLon(0, 0), br = screenToLatLon(w, hh);
+    let lonMin = Math.min(tl.lon, br.lon) - 30, lonMax = Math.max(tl.lon, br.lon) + 30;
+    if (lonMax - lonMin > 360) { lonMin = -180; lonMax = 180; }
+    const pts = [];
+    const step = Math.max(2, (lonMax - lonMin) / 80);
+    for (let lon = lonMin; lon <= lonMax; lon += step) pts.push({ lon, lat: terminatorLat(lon, decl, subLon) });
+    // Build night polygon: terminator curve + bottom or top edge depending on which side is night
+    // Determine if center of view is in daylight
+    const center = { lat: view.lat, lon: view.lon };
+    const cosH = Math.cos((center.lon - subLon) * Math.PI / 180);
+    const sinAlt = Math.sin(center.lat * Math.PI / 180) * Math.sin(decl * Math.PI / 180) + Math.cos(center.lat * Math.PI / 180) * Math.cos(decl * Math.PI / 180) * cosH;
+    const centerIsDay = sinAlt > 0;
+    // Night side: if center is day, night is the opposite side of terminator; if center night, shade side containing center
+    const nightToNorth = !sunUpNorth ? centerIsDay : !centerIsDay; // heuristic refined below
+    // Better: for each point, the sunward side is where altitude > 0. Use subsolar hemisphere.
+    // Build polygon covering night: go along terminator, then along map edge on night side.
+    ctx.save();
+    const path = () => {
+      ctx.beginPath();
+      const first = latLonToScreen(pts[0].lat, pts[0].lon);
+      ctx.moveTo(first.x, first.y);
+      for (let i = 1; i < pts.length; i++) { const p = latLonToScreen(pts[i].lat, pts[i].lon); ctx.lineTo(p.x, p.y); }
+      // close to night edge: test a point slightly "away" from subsolar
+      const midLon = pts[Math.floor(pts.length / 2)].lon;
+      const midLat = pts[Math.floor(pts.length / 2)].lat;
+      // move toward pole opposite subsolar? subsolar lat = decl. night pole side is opposite sign of decl influence; simpler: sample above/below terminator
+      const testLat = Math.max(-85, Math.min(85, midLat + (decl > 0 ? -15 : 15)));
+      const testSin = Math.sin(testLat * Math.PI / 180) * Math.sin(decl * Math.PI / 180) + Math.cos(testLat * Math.PI / 180) * Math.cos(decl * Math.PI / 180) * Math.cos((midLon - subLon) * Math.PI / 180);
+      const nightIsBelow = testSin < 0; // lower on screen? lat increases upward in geo but screen y inverted
+      const last = latLonToScreen(pts[pts.length - 1].lat, pts[pts.length - 1].lon);
+      const firstP = latLonToScreen(pts[0].lat, pts[0].lon);
+      if (nightIsBelow) {
+        // in geo coords, "below" terminator in that test means more negative lat relative? but we need screen edge
+        // if testLat < midLat gave night, shade toward south (higher screen y)
+        const edgeY = testLat < midLat ? hh + 40 : -40;
+        ctx.lineTo(last.x, edgeY); ctx.lineTo(firstP.x, edgeY);
+      } else {
+        const edgeY = testLat < midLat ? -40 : hh + 40;
+        ctx.lineTo(last.x, edgeY); ctx.lineTo(firstP.x, edgeY);
+      }
+      ctx.closePath();
+    };
+    path();
+    ctx.fillStyle = "rgba(5, 12, 30, 0.22)";
+    ctx.fill();
+    // terminator line
     ctx.beginPath();
-    ctx.moveTo(0, s.y);
-    ctx.lineTo(w, s.y);
+    for (let i = 0; i < pts.length; i++) { const p = latLonToScreen(pts[i].lat, pts[i].lon); if (!i) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }
+    ctx.strokeStyle = "rgba(148,197,255,0.45)";
+    ctx.lineWidth = 1.2;
     ctx.stroke();
+    // subsolar marker
+    const ss = latLonToScreen(decl, subLon);
+    if (ss.x > -20 && ss.x < w + 20 && ss.y > -20 && ss.y < hh + 20) {
+      ctx.fillStyle = "rgba(255,220,120,0.85)";
+      ctx.beginPath(); ctx.arc(ss.x, ss.y, 3.5, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = "rgba(255,220,120,0.35)"; ctx.beginPath(); ctx.arc(ss.x, ss.y, 8, 0, Math.PI*2); ctx.stroke();
+    }
+    ctx.restore();
   }
 
   function drawPosition(ctx, w, hh) {
@@ -938,14 +1196,14 @@ export async function render(root, params = {}) {
         total += distanceM(measurePoints[i - 1], measurePoints[i]);
         ctx.font = "9px JetBrains Mono, monospace";
         ctx.fillStyle = "#ffd166";
-        ctx.fillText(fmt.num(total / 1000, 2) + " km", s.x + 5, s.y - 5);
+        ctx.fillText(U.distM(total), s.x + 5, s.y - 5);
       }
     }
     if (measurePoints.length > 1) {
       const last = latLonToScreen(measurePoints.at(-1).lat, measurePoints.at(-1).lon);
       ctx.font = "10px JetBrains Mono, monospace";
       ctx.fillStyle = "#ffb02e";
-      ctx.fillText(`TOTAL ${fmt.num(total / 1000, 2)} km`, last.x + 8, last.y + 12);
+      ctx.fillText(`TOTAL ${U.distM(total)}`, last.x + 8, last.y + 12);
     }
   }
 
@@ -1091,7 +1349,8 @@ export async function render(root, params = {}) {
   }
 
   function renderIntel() {
-    const rows = [...intelFeatures].sort((a, b) => {
+    const maxAge = Number(intelMaxAgeHours)||0;
+    const rows = [...intelFeatures].filter((f)=>{ if(maxAge<=0) return true; const a=f.properties?.age_hours; return a==null || Number(a)<=maxAge; }).sort((a, b) => {
       const aa = a.properties?.age_hours, bb = b.properties?.age_hours;
       if (aa == null && bb == null) return 0;
       if (aa == null) return 1;
@@ -1112,13 +1371,17 @@ export async function render(root, params = {}) {
         main.appendChild(h("div", { class: "wp-name", text: String(p.title || "Event").slice(0, 110) }));
         main.appendChild(h("div", { class: "wp-coord", text: `${p.source || "?"} · ${intelAge(p.age_hours)}${p.place ? ` · ${p.place}` : ""}${p.verified ? " · VERIFIED" : ""}` }));
         item.appendChild(main);
-        const recenter = () => {
+        const selectItem = () => {
           const lon = Number(f.geometry?.coordinates?.[0]), lat = Number(f.geometry?.coordinates?.[1]);
           if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-          view.lat = lat; view.lon = lon; view.zoom = Math.max(view.zoom, 5); draw();
+          selectedIntel = { kind: 'event', data: p, feature: f };
+          selected = null;
+          view.lat = lat; view.lon = lon; view.zoom = Math.max(view.zoom, 5);
+          renderIntelDetails();
+          draw();
         };
-        item.addEventListener("click", recenter);
-        item.addEventListener("keydown", (e) => { if (e.key === "Enter") recenter(); });
+        item.addEventListener("click", selectItem);
+        item.addEventListener("keydown", (e) => { if (e.key === "Enter") selectItem(); });
         intelList.appendChild(item);
       }
       if (rows.length > 12) intelList.appendChild(h("div", { class: "tiny dim", text: `+${rows.length - 12} more mapped points` }));
@@ -1126,8 +1389,227 @@ export async function render(root, params = {}) {
     const s = intelSummaryData || {};
     const newest = s.newest_age_hours;
     intelPanel.querySelector(".sub").textContent = `${rows.length} mapped · newest ${intelAge(newest)}`;
-    intelSummaryEl.textContent = `MAP INTEL: ${s.hazards ?? 0} hazard · ${s.conflict ?? 0} conflict (${s.verified_conflict ?? 0} verified) · newest ${intelAge(newest)}`;
+    intelSummaryEl.textContent = `MAP INTEL: ${s.hazards ?? 0} hazard · ${s.conflict ?? 0} conflict (${s.verified_conflict ?? 0} verified) · maritime ${s.maritime ?? (intelMaritime||[]).length} · cables ${s.cables ?? (intelCables||[]).length} · cctv ${s.cctv ?? (intelCctv||[]).length} · newest ${intelAge(newest)}`;
     intelSummaryEl.style.color = newest != null && newest > 6 ? "#ffb02e" : "";
+  }
+
+  function pickIntel(px, py) {
+    let best = null, bestD = 196; // 14px radius
+    const test = (x, y, kind, data, feature) => {
+      const d = (x-px)*(x-px)+(y-py)*(y-py);
+      if (d < bestD) { bestD = d; best = { kind, data, feature }; }
+    };
+    if (visible.intelAircraft) for (const a of (intelAircraft||[])) { const sp = latLonToScreen(Number(a.lat),Number(a.lon)); test(sp.x,sp.y,'aircraft',a,null); }
+    if (visible.intelSats) for (const sat of (intelSats||[])) { const sp = latLonToScreen(Number(sat.lat),Number(sat.lon)); test(sp.x,sp.y,'sat',sat,null); }
+    if (visible.intelMaritime) for (const m of (intelMaritime||[])) { const sp = latLonToScreen(Number(m.lat),Number(m.lon)); test(sp.x,sp.y,'maritime',m,null); }
+    if (visible.intelCables) for (const c of (intelCables||[])) { const sp = latLonToScreen(Number(c.lat),Number(c.lon)); test(sp.x,sp.y,'cable',c,null); }
+    if (visible.intelCctv) for (const c of (intelCctv||[])) { const sp = latLonToScreen(Number(c.lat),Number(c.lon)); test(sp.x,sp.y,'cctv',c,null); }
+    const maxAge = Number(intelMaxAgeHours) || 0;
+    for (const f of (intelFeatures||[])) {
+      const g=f.geometry; if(!g||g.type!=='Point') continue;
+      const p=f.properties||{};
+      const conflict = p.kind==='conflict'||p.feed_id==='gdelt_conflict'||p.feed_id==='ucdp_candidate';
+      if (conflict && !visible.intelConflict) continue;
+      if (!conflict && !visible.intelEvents) continue;
+      if (maxAge > 0 && p.age_hours != null && Number(p.age_hours) > maxAge) continue;
+      const sp = latLonToScreen(Number(g.coordinates[1]), Number(g.coordinates[0]));
+      test(sp.x,sp.y,'event',p,f);
+    }
+    return best;
+  }
+
+  function selectedIntelLatLon(sel = selectedIntel) {
+    if (!sel) return null;
+    if (sel.kind === 'event') {
+      const c = sel.feature?.geometry?.coordinates;
+      if (Array.isArray(c) && Number.isFinite(Number(c[0])) && Number.isFinite(Number(c[1]))) return { lat: Number(c[1]), lon: Number(c[0]) };
+      if (Number.isFinite(Number(sel.data?.lat)) && Number.isFinite(Number(sel.data?.lon))) return { lat: Number(sel.data.lat), lon: Number(sel.data.lon) };
+      return null;
+    }
+    const lat = Number(sel.data?.lat), lon = Number(sel.data?.lon);
+    return (Number.isFinite(lat) && Number.isFinite(lon)) ? { lat, lon } : null;
+  }
+
+  function hideMapPopup() {
+    mapPopup.hidden = true;
+    mapPopup.replaceChildren();
+    mapPopup.style.left = ''; mapPopup.style.top = '';
+  }
+
+  function positionMapPopup() {
+    if (!mapPopup || mapPopup.hidden || !selectedIntel) return;
+    const ll = selectedIntelLatLon(selectedIntel);
+    if (!ll) { hideMapPopup(); return; }
+    const sp = latLonToScreen(ll.lat, ll.lon);
+    const w = canvas.clientWidth || 800, hh = canvas.clientHeight || 500;
+    if (sp.x < -40 || sp.y < -40 || sp.x > w + 40 || sp.y > hh + 40) { hideMapPopup(); return; }
+    const pw = mapPopup.offsetWidth || 260, ph = mapPopup.offsetHeight || 120;
+    let left = sp.x + 14, top = sp.y - 14;
+    if (left + pw > w - 8) left = sp.x - pw - 14;
+    if (top + ph > hh - 8) top = hh - ph - 8;
+    if (left < 8) left = 8;
+    if (top < 8) top = 8;
+    mapPopup.style.left = `${Math.round(left)}px`;
+    mapPopup.style.top = `${Math.round(top)}px`;
+  }
+
+  function showMapPopup(sel) {
+    if (!sel || !mapPopup) { hideMapPopup(); return; }
+    const ll = selectedIntelLatLon(sel);
+    if (!ll) { hideMapPopup(); return; }
+    const s = latLonToScreen(ll.lat, ll.lon);
+    const w = canvas.clientWidth || 800, hh = canvas.clientHeight || 500;
+    if (s.x < -40 || s.y < -40 || s.x > w + 40 || s.y > hh + 40) { hideMapPopup(); return; }
+    const d = sel.data || {};
+    const isConflict = d.kind === 'conflict' || d.feed_id === 'gdelt_conflict' || d.feed_id === 'ucdp_candidate';
+    const kicker = sel.kind === 'aircraft' ? 'AIRCRAFT' : sel.kind === 'sat' ? 'SATELLITE' : sel.kind === 'maritime' ? 'MARITIME / AIS' : sel.kind === 'cable' ? 'CABLE / LANDING POINT' : sel.kind === 'cctv' ? 'CCTV / CAMERA (OSM)' : (isConflict ? (d.verified ? 'CONFLICT · VERIFIED' : 'CONFLICT · LIVE') : 'HAZARD / EVENT');
+    const title = sel.kind === 'aircraft' ? (d.callsign || d.title || 'Aircraft')
+      : sel.kind === 'sat' ? (d.name || `NORAD ${d.norad || '?'}`)
+      : sel.kind === 'maritime' ? (d.title || d.vessel || d.mmsi || 'Vessel')
+      : sel.kind === 'cable' ? (d.title || d.cable_id || 'Cable point')
+      : sel.kind === 'cctv' ? (d.title || d.camera_id || 'Camera')
+      : (d.title || 'Event');
+    const meta = [];
+    if (sel.kind === 'event') {
+      if (d.source) meta.push(d.source);
+      if (d.severity) meta.push(d.severity);
+      if (d.time) meta.push(fmt.date(d.time));
+      if (d.age_hours != null) meta.push(intelAge(d.age_hours));
+      if (d.place) meta.push(d.place);
+      if (d.mag != null) meta.push(`M${d.mag}`);
+      if (d.fatalities != null) meta.push(`${d.fatalities} killed`);
+      if (d.alt_m != null || d.altitude_m != null) meta.push(`${Math.round(d.alt_m ?? d.altitude_m)} m`);
+    } else if (sel.kind === 'aircraft') {
+      if (d.source) meta.push(d.source);
+      if (d.alt_m != null) meta.push(`${Math.round(d.alt_m)} m`);
+      if (d.speed_kmh != null) meta.push(`${Math.round(d.speed_kmh)} km/h`);
+      if (d.heading_deg != null) meta.push(`${Math.round(d.heading_deg)}°`);
+    } else if (sel.kind === 'sat') {
+      if (d.norad) meta.push(`NORAD ${d.norad}`);
+      if (d.alt_km != null) meta.push(`${Math.round(d.alt_km)} km`);
+      if (d.elevation_deg != null) meta.push(`el ${Math.round(d.elevation_deg)}°`);
+    } else if (sel.kind === 'maritime') {
+      if (d.mmsi) meta.push(`MMSI ${d.mmsi}`);
+      if (d.callsign) meta.push(d.callsign);
+      if (d.speed_kn != null) meta.push(`${Number(d.speed_kn).toFixed(1)} kn`);
+      if (d.course_deg != null) meta.push(`${Math.round(d.course_deg)}°`);
+      if (d.source) meta.push(d.source);
+    } else if (sel.kind === 'cable') {
+      if (d.cable_id) meta.push(d.cable_id);
+      if (d.operator) meta.push(d.operator);
+      if (d.source) meta.push(d.source);
+    } else if (sel.kind === 'cctv') {
+      if (d.alpr) meta.push('ALPR/ANPR');
+      if (d.flock_tagged) meta.push('Flock-tagged (OSM)');
+      if (d.surveillance_type) meta.push(d.surveillance_type);
+      if (d.brand) meta.push(d.brand);
+      if (d.direction) meta.push(`${d.direction}° dir`);
+      if (d.status) meta.push(d.status);
+      if (d.camera_id) meta.push(`OSM ${d.camera_id}`);
+      if (d.source) meta.push(d.source);
+    }
+    const closeBtn = h('button', { class: 'mp-close', type: 'button', title: 'Close', text: '×', onclick: (e) => { e.stopPropagation(); selectedIntel = null; renderIntelDetails(); draw(); } });
+    const actions = h('div', { class: 'mp-actions' },
+      btn('ZOOM', { size: 'sm', tone: 'ghost', onClick: (e) => { e?.stopPropagation?.(); if (ll) { view.lat = ll.lat; view.lon = ll.lon; view.zoom = Math.max(view.zoom, sel.kind === 'sat' ? 4 : 7); draw(); } } }),
+      btn('COPY COORD', { size: 'sm', tone: 'ghost', onClick: async (e) => {
+        e?.stopPropagation?.();
+        const text = `${ll.lat.toFixed(6)}, ${ll.lon.toFixed(6)}`;
+        try { await navigator.clipboard?.writeText(text); toast('Coordinates copied'); } catch { toast(text, 'warn'); }
+      } }),
+    );
+    if (d.url) actions.appendChild(h('a', { class: 'badge cyan', href: d.url, target: '_blank', rel: 'noopener noreferrer', text: 'SOURCE', onclick: (e)=>e.stopPropagation() }));
+    mapPopup.replaceChildren(
+      closeBtn,
+      h('div', { class: 'mp-kicker', text: kicker }),
+      h('div', { class: 'mp-title', text: String(title).slice(0, 180) }),
+      meta.length ? h('div', { class: 'mp-meta', text: meta.filter(Boolean).join(' · ').slice(0, 260) }) : null,
+      d.summary && sel.kind === 'event' ? h('div', { class: 'mp-meta', style: { marginTop: '6px', color: 'var(--text-dim)' }, text: String(d.summary).slice(0, 180) }) : null,
+      actions,
+    );
+    mapPopup.hidden = false;
+    // Position after layout
+    requestAnimationFrame(() => {
+      if (mapPopup.hidden) return;
+      const pw = mapPopup.offsetWidth || 260, ph = mapPopup.offsetHeight || 120;
+      let left = s.x + 14, top = s.y - 14;
+      if (left + pw > w - 8) left = s.x - pw - 14;
+      if (top + ph > hh - 8) top = hh - ph - 8;
+      if (left < 8) left = 8;
+      if (top < 8) top = 8;
+      mapPopup.style.left = `${Math.round(left)}px`;
+      mapPopup.style.top = `${Math.round(top)}px`;
+    });
+  }
+
+  function renderIntelDetails() {
+    let details = side.querySelector('#intel-details');
+    if (!details) { details = h('div', { id: 'intel-details', class: 'mt-8' }); intelPanel.querySelector('.panel-body .col')?.appendChild(details); }
+    if (!selectedIntel) { details.replaceChildren(); hideMapPopup(); return; }
+    const d = selectedIntel.data || {};
+    const rows = [];
+    const push = (k,v) => { if(v!=null&&v!=='') rows.push([k,String(v)]); };
+    if (selectedIntel.kind === 'event') {
+      push('TITLE', d.title); push('SOURCE', d.source); push('SEVERITY', d.severity);
+      push('TIME', d.time ? fmt.date(d.time) : ''); push('AGE', intelAge(d.age_hours)); push('PLACE', d.place);
+      push('COUNTRY', d.country); push('PRECISION', d.precision); push('VERIFIED', d.verified ? 'YES (UCDP)' : 'NO');
+      if (d.mag!=null) push('MAGNITUDE', d.mag); if (d.fatalities!=null) push('FATALITIES', d.fatalities);
+      if (d.depth_km!=null) push('DEPTH', `${d.depth_km} km`); if (d.mentions!=null) push('MENTIONS', d.mentions);
+      if (d.summary) push('SUMMARY', String(d.summary).slice(0,300));
+      const ll = selectedIntelLatLon();
+      if (ll) push('COORDINATES', `${ll.lat.toFixed(5)}, ${ll.lon.toFixed(5)}`);
+    } else if (selectedIntel.kind === 'aircraft') {
+      push('CALLSIGN', d.callsign || d.title); push('SOURCE', d.source || 'OpenSky');
+      if (d.alt_m!=null) push('ALTITUDE', `${Math.round(d.alt_m)} m`); if (d.speed_kmh!=null) push('SPEED', `${Math.round(d.speed_kmh)} km/h`);
+      if (d.heading_deg!=null) push('HEADING', `${Math.round(d.heading_deg)}°`); push('TIME', d.time ? fmt.date(d.time) : '');
+      const ll = selectedIntelLatLon(); if (ll) push('COORDINATES', `${ll.lat.toFixed(5)}, ${ll.lon.toFixed(5)}`);
+    } else if (selectedIntel.kind === 'sat') {
+      push('NAME', d.name); push('NORAD', d.norad); if (d.alt_km!=null) push('ALTITUDE', `${Math.round(d.alt_km)} km`);
+      if (d.elevation_deg!=null) push('ELEVATION', `${Math.round(d.elevation_deg)}°`); push('TIME', d.time ? fmt.date(d.time) : '');
+      const ll = selectedIntelLatLon(); if (ll) push('COORDINATES', `${ll.lat.toFixed(5)}, ${ll.lon.toFixed(5)}`);
+    } else if (selectedIntel.kind === 'maritime') {
+      push('TITLE', d.title || d.vessel); push('MMSI', d.mmsi); push('CALLSIGN', d.callsign);
+      if (d.speed_kn!=null) push('SPEED', `${Number(d.speed_kn).toFixed(1)} kn`);
+      if (d.course_deg!=null) push('COURSE', `${Math.round(d.course_deg)}°`);
+      if (d.heading_deg!=null) push('HEADING', `${Math.round(d.heading_deg)}°`);
+      push('SOURCE', d.source); push('TIME', d.time ? fmt.date(d.time) : '');
+      const ll = selectedIntelLatLon(); if (ll) push('COORDINATES', `${ll.lat.toFixed(5)}, ${ll.lon.toFixed(5)}`);
+    } else if (selectedIntel.kind === 'cable') {
+      push('TITLE', d.title || d.cable_id); push('CABLE ID', d.cable_id); push('OPERATOR', d.operator);
+      if (d.capacity) push('CAPACITY', d.capacity);
+      push('SOURCE', d.source); if (d.summary) push('SUMMARY', String(d.summary).slice(0,300));
+      const ll = selectedIntelLatLon(); if (ll) push('COORDINATES', `${ll.lat.toFixed(5)}, ${ll.lon.toFixed(5)}`);
+    } else if (selectedIntel.kind === 'cctv') {
+      push('TITLE', d.title || d.camera_id);
+      push('ALPR/ANPR', d.alpr ? 'YES (OSM-tagged ALPR/ANPR; locations from OSM, not live tracking)' : 'NO');
+      if (d.flock_tagged) push('FLOCK TAG (OSM)', 'OSM tags mention Flock (community-mapped; verify on OpenStreetMap)');
+      push('SURVEILLANCE TYPE', d.surveillance_type);
+      push('CAMERA TYPE', d.camera_type);
+      push('BRAND/MANUFACTURER', d.brand);
+      push('OPERATOR', d.operator_name);
+      push('DIRECTION', d.direction != null && d.direction !== '' ? `${d.direction}°` : '');
+      push('ZONE', d.surveillance_zone);
+      push('CAMERA/OSM ID', d.camera_id); push('STATUS', d.status);
+      push('SOURCE', d.source); if (d.summary) push('TAGS/SUMMARY', String(d.summary).slice(0,400));
+      push('TIME', d.time ? fmt.date(d.time) : '');
+      const ll = selectedIntelLatLon(); if (ll) push('COORDINATES', `${ll.lat.toFixed(5)}, ${ll.lon.toFixed(5)}`);
+    }
+    const box = h('div', { class: 'panel', style: { padding: '8px 10px', borderColor: 'var(--line-strong)' } });
+    box.appendChild(h('div', { class: 'row between items-center mb-6 gap-6' },
+      h('div', { class: 'side-label', text: `SELECTED ${selectedIntel.kind.toUpperCase()}` }),
+      h('div', { class: 'row gap-4' },
+        btn('ZOOM', { size:'sm', tone:'ghost', onClick: ()=>{ const ll=selectedIntelLatLon(); if(ll){ view.lat=ll.lat; view.lon=ll.lon; view.zoom=Math.max(view.zoom, selectedIntel.kind==='sat'?4:7); draw(); } } }),
+        btn('CLEAR', { size:'sm', tone:'ghost', onClick: ()=>{ selectedIntel=null; renderIntelDetails(); draw(); } }),
+      )));
+    const kv = h('div', { class: 'kv compact' });
+    for (const [k,v] of rows) { kv.appendChild(h('span',{class:'k',text:k})); kv.appendChild(h('span',{class:'v',text:v})); }
+    box.appendChild(kv);
+    const actions = h('div', { class: 'row gap-6 mt-6 wrap' });
+    if (d.url) actions.appendChild(h('a',{class:'badge cyan',href:d.url,target:'_blank',rel:'noopener noreferrer',text:'OPEN SOURCE'}));
+    const ll = selectedIntelLatLon();
+    if (ll) actions.appendChild(btn('COPY COORDS', { size:'sm', tone:'ghost', onClick: async () => { try { await navigator.clipboard?.writeText(`${ll.lat.toFixed(6)}, ${ll.lon.toFixed(6)}`); toast('Coordinates copied'); } catch { toast(`${ll.lat.toFixed(6)}, ${ll.lon.toFixed(6)}`, 'warn'); } } }));
+    if (actions.childNodes.length) box.appendChild(actions);
+    details.replaceChildren(box);
+    showMapPopup(selectedIntel);
   }
 
   function updateReadout(latlon, screen = null) {
@@ -1164,6 +1646,7 @@ export async function render(root, params = {}) {
     moved = false;
     canvas.classList.add("dragging");
   });
+  let lastHoverCheck = 0;
   canvas.addEventListener("pointermove", (e) => {
     if (drag) {
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
@@ -1181,8 +1664,26 @@ export async function render(root, params = {}) {
       return;
     }
     const rect = canvas.getBoundingClientRect();
-    const ll = screenToLatLon(e.clientX - rect.left, e.clientY - rect.top);
-    updateReadout(ll, { x: e.clientX - rect.left, y: e.clientY - rect.top });
+    const ipx = e.clientX - rect.left, ipy = e.clientY - rect.top;
+    const ll = screenToLatLon(ipx, ipy);
+    updateReadout(ll, { x: ipx, y: ipy });
+    if (!placeMode && !measureMode) {
+      const now = performance.now ? performance.now() : Date.now();
+      if (now - lastHoverCheck > 50) {
+        lastHoverCheck = now;
+        let hit = !!pickIntel(ipx, ipy);
+        if (!hit) {
+          for (const wp of waypoints) {
+            const sp = latLonToScreen(wp.lat, wp.lon);
+            const d = (sp.x - ipx) ** 2 + (sp.y - ipy) ** 2;
+            if (d < 144) { hit = true; break; }
+          }
+        }
+        canvas.classList.toggle("hover-intel", hit);
+      }
+    } else {
+      canvas.classList.remove("hover-intel");
+    }
   });
   canvas.addEventListener("pointerup", (e) => {
     const wasMoved = moved;
@@ -1205,18 +1706,31 @@ export async function render(root, params = {}) {
       updateReadout(ll);
       return;
     }
-    // Select nearest waypoint within 12 screen pixels.
+    // Select nearest intel item, then waypoint
+    const ipx = e.clientX - rect.left, ipy = e.clientY - rect.top;
+    const intelHit = pickIntel(ipx, ipy);
     let best = null, bestD = 144;
     for (const wp of waypoints) {
-      const s = latLonToScreen(wp.lat, wp.lon);
-      const d = (s.x - (e.clientX - rect.left)) ** 2 + (s.y - (e.clientY - rect.top)) ** 2;
+      const sp = latLonToScreen(wp.lat, wp.lon);
+      const d = (sp.x - ipx) ** 2 + (sp.y - ipy) ** 2;
       if (d < bestD) { best = wp; bestD = d; }
     }
-    if (best) selectWaypoint(best);
-    else { selected = null; renderWaypoints(); draw(); }
+    if (intelHit && (!best || bestD > 100)) {
+      selectedIntel = intelHit;
+      selected = null;
+      renderIntelDetails();
+      draw();
+    } else if (best) {
+      selectedIntel = null;
+      renderIntelDetails();
+      selectWaypoint(best);
+    } else {
+      selectedIntel = null; selected = null;
+      renderIntelDetails(); renderWaypoints(); draw();
+    }
     updateReadout(ll);
   });
-  canvas.addEventListener("pointerleave", () => { if (!drag) hover = null; });
+  canvas.addEventListener("pointerleave", () => { if (!drag) hover = null; canvas.classList.remove("hover-intel"); });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const rect = canvas.getBoundingClientRect();

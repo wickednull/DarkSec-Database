@@ -17,19 +17,33 @@ const DEMODS = [
   { value: "iq", label: "IQ only — retain raw samples" },
 ];
 
+const PRESET_LS_FAV = "darksec.sdr.favorites";
+const PRESET_LS_CUSTOM = "darksec.sdr.customPresets";
+
+function loadJsonLS(key, fallback) {
+  try { const v = JSON.parse(localStorage.getItem(key) || ""); return v ?? fallback; } catch { return fallback; }
+}
+function saveJsonLS(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+function uid() {
+  return "custom-" + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
+}
+
 function mhz(hz) {
   return hz == null ? "—" : `${fmt.num(Number(hz) / 1e6, 4)} MHz`;
 }
 
 export async function render(root, params = {}) {
   root.replaceChildren(loading("INITIALISING SDR CHAIN"));
-  let devices, jobs, recordings, adsb;
+  let devices, jobs, recordings, adsb, presetData;
   try {
-    [devices, jobs, recordings, adsb] = await Promise.all([
+    [devices, jobs, recordings, adsb, presetData] = await Promise.all([
       api.get("/api/sdr/devices"),
       api.get("/api/sdr/jobs?limit=15"),
       api.get("/api/sdr/recordings"),
       api.get("/api/sdr/adsb").catch(() => ({ available: false, aircraft: [] })),
+      api.get("/api/sdr/presets").catch(() => ({ presets: [], note: "Presets unavailable" })),
     ]);
   } catch (err) {
     root.replaceChildren(h("div", { class: "callout danger", text: err.message }));
@@ -72,6 +86,191 @@ export async function render(root, params = {}) {
   stats.appendChild(stat("Transmit", txEnabled ? "ARMED" : "HARD LOCK",
     txEnabled ? "legal attestation recorded" : "settings gate closed", txEnabled ? "warn" : ""));
   root.appendChild(stats);
+
+  // ---------------------------------------------------------- presets
+  const presetCtl = { tune: null, sweep: null };
+  const presetState = {
+    q: "",
+    region: "ALL",
+    favorites: new Set(loadJsonLS(PRESET_LS_FAV, [])),
+    custom: loadJsonLS(PRESET_LS_CUSTOM, []),
+  };
+  function allPresets() {
+    const server = Array.isArray(presetData?.presets) ? presetData.presets : [];
+    const custom = (Array.isArray(presetState.custom) ? presetState.custom : [])
+      .map((p) => ({ ...p, custom: true }));
+    return [...custom, ...server];
+  }
+  function savePresetState() {
+    saveJsonLS(PRESET_LS_FAV, Array.from(presetState.favorites));
+    saveJsonLS(PRESET_LS_CUSTOM, presetState.custom);
+  }
+  function regionMatch(p) {
+    if (presetState.region === "ALL") return true;
+    const r = String(p.region || "Worldwide").toUpper();
+    if (presetState.region === "WORLDWIDE") return r === "WORLDWIDE" || r === "GLOBAL";
+    return r === presetState.region;
+  }
+  function presetTone(p) {
+    const pri = String(p.priority || "").toUpperCase();
+    const g = String(p.group || "").toUpperCase();
+    if (pri === "EMERGENCY" || g === "EMERGENCY") return "red";
+    if (pri === "HIGH" || g === "WEATHER") return "amber";
+    return "muted";
+  }
+
+  const presetSearch = input({ type: "search", placeholder: "Search presets…", autocomplete: "off" });
+  presetSearch.classList.add("sdr-preset-search");
+  const regionSel = select([
+    { value: "ALL", label: "All regions" },
+    { value: "Worldwide", label: "Worldwide" },
+    { value: "US", label: "US" },
+    { value: "EU", label: "EU" },
+  ], "ALL");
+  const presetList = h("div", { class: "sdr-preset-list" });
+  const presetCount = h("span", { class: "tiny muted mono" });
+
+  function openCustomPreset(existing = null) {
+    const p = existing || {};
+    const nameIn = input({ type: "text", value: p.name || "", placeholder: "e.g. Local Repeater", maxlength: "80" });
+    const freqIn = input({ type: "number", value: p.freq_mhz != null ? String(p.freq_mhz) : "", step: "0.0001", min: "0.1", max: "6000" });
+    const demodIn = select(DEMODS, p.demod || "nfm");
+    const regionIn = select([
+      { value: "Worldwide", label: "Worldwide" }, { value: "US", label: "US" }, { value: "EU", label: "EU" }, { value: "Other", label: "Other" },
+    ], p.region || "Worldwide");
+    const groupIn = input({ type: "text", value: p.group || "CUSTOM", placeholder: "Group", maxlength: "40" });
+    const swStart = input({ type: "number", value: p.sweep?.start_mhz != null ? String(p.sweep.start_mhz) : "", step: "0.1", placeholder: "Sweep start MHz" });
+    const swEnd = input({ type: "number", value: p.sweep?.end_mhz != null ? String(p.sweep.end_mhz) : "", step: "0.1", placeholder: "Sweep end MHz" });
+    const noteIn = input({ type: "text", value: p.note || "", placeholder: "Optional note", maxlength: "200" });
+    const body = h("div", { class: "col gap-8" },
+      field("NAME", nameIn),
+      h("div", { class: "form-grid" }, field("FREQ (MHz)", freqIn), field("DEMOD", demodIn), field("REGION", regionIn), field("GROUP", groupIn)),
+      h("div", { class: "form-grid" }, field("SWEEP START (MHz)", swStart, "Optional: Tune + Sweep range"), field("SWEEP END (MHz)", swEnd)),
+      field("NOTE", noteIn),
+    );
+    const m = modal({
+      title: existing ? "Edit custom preset" : "Add custom preset",
+      sub: "Stored locally on this device",
+      body,
+      actions: [
+        btn("CANCEL", { tone: "ghost", onClick: () => m.close() }),
+        ...(existing ? [btn("DELETE", { tone: "danger", onClick: () => {
+          presetState.custom = (presetState.custom || []).filter((x) => x.id !== existing.id);
+          presetState.favorites.delete(existing.id);
+          savePresetState(); paintPresets(); m.close(); toast("Custom preset deleted");
+        } })] : []),
+        btn(existing ? "SAVE" : "ADD", { tone: "primary", icon: "plus" }),
+      ],
+    });
+    const save = Array.from(m.box.querySelectorAll(".modal-foot .btn")).pop();
+    save.addEventListener("click", () => {
+      const freq = Number(freqIn.value);
+      if (!nameIn.value.trim()) { toast("Name required", "warn"); return; }
+      if (!(freq > 0 && freq <= 6000)) { toast("Valid frequency required (0.1–6000 MHz)", "warn"); return; }
+      const s1 = Number(swStart.value), s2 = Number(swEnd.value);
+      const sweep = (s1 > 0 && s2 > s1) ? { start_mhz: s1, end_mhz: s2 } : null;
+      const next = {
+        id: existing?.id || uid(),
+        name: nameIn.value.trim(),
+        freq_mhz: freq,
+        demod: demodIn.value,
+        region: regionIn.value,
+        group: (groupIn.value || "CUSTOM").trim().toUpperCase(),
+        priority: "CUSTOM",
+        sweep,
+        note: noteIn.value.trim(),
+      };
+      if (existing) presetState.custom = (presetState.custom || []).map((x) => x.id === existing.id ? next : x);
+      else presetState.custom = [next, ...(presetState.custom || [])];
+      savePresetState(); paintPresets(); m.close(); toast(existing ? "Preset saved" : "Preset added");
+    });
+  }
+
+  function paintPresets() {
+    const q = presetState.q.toLowerCase();
+    const favs = presetState.favorites;
+    let items = allPresets().filter(regionMatch);
+    if (q) items = items.filter((p) => `${p.name} ${p.group} ${p.freq_mhz} ${p.demod} ${p.note || ""} ${p.region || ""}`.toLowerCase().includes(q));
+    items.sort((a, b) => {
+      const af = favs.has(a.id) ? 0 : 1, bf = favs.has(b.id) ? 0 : 1;
+      if (af !== bf) return af - bf;
+      const ae = a.priority === "EMERGENCY" ? 0 : 1, be = b.priority === "EMERGENCY" ? 0 : 1;
+      if (ae !== be) return ae - be;
+      return String(a.group).localeCompare(String(b.group)) || Number(a.freq_mhz) - Number(b.freq_mhz);
+    });
+    presetCount.textContent = `${items.length} preset${items.length === 1 ? "" : "s"}`;
+    presetList.replaceChildren();
+    if (!items.length) {
+      presetList.appendChild(h("div", { class: "small muted", style: { padding: "14px 4px" }, text: "No presets match. Try another region/search, or add a custom preset." }));
+      return;
+    }
+    let lastGroup = null;
+    let lastFav = null;
+    for (const p of items) {
+      const isFav = favs.has(p.id);
+      if (isFav !== lastFav) {
+        presetList.appendChild(h("div", { class: "sdr-preset-section", text: isFav ? "PINNED" : "PRESETS" }));
+        lastFav = isFav; lastGroup = null;
+      }
+      const g = String(p.group || "OTHER");
+      if (g !== lastGroup && !isFav) {
+        presetList.appendChild(h("div", { class: "sdr-preset-group", text: g }));
+        lastGroup = g;
+      }
+      const row = h("div", { class: "sdr-preset-row" + (presetTone(p) === "red" ? " is-emergency" : "") });
+      const star = h("button", {
+        type: "button",
+        class: "sdr-preset-star" + (isFav ? " active" : ""),
+        title: isFav ? "Unpin preset" : "Pin preset",
+        text: isFav ? "★" : "☆",
+        on: { click: (e) => {
+          e.stopPropagation();
+          if (favs.has(p.id)) favs.delete(p.id); else favs.add(p.id);
+          savePresetState(); paintPresets();
+        } },
+      });
+      const main = h("div", { class: "sdr-preset-main" });
+      main.appendChild(h("div", { class: "sdr-preset-name", text: p.name }));
+      main.appendChild(h("div", { class: "sdr-preset-meta" },
+        h("span", { class: "mono acc", text: `${fmt.num(p.freq_mhz, p.freq_mhz < 30 ? 3 : 4)} MHz` }),
+        h("span", { class: "sdr-preset-dot", text: "·" }),
+        h("span", { text: String(p.demod || "nfm").toUpperCase() }),
+        h("span", { class: "sdr-preset-dot", text: "·" }),
+        h("span", { text: p.region || "Worldwide" }),
+        ...(p.custom ? [h("span", { class: "sdr-preset-dot", text: "·" }), h("span", { class: "amber", text: "CUSTOM" })] : []),
+      ));
+      if (p.note) main.title = p.note;
+      const actions = h("div", { class: "sdr-preset-actions" },
+        btn("TUNE", { size: "sm", tone: "ghost", title: "Fill capture controls", onClick: () => presetCtl.tune && presetCtl.tune(p) }),
+        btn("SWEEP", { size: "sm", tone: presetTone(p) === "red" ? "amber" : "ghost", title: p.sweep ? "Tune + set sweep range" : "Tune + center sweep", onClick: () => presetCtl.sweep && presetCtl.sweep(p) }),
+      );
+      if (p.custom) actions.appendChild(btn("EDIT", { size: "sm", tone: "ghost", onClick: () => openCustomPreset(p) }));
+      row.append(star, main, actions);
+      presetList.appendChild(row);
+    }
+  }
+
+  presetSearch.addEventListener("input", () => { presetState.q = presetSearch.value.trim(); paintPresets(); });
+  regionSel.addEventListener("change", () => { presetState.region = regionSel.value; paintPresets(); });
+  paintPresets();
+
+  root.appendChild(panel({
+    title: "Quick signal presets",
+    sub: "Tune capture or set a sweep range — no auto-transmit",
+    icon: "antenna",
+    cls: "mt-14 sdr-presets-panel",
+    tools: [presetCount, btn("ADD", { size: "sm", icon: "plus", tone: "ghost", title: "Add custom preset", onClick: () => openCustomPreset(null) })],
+    body: h("div", { class: "sdr-presets-body" },
+      h("div", { class: "sdr-presets-toolbar" },
+        presetSearch,
+        regionSel,
+      ),
+      h("div", { class: "sdr-presets-hint tiny muted" },
+        "Presets fill controls only. Review frequency, mode, gain and legal constraints before starting. ",
+        presetData?.note ? "" : ""),
+      presetList,
+    ),
+  }));
 
   const topGrid = h("div", { class: "panel-grid grid-2 mt-14" });
   root.appendChild(topGrid);
@@ -262,6 +461,34 @@ export async function render(root, params = {}) {
   const capDemod = select(DEMODS, DEMODS.some((d) => d.value === paramMode) ? paramMode : "nfm");
   const capName = input({ type: "text", placeholder: "optional label", maxlength: "120" });
   const capKeepIq = checkbox("Keep IQ file (large; enables TX replay)", false);
+
+  function tuneToPreset(p, { setSweep = false } = {}) {
+    if (!p) return;
+    capFreq.value = String(p.freq_mhz);
+    if (p.demod) capDemod.value = p.demod;
+    if (p.rate_msps != null) capRate.value = String(p.rate_msps);
+    if (p.seconds != null) capSeconds.value = String(p.seconds);
+    if (!capName.value.trim()) capName.value = p.name || "";
+    let sweepMsg = "";
+    if (setSweep) {
+      let s1, s2;
+      if (p.sweep && Number(p.sweep.start_mhz) < Number(p.sweep.end_mhz)) {
+        s1 = Number(p.sweep.start_mhz); s2 = Number(p.sweep.end_mhz);
+      } else {
+        const span = p.freq_mhz >= 1000 ? 4 : p.freq_mhz >= 100 ? 2 : p.freq_mhz >= 30 ? 4 : 2;
+        s1 = Math.max(0.1, p.freq_mhz - span / 2);
+        s2 = Math.min(6000, p.freq_mhz + span / 2);
+      }
+      startInput.value = String(Number(s1.toFixed(4)));
+      endInput.value = String(Number(s2.toFixed(4)));
+      sweepMsg = ` Sweep ${fmt.num(s1, 3)}–${fmt.num(s2, 3)} MHz ready.`;
+    }
+    toast(`Preset: ${p.name} — ${fmt.num(p.freq_mhz, 4)} MHz ${String(p.demod || "").toUpperCase()}.${sweepMsg}`);
+    (setSweep ? spectrumBody : captureBody).scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+  presetCtl.tune = (p) => tuneToPreset(p, { setSweep: false });
+  presetCtl.sweep = (p) => tuneToPreset(p, { setSweep: true });
+
   const capGrid = h("div", { class: "form-grid" });
   capGrid.append(
     field("FREQUENCY (MHz)", capFreq),

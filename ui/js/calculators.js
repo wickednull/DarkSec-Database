@@ -1,5 +1,6 @@
 import { api } from "./api.js";
 import { h, input, select, field, btn, loading } from "./components.js";
+import * as U from "./units.js";
 
 let catalogPromise = null;
 
@@ -73,7 +74,7 @@ export function resultNode(result) {
 
   for (const [key, value] of Object.entries(result || {})) {
     if (key === "note") { note = String(value || ""); continue; }
-    const primitive = formatPrimitive(value);
+    const primitive = formatResultPrimitive(key, value);
     if (primitive === null) {
       nested.push([key, value]);
       continue;
@@ -101,7 +102,7 @@ export function resultNode(result) {
       for (const [k, v] of Object.entries(value)) {
         const cell = h("div", { class: "cr-item" });
         cell.appendChild(h("div", { class: "k", text: prettyKey(k) }));
-        cell.appendChild(h("div", { class: "v", text: formatPrimitive(v) ?? String(v) }));
+        cell.appendChild(h("div", { class: "v", text: formatResultPrimitive(k, v) ?? String(v) }));
         subgrid.appendChild(cell);
       }
       sub.appendChild(subgrid);
@@ -110,6 +111,44 @@ export function resultNode(result) {
   }
   if (note) wrap.appendChild(h("div", { class: "note", text: note }));
   return wrap;
+}
+
+
+function fieldDisplay(f) {
+  const u = String(f.unit || "");
+  if (!U.isImperial()) return { label: `${f.label}${u ? ` (${u})` : ""}`, unit: u, toCanonical: (v)=>v, fromCanonical: (v)=>v };
+  if (u === "°C" || /temp|dew|wet.?bulb|outside air temperature/i.test(f.label+f.name)) return { label: `${f.label} (°F)`, unit: "°F", toCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?(n-32)*5/9:v;}, fromCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n*9/5+32:v;} };
+  if (u === "km/h" || u === "kmh") return { label: `${f.label} (mph)`, unit: "mph", toCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n/0.621371:v;}, fromCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n*0.621371:v;} };
+  if (u === "hPa") return { label: `${f.label} (inHg)`, unit: "inHg", toCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n/0.0295299830714:v;}, fromCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n*0.0295299830714:v;} };
+  if (u === "km") return { label: `${f.label} (mi)`, unit: "mi", toCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n/0.621371:v;}, fromCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n*0.621371:v;} };
+  if (u === "m") return { label: `${f.label} (ft)`, unit: "ft", toCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n/3.28084:v;}, fromCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n*3.28084:v;} };
+  if (u === "mm") return { label: `${f.label} (in)`, unit: "in", toCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n*25.4:v;}, fromCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n/25.4:v;} };
+  if (u === "L" || u === "l") return { label: `${f.label} (gal)`, unit: "gal", toCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n/0.264172:v;}, fromCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n*0.264172:v;} };
+  if (u === "kg") return { label: `${f.label} (lb)`, unit: "lb", toCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n/2.20462:v;}, fromCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n*2.20462:v;} };
+  if (u === "cm") return { label: `${f.label} (in)`, unit: "in", toCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n*2.54:v;}, fromCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n/2.54:v;} };
+  if (u === "mL" || u === "ml") return { label: `${f.label} (fl oz)`, unit: "fl oz", toCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n*29.5735:v;}, fromCanonical: (v)=>{const n=Number(v); return Number.isFinite(n)?n/29.5735:v;} };
+  return { label: `${f.label}${u ? ` (${u})` : ""}`, unit: u, toCanonical: (v)=>v, fromCanonical: (v)=>v };
+}
+
+function formatResultPrimitive(key, value) {
+  if (value == null) return "—";
+  if (typeof value === "boolean") return value ? "YES" : "NO";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return String(value);
+    if (U.isImperial()) {
+      if (/_c$|^temp_c$|temp|dew|wet|chill|heat_index|humidex|wind_chill/.test(key) && !/pct|percent|percentile/.test(key)) return `${(value*9/5+32).toLocaleString(undefined,{maximumFractionDigits:2})} °F`;
+      if (/kmh|speed_kmh|wind_kmh|velocity_kmh|_kmh$/.test(key)) return `${(value*0.621371).toLocaleString(undefined,{maximumFractionDigits:2})} mph`;
+      if (/^km$|distance_km|_km$|radius_km/.test(key)) return `${(value*0.621371).toLocaleString(undefined,{maximumFractionDigits:2})} mi`;
+      if (/pressure_hpa|hpa/.test(key)) return `${(value*0.0295299830714).toLocaleString(undefined,{maximumFractionDigits:3})} inHg`;
+      if (/precip_mm|_mm$/.test(key) && !/mmhg/.test(key)) return `${(value/25.4).toLocaleString(undefined,{maximumFractionDigits:2})} in`;
+      if (/_m$|distance_m|alt_m|elevation_m|height_m/.test(key) && !/_mm$|km/.test(key)) return `${(value*3.28084).toLocaleString(undefined,{maximumFractionDigits:1})} ft`;
+      if (/weight_kg|_kg$/.test(key)) return `${(value*2.20462).toLocaleString(undefined,{maximumFractionDigits:2})} lb`;
+      if (/volume_l|liters|_l$/.test(key) && !/level|label|ml|fuel_l_hr/.test(key)) return `${(value*0.264172).toLocaleString(undefined,{maximumFractionDigits:2})} gal`;
+    }
+    return Number.isInteger(value) ? String(value) : value.toLocaleString(undefined, { maximumFractionDigits: 3 });
+  }
+  if (typeof value === "string") return value;
+  return null;
 }
 
 function controlFor(f) {
@@ -122,13 +161,15 @@ function controlFor(f) {
     label._control = cb;
     return label;
   }
+  const disp = fieldDisplay(f);
+  const dv = f.default == null ? "" : (typeof f.default === "number" ? disp.fromCanonical(f.default) : f.default);
   return input({
     type: f.type === "text" ? "text" : "number",
-    value: f.default ?? "",
+    value: dv ?? "",
     step: f.type === "text" ? undefined : "any",
     min: f.min,
     max: f.max,
-    placeholder: f.default === undefined ? "" : String(f.default),
+    placeholder: dv === "" ? "" : String(dv),
   });
 }
 
@@ -145,7 +186,7 @@ export function calcCard(spec, { open = false } = {}) {
   for (const f of spec.fields || []) {
     const ctrl = controlFor(f);
     controls[f.name] = { ctrl, f };
-    form.appendChild(field(`${f.label}${f.unit ? ` (${f.unit})` : ""}`, ctrl));
+    form.appendChild(field(fieldDisplay(f).label, ctrl));
   }
   if (!spec.fields?.length) form.appendChild(h("div", { class: "hint", text: "Reference output — no inputs required." }));
   body.appendChild(form);
@@ -163,12 +204,10 @@ export function calcCard(spec, { open = false } = {}) {
         payload[name] = !!(ctrl._control || ctrl.querySelector("input"))?.checked;
       } else if (ctrl.value !== "") {
         let value = ctrl.value;
-        // Convert numeric inputs to numbers
         if (f.type === "number" || ctrl.type === "number") {
           value = parseFloat(value);
-          if (isNaN(value)) {
-            continue; // Skip invalid numbers
-          }
+          if (isNaN(value)) continue;
+          value = fieldDisplay(f).toCanonical(value);
         }
         payload[name] = value;
       }
@@ -213,7 +252,7 @@ export function calcQuick(spec, buttonLabel = "COMPUTE") {
   for (const f of spec.fields) {
     const ctrl = controlFor(f);
     controls[f.name] = { ctrl, f };
-    form.appendChild(field(`${f.label}${f.unit ? ` (${f.unit})` : ""}`, ctrl));
+    form.appendChild(field(fieldDisplay(f).label, ctrl));
   }
   const out = h("div");
   const run = btn(buttonLabel, { tone: "primary", size: "sm" });
@@ -223,12 +262,10 @@ export function calcQuick(spec, buttonLabel = "COMPUTE") {
       if (f.type === "boolean") payload[name] = !!(ctrl._control || ctrl.querySelector("input"))?.checked;
       else if (ctrl.value !== "") {
         let value = ctrl.value;
-        // Convert numeric inputs to numbers
         if (f.type === "number" || ctrl.type === "number") {
           value = parseFloat(value);
-          if (isNaN(value)) {
-            continue; // Skip invalid numbers
-          }
+          if (isNaN(value)) continue;
+          value = fieldDisplay(f).toCanonical(value);
         }
         payload[name] = value;
       }

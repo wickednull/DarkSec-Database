@@ -9,7 +9,8 @@ import { kv, progressBar, referenceSection } from "./shared.js";
 
 let lastTab = "water";
 
-export async function render(root) {
+export async function render(root, params = {}) {
+  if (["water", "food", "power", "inventory"].includes(params.tab)) lastTab = params.tab;
   root.replaceChildren(loading("READING SUPPLY LOGS"));
   let water, power, inventory, low;
   try {
@@ -71,7 +72,7 @@ export async function render(root) {
       { id: "food", label: "FOOD", count: foodStock.length },
       { id: "power", label: "POWER", count: powerItems.length },
       { id: "inventory", label: "INVENTORY", count: inv.length },
-    ], lastTab, (id) => { lastTab = id; render(root); }));
+    ], lastTab, (id) => { lastTab = id; try { history.replaceState(null, "", `#/supply?tab=${id}`); } catch {} render(root); }));
   root.appendChild(bar);
 
   if (lastTab === "water") await waterSection(root, waterItems, waterStock, lowItems);

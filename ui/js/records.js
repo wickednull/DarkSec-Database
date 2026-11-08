@@ -2,6 +2,8 @@ import { api } from "./api.js";
 import {
   h, field, input, textarea, select, checkbox, modal, btn, toast, confirmDialog,
 } from "./components.js";
+import { store } from "./store.js";
+import * as U from "./units.js";
 
 /* Field definitions mirror the server's RECORD_TABLES. Timestamps are stamped
    server-side. `defaults` can supply live position or a related row id. */
@@ -34,7 +36,7 @@ export const RECORD_DEFS = {
       { name: "name", label: "Name" },
       { name: "age", label: "Age", type: "number", min: 0, max: 120 },
       { name: "sex", label: "Sex", type: "select", options: ["", "F", "M", "OTHER"] },
-      { name: "weight_kg", label: "Weight (kg)", type: "number", step: "0.1" },
+      { name: "weight_kg", label: "Weight", unitGroup: "weight", type: "number", step: "0.1" },
       { name: "blood_type", label: "Blood type", type: "select", options: ["", "O+", "O-", "A+", "A-", "B+", "B-", "AB+", "AB-", "UNKNOWN"] },
       { name: "triage", label: "Triage", type: "select", options: ["UNASSESSED", "RED", "YELLOW", "GREEN", "BLACK"] },
       { name: "status", label: "Status", placeholder: "stable, monitored…" },
@@ -53,7 +55,7 @@ export const RECORD_DEFS = {
       { name: "sys", label: "Systolic (mmHg)", type: "number" },
       { name: "dia", label: "Diastolic (mmHg)", type: "number" },
       { name: "spo2", label: "SpO₂ (%)", type: "number" },
-      { name: "temp_c", label: "Temperature (°C)", type: "number", step: "0.1" },
+      { name: "temp_c", label: "Temperature", unitGroup: "temp", type: "number", step: "0.1" },
       { name: "glucose", label: "Glucose", type: "number", step: "0.1" },
       { name: "pain", label: "Pain (0-10)", type: "number", min: 0, max: 10 },
       { name: "avpu", label: "AVPU", type: "select", options: ["", "A", "V", "P", "U"] },
@@ -98,16 +100,16 @@ export const RECORD_DEFS = {
   weather_log: {
     label: "Weather observation",
     fields: [
-      { name: "temp_c", label: "Temperature (°C)", type: "number", step: "0.1" },
-      { name: "pressure_hpa", label: "Pressure (hPa)", type: "number", step: "0.1" },
+      { name: "temp_c", label: "Temperature", unitGroup: "temp", type: "number", step: "0.1" },
+      { name: "pressure_hpa", label: "Pressure", unitGroup: "pressure", type: "number", step: "0.1" },
       { name: "humidity", label: "Humidity (%)", type: "number" },
       { name: "wind_dir", label: "Wind direction (°)", type: "number" },
-      { name: "wind_kmh", label: "Wind (km/h)", type: "number", step: "0.1" },
-      { name: "gust_kmh", label: "Gust (km/h)", type: "number", step: "0.1" },
-      { name: "precip_mm", label: "Precipitation (mm)", type: "number", step: "0.1" },
+      { name: "wind_kmh", label: "Wind", unitGroup: "speed", type: "number", step: "0.1" },
+      { name: "gust_kmh", label: "Gust", unitGroup: "speed", type: "number", step: "0.1" },
+      { name: "precip_mm", label: "Precipitation", unitGroup: "precip", type: "number", step: "0.1" },
       { name: "cloud_cover", label: "Cloud cover (okta)", type: "number", min: 0, max: 8 },
       { name: "cloud_type", label: "Cloud type", placeholder: "CU, CB, AC…" },
-      { name: "visibility_km", label: "Visibility (km)", type: "number", step: "0.1" },
+      { name: "visibility_km", label: "Visibility", unitGroup: "dist", type: "number", step: "0.1" },
       { name: "lat", label: "Latitude", type: "number", step: "0.000001" },
       { name: "lon", label: "Longitude", type: "number", step: "0.000001" },
       { name: "note", label: "Note", type: "textarea", rows: 2, wide: true },
@@ -117,7 +119,7 @@ export const RECORD_DEFS = {
     label: "Water log",
     fields: [
       { name: "source", label: "Source" },
-      { name: "volume_l", label: "Volume (L)", type: "number", step: "0.1" },
+      { name: "volume_l", label: "Volume", unitGroup: "volume", type: "number", step: "0.1" },
       { name: "method", label: "Treatment", type: "select", options: ["BOILED", "CHLORINE", "FILTER", "UV", "RO", "UNTREATED", "OTHER"] },
       { name: "chlorine_ppm", label: "Free chlorine (ppm)", type: "number", step: "0.1" },
       { name: "note", label: "Note", type: "textarea", rows: 2, wide: true },
@@ -127,7 +129,7 @@ export const RECORD_DEFS = {
     label: "Power log",
     fields: [
       { name: "battery_pct", label: "Battery (%)", type: "number" },
-      { name: "fuel_l", label: "Fuel (L)", type: "number", step: "0.1" },
+      { name: "fuel_l", label: "Fuel", unitGroup: "volume", type: "number", step: "0.1" },
       { name: "generator_hours", label: "Generator hours", type: "number", step: "0.1" },
       { name: "solar_kwh", label: "Solar (kWh)", type: "number", step: "0.01" },
       { name: "load_w", label: "Load (W)", type: "number", step: "1" },
@@ -149,7 +151,7 @@ export const RECORD_DEFS = {
       { name: "name", label: "Name", required: true },
       { name: "lat", label: "Latitude", type: "number", step: "0.000001", required: true },
       { name: "lon", label: "Longitude", type: "number", step: "0.000001", required: true },
-      { name: "ele", label: "Elevation (m)", type: "number", step: "0.1" },
+      { name: "ele", label: "Elevation", unitGroup: "length", type: "number", step: "0.1" },
       { name: "type", label: "Type", type: "select", options: ["WAYPOINT", "CAMP", "WATER", "CACHE", "LZ", "HAZARD", "RV", "OBSERVATION"] },
       { name: "note", label: "Note", type: "textarea", rows: 2, wide: true },
     ],
@@ -202,6 +204,12 @@ function localDateTimeValue(value) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function displayValue(f, value) {
+  if (value == null || value === "") return "";
+  if (f.unitGroup && U.GROUP[f.unitGroup]) return U.GROUP[f.unitGroup].to(value);
+  return value;
+}
+
 function controlFor(f, value) {
   if (f.type === "textarea") {
     return textarea({ value: value ?? "", rows: f.rows || 3, placeholder: f.placeholder || "" });
@@ -212,9 +220,10 @@ function controlFor(f, value) {
   if (f.type === "checkbox") {
     return checkbox(f.label, !!value);
   }
+  const dv = displayValue(f, value);
   return input({
     type: f.type || "text",
-    value: f.type === "datetime-local" ? localDateTimeValue(value) : (value ?? ""),
+    value: f.type === "datetime-local" ? localDateTimeValue(value) : (dv ?? ""),
     step: f.step,
     min: f.min,
     max: f.max,
@@ -232,7 +241,8 @@ export function openRecordForm({ table, item = null, defaults = {}, fields = nul
     const raw = item ? item[f.name] : (defaults[f.name] ?? f.default ?? "");
     const ctrl = controlFor(f, raw);
     controls[f.name] = { ctrl, spec: f };
-    form.appendChild(h("div", { class: f.wide ? "wide" : "" }, field(f.label, ctrl, f.hint || "")));
+    const label = f.unitGroup && U.GROUP[f.unitGroup] ? `${f.label} (${U.GROUP[f.unitGroup].unit()})` : f.label;
+    form.appendChild(h("div", { class: f.wide ? "wide" : "" }, field(label, ctrl, f.hint || "")));
   }
   const body = h("div", { class: "col" }, intro, form);
   let saving = false;
@@ -265,6 +275,11 @@ export function openRecordForm({ table, item = null, defaults = {}, fields = nul
           return;
         }
         value = date.toISOString();
+      }
+      if (f.unitGroup && U.GROUP[f.unitGroup] && value !== null && value !== undefined && value !== "") {
+        const cv = U.GROUP[f.unitGroup].from(value);
+        if (cv == null) { toast(`${f.label} has an invalid number`, "warn"); return; }
+        value = cv;
       }
       payload[name] = value;
     }

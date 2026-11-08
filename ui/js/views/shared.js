@@ -82,7 +82,7 @@ export function positionConfidence(settings = {}) {
     }
     const ageText = fmt.ago(fixAt);
     const savedText = Number.isFinite(updated) ? ` · saved ${fmt.ago(updated)}` : "";
-    const stale = ageMs > 6 * 60 * 60_000;
+    const stale = ageMs > (source === "phone" ? 24 : 6) * 60 * 60_000;
     const old = ageMs > 15 * 60_000;
     const sourceLabel = source === "phone" ? "phone GPS" : "GPS receiver";
     const mapLabel = source === "phone" ? `${stale ? "STALE PHONE" : "PHONE GPS"} ${ageText}` : `${stale ? "STALE GPS" : "GPS"} ${ageText}`;

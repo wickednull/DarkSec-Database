@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import shutil
 import subprocess
@@ -21,7 +20,6 @@ import threading
 import time
 import uuid
 import wave
-from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -448,12 +446,19 @@ def demod_to_wav(iq_path: Path, out_path: Path, rate: float, mode: str,
     mode = mode.lower()
     if mode == "nfm":
         audio_rate = 24_000
+    prev_iq = None
+    ssb_phase = 0.0
     with wave.open(str(out_path), "wb") as wf:
         wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(audio_rate)
         for iq in _iter_iq(iq_path):
             if mode in ("nfm", "wfm"):
-                disc = np.angle(iq[1:] * np.conj(iq[:-1]))
-                disc = np.concatenate(([0.0], disc)).astype(np.float32)
+                if prev_iq is not None and prev_iq.size:
+                    iq_d = np.concatenate(([prev_iq[-1]], iq))
+                    disc = np.angle(iq_d[1:] * np.conj(iq_d[:-1])).astype(np.float32)
+                else:
+                    disc = np.angle(iq[1:] * np.conj(iq[:-1]))
+                    disc = np.concatenate(([0.0], disc)).astype(np.float32)
+                prev_iq = iq
                 if mode == "wfm":
                     disc = _deemphasis(_resample(disc, rate, audio_rate), audio_rate)
                 else:
@@ -468,10 +473,14 @@ def demod_to_wav(iq_path: Path, out_path: Path, rate: float, mode: str,
                 _write_wav_chunk(wf, env)
             elif mode in ("usb", "lsb"):
                 # Bring the 300-3000 Hz audio passband to baseband, then lowpass.
+                # Keep a continuous oscillator phase across blocks to avoid clicks.
                 offset = 1650.0 if mode == "usb" else -1650.0
                 n = np.arange(iq.size, dtype=np.float32)
-                mixed = iq * np.exp(-2j * np.pi * offset * n / rate)
-                base = mixed.real
+                phase = ssb_phase - 2.0 * np.pi * offset * n / rate
+                mixed = iq * np.exp(1j * phase)
+                ssb_phase = float(phase[-1] - 2.0 * np.pi * offset / rate) if iq.size else ssb_phase
+                ssb_phase = (ssb_phase + np.pi) % (2.0 * np.pi) - np.pi
+                base = mixed.real.astype(np.float32)
                 base = _lowpass(base, rate, 3_200)
                 base = _resample(base, rate, audio_rate)
                 _write_wav_chunk(wf, base)

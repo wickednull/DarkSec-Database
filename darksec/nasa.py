@@ -8,10 +8,9 @@ Fetches asteroid close approaches and calculates threat levels based on:
 from __future__ import annotations
 
 import json
-import math
+import os
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 import requests
@@ -42,13 +41,17 @@ def cached_neo_summary() -> dict | None:
 
 
 def _get_api_key() -> str:
-    """Use DEMO_KEY by default; allow override via config.json."""
+    """Use NASA_API_KEY, then config.json, else DEMO_KEY."""
+    env_key = os.environ.get("NASA_API_KEY", "").strip()
+    if env_key:
+        return env_key
     try:
         from . import config
-        cfg_path = config.DATA_ROOT / "config.json"
+        cfg_path = config.DATA_DIR / "config.json"
         if cfg_path.exists():
             cfg = json.loads(cfg_path.read_text("utf-8"))
-            key = (cfg or {}).get("nasa_api_key") or (cfg or {}).get("nasa") and ((cfg.get("nasa") or {}).get("api_key"))
+            nasa_cfg = (cfg or {}).get("nasa") if isinstance((cfg or {}).get("nasa"), dict) else {}
+            key = (cfg or {}).get("nasa_api_key") or nasa_cfg.get("api_key")
             if key:
                 return str(key)
     except Exception:
@@ -113,11 +116,13 @@ def fetch_neo_objects(api_key: Optional[str] = None) -> list[dict]:
         return objects
     except requests.RequestException as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
-        delay = 3600 if status == 429 else 6 * 3600 if status in (401, 403) else 300
+        # DEMO_KEY is heavily rate-limited (30/hour per IP). A longer cooldown
+        # stops repeated calls from intel overview/autosync during that window.
+        delay = 6 * 3600 if status in (401, 403, 429) else 300
         _cache["retry_after"] = time.monotonic() + delay
         code = f"HTTP {status}" if status else type(exc).__name__
         # Do not print the exception URL: it contains the API key.
-        print(f"NASA NEO unavailable ({code}); retry deferred for {delay // 60} min")
+        print(f"NASA NEO unavailable ({code}); serving cached data and deferring retry for {delay // 60} min")
         return _cache["objects"] or []
     except ValueError:
         _cache["retry_after"] = time.monotonic() + 300

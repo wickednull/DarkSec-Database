@@ -143,16 +143,19 @@ export async function render(root) {
     sub: "Temporary HTTPS on one selected local interface · no cloud relay",
     body: h("div", { class: "col gap-8" },
       field("Computer interface", phoneInterface, "Connect the phone and computer to the same trusted Wi-Fi or phone hotspot."),
-      h("div", { class: "callout warn small", text: "The phone uses its normal browser—no external app. This creates a separate HTTPS listener bound only to the selected local IP for 5 minutes; the main API remains loopback-only. Use a trusted AP that allows device-to-device traffic; some phone hotspots isolate clients. iOS/Android may show a self-signed-certificate warning: continue only if you started this session, the URL IP matches this interface, and you are on your private network. The phone must grant location permission and keep the page open. OPSEC mode stops the listener. Accepting a fresh fix updates the map, navigation, almanac, weather/intel references and the status-bar GPS source/age; it is not saved until you accept it." }),
+      h("div", { class: "callout warn small", text: "The phone uses its normal browser—no external app. This creates a separate HTTPS listener bound only to the selected local IP; the main API remains loopback-only. Keep the phone page open — the session stays connected while active (not a fixed 5-minute cutoff), and you can switch DarkSec tabs without stopping it. Use a trusted AP that allows device-to-device traffic; some phone hotspots isolate clients. iOS/Android may show a self-signed-certificate warning: continue only if you started this session, the URL IP matches this interface, and you are on your private network. The phone must grant location permission. OPSEC mode or STOP ends the listener. Accepting a fresh fix updates the map, navigation, almanac, weather/intel references and the status-bar GPS source/age; accepting saves the fix but keeps the listener open for newer fixes until you stop it." }),
       h("div", { class: "row wrap gap-6" }, phoneStartButton, phoneStopButton, phoneAcceptButton),
       phoneQrWrap, phoneUrl, phoneState, phoneFix),
   });
   phoneStartButton.disabled = true;
   grid.appendChild(phoneGpsPanel);
   loadPhoneInterfaces();
+  reattachPhoneGps();
   cleanups.push(() => {
+    // Keep the backend phone GPS listener/session alive across tab navigation.
+    // Only stop it via explicit STOP, phone leave/stop, OPSEC, or idle expiry.
     if (phonePollTimer) clearInterval(phonePollTimer);
-    if (phoneSessionId) api.post("/api/phone-gps/stop", {}).catch(() => {});
+    phonePollTimer = null;
   });
   cleanups.push(store.subscribe((state, type) => {
     if (!["opsec", "settings", "status"].includes(type)) return;
@@ -303,6 +306,61 @@ export async function render(root) {
       h("div", { class: "callout small", text: "Encrypted notes are never included in exports or backups in plaintext. Losing the vault passphrase means losing the notes; there is no recovery key." })),
   });
   grid.appendChild(secPanel);
+
+  /* ---------------------------------------------------------- assistant */
+  const assistantEnabled = checkbox("Enable Delamain (local AI / Ollama)", !!settings.assistant_enabled);
+  const assistantThink = checkbox("Enable model thinking/reasoning", !!settings.assistant_think);
+  const ollamaBase = input({ value: settings.ollama_base_url || "http://127.0.0.1:11434", placeholder: "http://127.0.0.1:11434" });
+  const ollamaModel = input({ value: settings.ollama_model || "", placeholder: "e.g. llama3.2, mistral, qwen2.5:7b" });
+  const assistantTemp = input({ type: "number", step: "0.1", min: "0", max: "2", value: settings.assistant_temperature ?? 0.2 });
+  const assistantTimeout = input({ type: "number", step: "1", min: "5", max: "1800", value: settings.assistant_timeout_sec ?? 300 });
+  const assistantCtx = input({ type: "number", step: "512", min: "512", max: "32768", value: settings.assistant_num_ctx ?? 4096 });
+  const assistantMaxTokens = input({ type: "number", step: "512", min: "128", max: "8192", value: settings.assistant_max_tokens ?? 2048 });
+  const assistantPrompt = h("textarea", { class: "input mono", rows: "5", style: { width: "100%", resize: "vertical" } });
+  assistantPrompt.value = settings.assistant_system_prompt || "";
+  const assistantPanel = panel({
+    title: "Delamain / Ollama",
+    sub: "Local AI model integration for assistant chat and field support",
+    icon: "cpu",
+    body: h("div", { class: "col gap-8" },
+      h("div", { class: "row wrap gap-16" }, assistantEnabled, assistantThink),
+      h("div", { class: "form-grid" },
+        field("Ollama base URL", ollamaBase, "Local endpoint. Default: http://127.0.0.1:11434"),
+        field("Model", ollamaModel, "Must be pulled in Ollama (e.g. `ollama pull llama3.2`).")),
+      h("div", { class: "form-grid cols-3" },
+        field("Temperature", assistantTemp), field("Timeout (sec)", assistantTimeout, "CPU inference can be slow; 300–900s may be needed."), field("Context tokens", assistantCtx),
+        field("Max reply tokens", assistantMaxTokens, "Raise for long guides. 2048 is the default; higher is slower on CPU. If answers stop mid-sentence, increase this.")),
+      field("System prompt", assistantPrompt, "Guides behavior/safety. Keep it practical; avoid secrets."),
+      h("div", { class: "row wrap gap-8" },
+        btn("SAVE ASSISTANT", { tone: "primary", icon: "save", onClick: saveAssistant }),
+        btn("TEST CONNECTION", { icon: "refresh", onClick: testAssistant }),
+        btn("OPEN ASSISTANT", { icon: "cpu", tone: "ghost", onClick: () => { location.hash = "#/assistant"; } })),
+      h("div", { class: "callout small", text: "Thinking/reasoning can improve complex answers but is much slower on CPU-only systems (especially Qwen 3.5). If responses stall, disable thinking or increase timeout." }),
+      h("div", { class: "callout small amber", text: "The app calls Ollama through the local backend. AI output can be wrong or incomplete—verify critical medical, navigation, legal, and hazard decisions." })),
+  });
+  grid.appendChild(assistantPanel);
+
+  async function saveAssistant() {
+    await saveSimple({
+      assistant_enabled: assistantEnabled.querySelector("input").checked,
+      assistant_think: assistantThink.querySelector("input").checked,
+      ollama_base_url: ollamaBase.value.trim(),
+      ollama_model: ollamaModel.value.trim(),
+      assistant_temperature: Number(assistantTemp.value),
+      assistant_timeout_sec: Number(assistantTimeout.value),
+      assistant_num_ctx: Number(assistantCtx.value),
+      assistant_max_tokens: Number(assistantMaxTokens.value),
+      assistant_system_prompt: assistantPrompt.value,
+    }, "Assistant settings saved");
+  }
+  async function testAssistant() {
+    toast("Testing Ollama connection…", "warn");
+    try {
+      const r = await api.get("/api/assistant/status");
+      if (r.reachable) toast(`Ollama reachable · ${(r.models||[]).length} model(s)${r.warning ? " · " + r.warning : ""}`, "ok");
+      else toast(r.error || "Ollama not reachable", "error");
+    } catch (e) { toast(e.message, "error"); }
+  }
 
   /* ------------------------------------------------------------- system */
   const sys = status.system || {};
@@ -476,6 +534,33 @@ export async function render(root) {
     }
   }
 
+  async function reattachPhoneGps() {
+    if (store.state.opsec || store.settings?.opsec_mode || disposed) return;
+    try {
+      const status = await api.get("/api/phone-gps/status");
+      if (!status || !status.session_id) return;
+      if (!["waiting", "receiving", "starting"].includes(status.state)) return;
+      phoneSessionId = status.session_id;
+      phoneStartButton.disabled = true;
+      phoneStopButton.disabled = false;
+      if (status.url) {
+        try {
+          const u = new URL(status.url);
+          phoneUrl.textContent = `Phone URL: ${u.protocol}//${u.host}/ · active session`;
+        } catch { phoneUrl.textContent = `Phone URL: active session`; }
+      }
+      const image = h("img", {
+        class: "phone-gps-qr",
+        alt: "Temporary local HTTPS phone GPS QR code",
+        src: `/api/phone-gps/qr.svg?session_id=${encodeURIComponent(phoneSessionId)}`,
+      });
+      image.addEventListener("error", () => {}, { once: true });
+      phoneQrWrap.replaceChildren(image);
+      if (!phonePollTimer) phonePollTimer = setInterval(refreshPhoneGps, 1000);
+      await refreshPhoneGps();
+    } catch {}
+  }
+
   async function startPhoneGps() {
     if (store.state.opsec || store.settings?.opsec_mode) {
       toast("Phone GPS pairing is disabled in OPSEC mode", "warn");
@@ -574,11 +659,6 @@ export async function render(root) {
     phoneAcceptButton.disabled = true;
     try {
       const fix = await api.post("/api/phone-gps/accept", {});
-      phoneSessionId = null;
-      clearInterval(phonePollTimer); phonePollTimer = null;
-      phoneQrWrap.replaceChildren();
-      phoneStartButton.disabled = false;
-      phoneStopButton.disabled = true;
       await store.loadStatus({ force: true });
       lat.value = store.settings.lat;
       lon.value = store.settings.lon;
@@ -586,10 +666,14 @@ export async function render(root) {
       positionStatus.className = `callout ${quality.tone} small`;
       positionStatus.textContent = quality.text;
       phoneState.className = "callout small";
-      phoneUrl.textContent = "";
-      phoneState.textContent = `Phone fix accepted: ±${fmt.num(fix.accuracy_m, 1)} m · ${fmt.ago(fix.timestamp)}. Temporary HTTPS listener closed.`;
+      phoneState.textContent = `Phone fix accepted: ±${fmt.num(fix.accuracy_m, 1)} m · ${fmt.ago(fix.timestamp)}. Listener still open — keep the phone page open to send fresh fixes, or tap STOP to close it.`;
       await updateCoordPreview();
-      toast("Phone fix saved; map/nav updated and nearby feeds queued if auto-sync is enabled", "warn");
+      toast("Phone fix saved; listener still open for fresh fixes", "warn");
+      // Keep session/polling active; refreshPhoneGps() will manage accept button state.
+      if (phoneSessionId && !phonePollTimer) phonePollTimer = setInterval(refreshPhoneGps, 1000);
+      phoneStartButton.disabled = true;
+      phoneStopButton.disabled = false;
+      await refreshPhoneGps();
     } catch (err) {
       phoneAcceptButton.disabled = false;
       toast(err.message || "Could not accept phone GPS fix", "error");

@@ -9,6 +9,7 @@ import {
   kv, errorBox, referenceSection, positionConfidence, manualPositionMetadata, gpsPositionMetadata,
   phoneGpsMetadata,
 } from "./shared.js";
+import * as U from "../units.js";
 
 const COMPASS_SVG = (declination = 0, sunAz = null, moonAz = null) => {
   const ns = "http://www.w3.org/2000/svg";
@@ -285,7 +286,7 @@ export async function render(root, params) {
           h("div", { class: "section-title" }, h("h2", { text: "Moon events" }), h("div", { class: "line" })),
           kv([
             ["PHASE", moon.phase_name || "—"], ["ILLUMINATION", `${fmt.num(moon.illumination_pct, 1)}%`],
-            ["AGE", `${fmt.num(moon.age_days, 1)} days`], ["DISTANCE", `${fmt.num(moon.distance_km, 0)} km`],
+            ["AGE", `${fmt.num(moon.age_days, 1)} days`], ["DISTANCE", `${U.distKm(moon.distance_km, 0)}`],
             ["MOONRISE", timeOrDash(moon.next_rise)], ["MOONSET", timeOrDash(moon.next_set)],
             ["ALTITUDE", `${fmt.num(moon.altitude_deg, 1)}°`], ["AZIMUTH", `${fmt.num(moon.azimuth_deg, 1)}°`],
           ]))),

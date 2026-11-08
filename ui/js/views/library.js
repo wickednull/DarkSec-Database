@@ -38,6 +38,7 @@ export async function render(root, params) {
     root.replaceChildren(pageHead({ kicker: "COMMAND // LIBRARY", title: "Document Library" }), errorBox(err));
     return;
   }
+  root.replaceChildren();
 
   let disposed = false;
   const state = { q: params.q || "", category: params.category || "", items: [], searching: false };
@@ -68,7 +69,7 @@ export async function render(root, params) {
     resultMeta.textContent = "SEARCHING…";
     searchOut.replaceChildren(loading("SEARCHING LIBRARY"));
     try {
-      const res = await api.get(`/api/library/search?q=${encodeURIComponent(state.q)}&category=${encodeURIComponent(state.category)}&limit=80`);
+      const res = await api.get(`/api/library/search?q=${encodeURIComponent(state.q)}&category=${encodeURIComponent(state.category)}&limit=1000`);
       if (disposed) return;
       state.items = res.items || [];
       renderResults();
@@ -299,9 +300,9 @@ async function renderDocument(root, params) {
   const isTexty = /\.(txt|md|html|htm)$/i.test(doc.name || doc.path || "");
 
   if (isPdf) {
-    root.appendChild(meta);
     const viewer = await pdfViewer(docId, doc);
     root.appendChild(viewer.node);
+    root.appendChild(meta);
     return viewer.cleanup;
   }
 
@@ -347,9 +348,11 @@ async function pdfViewer(docId, doc) {
   const zoomIn = btn("+", { size: "sm", title: "Zoom in" });
   const fit = btn("FIT WIDTH", { size: "sm", tone: "ghost" });
 
+  const fsBtn = btn("FULL SCREEN", { size: "sm", icon: "maximize", onClick: async () => { wrap.classList.toggle("pdf-fs", !wrap.classList.contains("pdf-fs")); } });
   const toolbar = h("div", { class: "pdf-toolbar" },
     prev, next, pageInfo, h("span", { class: "grow" }), title,
     zoomOut, zoomIn, fit,
+    fsBtn,
     btn("DOWNLOAD", { size: "sm", icon: "download", onClick: () => { location.href = `/api/library/doc/${docId}/file?download=true`; } }),
   );
   const shell = h("div", { class: "pdf-viewer" }, toolbar, stage);
@@ -444,6 +447,7 @@ async function pdfViewer(docId, doc) {
     node: wrap,
     cleanup() {
       disposed = true;
+      wrap.classList.remove("pdf-fs");
       document.removeEventListener("keydown", keyHandler);
       window.removeEventListener("resize", onResize);
       try { renderTask?.cancel(); } catch {}
