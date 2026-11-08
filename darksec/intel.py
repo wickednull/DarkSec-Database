@@ -91,7 +91,7 @@ KIND_THREAT_MULT = {
     "gdacs": 1.0,
     "eonet": 0.95,
     "radiation": 1.1,
-    "rsoe": 0.9,
+    "rsoe": 0.25,
 }
 AQI_BANDS = [(50, 0, "GOOD"), (100, 4, "MODERATE"), (150, 10, "USG"),
              (200, 18, "UNHEALTHY"), (300, 28, "VERY UNHEALTHY"), (10**9, 38, "HAZARDOUS")]
@@ -712,14 +712,16 @@ def _distance_factor(dist_km: float | None) -> tuple[float, bool]:
     if dist_km <= 25:
         return 1.0, True
     if dist_km <= 100:
-        return 0.95, True
+        return 0.85, True
     if dist_km <= 250:
-        return 0.7, False
-    if dist_km <= 750:
-        return 0.35, False
+        return 0.5, False
+    if dist_km <= 500:
+        return 0.2, False
+    if dist_km <= 1000:
+        return 0.05, False
     if dist_km <= 2000:
-        return 0.12, False
-    return 0.04, False
+        return 0.01, False
+    return 0.0, False
 
 
 def _credibility_factor(ev: dict) -> float:
