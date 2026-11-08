@@ -32,6 +32,7 @@ function backendCandidates() {
   if (process.env.DARKSEC_PYTHON) out.push({ cmd: process.env.DARKSEC_PYTHON, args: ["-m", "darksec"], label: "DARKSEC_PYTHON" });
   out.push({ cmd: IS_WIN ? "py" : "python3", args: IS_WIN ? ["-3", "-m", "darksec"] : ["-m", "darksec"], label: "python3" });
   if (IS_WIN) out.push({ cmd: "python", args: ["-m", "darksec"], label: "python" });
+  if (!IS_WIN) out.push({ cmd: "python", args: ["-m", "darksec"], label: "python" });
   return out;
 }
 
