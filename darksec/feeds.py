@@ -1108,12 +1108,19 @@ def _parse_rsoe(text: str, source: str = "RSOE EDIS") -> list[dict]:
                 seen.add(event_id)
             place = _sanitize(location, 160)
             summary = f"{category} · {place}" if category else place
+            severity = _RSOE_SEVERITY.get(colour.lower(), "INFO")
+            # RSOE colour-codes dense fog as "critical", but it is a weather
+            # advisory rather than a threat. Downgrade it so it does not
+            # dominate the threat picture or the critical-events list.
+            if any(w in (title + " " + category + " " + summary).lower()
+                   for w in ("fog", "visibility", "mist")):
+                severity = "INFO"
             out.append({
                 "id": event_id or title,
                 "title": title,
                 "time": _iso_time(date) or "",
                 "source": source,
-                "severity": _RSOE_SEVERITY.get(colour.lower(), "INFO"),
+                "severity": severity,
                 "url": url,
                 "summary": summary[:500],
                 "kind": "rsoe",

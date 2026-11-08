@@ -30,6 +30,34 @@ def build_brief(db: Database) -> str:
     low = db.query("SELECT * FROM inventory WHERE min_qty > 0 AND qty <= min_qty ORDER BY (qty-min_qty) LIMIT 10")
     feed_summary = feeds.summary(db)
     lib = library.stats(db)
+
+    # Count only critical cached events that are reasonably close to the
+    # operator, so distant global headlines do not inflate the field report.
+    nearby_critical = 0
+    try:
+        latf = float(s["lat"]); lonf = float(s["lon"])
+        for ev in intel.live_events(db, limit=250):
+            sev = str(ev.get("severity") or "INFO").upper()
+            if sev not in ("CRITICAL", "SEVERE", "EXTREME"):
+                continue
+            if ev.get("lat") is None or ev.get("lon") is None:
+                continue
+            try:
+                dist = geo.distance(latf, lonf, float(ev["lat"]), float(ev["lon"])) if hasattr(geo, "distance") else None
+            except Exception:
+                dist = None
+            # fallback haversine
+            if dist is None:
+                import math
+                rlat1, rlon1 = math.radians(latf), math.radians(lonf)
+                rlat2, rlon2 = math.radians(float(ev["lat"])), math.radians(float(ev["lon"]))
+                dlat = rlat2 - rlat1; dlon = rlon2 - rlon1
+                a = math.sin(dlat/2)**2 + math.cos(rlat1)*math.cos(rlat2)*math.sin(dlon/2)**2
+                dist = 6371*2*math.asin(math.sqrt(a))
+            if dist <= 2000:
+                nearby_critical += 1
+    except Exception:
+        nearby_critical = int(feed_summary.get("critical_count") or 0)
     almanac = None
     try:
         almanac = astro.celestial(lat_f, lon_f, elevation)
@@ -98,7 +126,8 @@ def build_brief(db: Database) -> str:
     for c in sorted(r.get("categories") or [], key=lambda x: x.get("score") if x.get("score") is not None else 999, reverse=True):
         lines.append(f"   - {c.get('category')}: {float(c.get('score') or 0):.0f}   risk {c.get('risk')}   source {c.get('source')}")
     lines += ["", "2. OPERATIONAL SIGNALS"]
-    signals = r.get("signals") or []
+    signals = [s for s in (r.get("signals") or [])
+               if not (s.get("category") == "INTEL" and "stale" in str(s.get("text", "")).lower())]
     if signals:
         for sig in signals[:12]:
             lines.append(f"   - [{sig.get('category')}] {sig.get('text')}")
@@ -107,8 +136,8 @@ def build_brief(db: Database) -> str:
     for inc in incidents[:5]:
         lines.append(f"   - [INCIDENT/{inc['severity']}] {inc['title']}"
                      + (f" ({inc['category']})" if inc.get("category") else ""))
-    if feed_summary.get("critical_count"):
-        lines.append(f"   - [INTEL] {feed_summary['critical_count']} critical cached feed item(s); "
+    if nearby_critical:
+        lines.append(f"   - [INTEL] {nearby_critical} critical cached feed item(s) within 2000 km; "
                      "verify with official sources before acting.")
     lines += ["", "3. DECISIONS / ACTIONS"]
     if actions:

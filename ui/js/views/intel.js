@@ -40,7 +40,17 @@ export async function render(root, params = {}) {
   const sun = data.sun || null;
   const criticalList = (data.feeds || []).flatMap((f) => (f.items || [])).filter(
     (i) => ["CRITICAL", "SEVERE", "EXTREME"].includes(String(i.severity || "INFO").toUpperCase()),
-  );
+  ).filter((i) => {
+    const _s = store.settings || {};
+    const _lat = Number(_s.lat), _lon = Number(_s.lon);
+    if (!Number.isFinite(_lat) || !Number.isFinite(_lon) || i.lat == null || i.lon == null) return true;
+    const R = 6371;
+    const toRad = (x) => x * Math.PI / 180;
+    const dlat = toRad(i.lat - _lat), dlon = toRad(i.lon - _lon);
+    const a = Math.sin(dlat / 2) ** 2 + Math.cos(toRad(_lat)) * Math.cos(toRad(i.lat)) * Math.sin(dlon / 2) ** 2;
+    const d = 2 * R * Math.asin(Math.sqrt(a));
+    return d <= 2000;
+  });
   const war = data.war || [];
   const conflictLive = data.conflict_live || [];
   const conflictVerified = data.conflict_verified || [];

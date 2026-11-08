@@ -237,7 +237,7 @@ def _rules_intel_quality(db: Database) -> list[dict]:
             continue
         if f.get("status") == "STALE" and (f.get("count") or 0) > 0:
             stale_critical += 1
-    if stale_critical >= 4:
+    if stale_critical >= 8:
         actions.append({"text": f"{stale_critical} cached intel feeds are stale. Refresh when safe/networked; verify before movement or operational decisions.", "urgency": 2})
     return actions
 

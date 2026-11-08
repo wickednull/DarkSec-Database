@@ -43,8 +43,8 @@ export async function render(root, params) {
   } else if (r.score < 60) {
     alerts.appendChild(alertStrip(`READINESS ${r.score}/100 — ${r.band}. Automated operational risk is elevated; review recommended actions and signals.`, r.score < 40 ? "red" : ""));
   }
-  if (dash.feeds?.critical_count) {
-    alerts.appendChild(alertStrip(`${dash.feeds.critical_count} critical cached feed item(s). Confirm with official sources before acting.`, "red"));
+  if ((r.nearby_critical_count || 0) > 0) {
+    alerts.appendChild(alertStrip(`${r.nearby_critical_count} critical cached feed item(s) within 2000 km. Confirm with official sources before acting.`, "red"));
   }
   for (const trip of (dash.trips || []).filter((item) => item.status === "ACTIVE")) {
     const timing = trip.alert === "RETURN OVERDUE"

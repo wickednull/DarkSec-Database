@@ -43,7 +43,15 @@ async function buildContext() {
       satellite_count: (intel.satellites || []).length,
       air_quality: intel.air_quality ? { aqi: intel.air_quality.aqi, category: intel.air_quality.category } : null,
       weather: intel.weather ? { temp_c: intel.weather.temp_c, summary: intel.weather.summary, wind_kph: intel.weather.wind_kph } : null,
-      latest_events: (intel.events || []).slice(0, 6).map(e => ({ title: e.title, severity: e.severity, time: e.time, source: e.source, place: e.place })),
+      latest_events: (intel.events || []).filter(e => {
+        const s = store.settings || {};
+        const la = Number(s.lat), lo = Number(s.lon);
+        if (!Number.isFinite(la) || !Number.isFinite(lo) || e.lat == null || e.lon == null) return true;
+        const R = 6371, toRad = x => x * Math.PI / 180;
+        const dlat = toRad(e.lat - la), dlon = toRad(e.lon - lo);
+        const a = Math.sin(dlat/2)**2 + Math.cos(toRad(la))*Math.cos(toRad(e.lat))*Math.sin(dlon/2)**2;
+        return 2 * R * Math.asin(Math.sqrt(a)) <= 2000;
+      }).slice(0, 6).map(e => ({ title: e.title, severity: e.severity, time: e.time, source: e.source, place: e.place })),
       latest_war: (intel.war || intel.conflict_news || []).slice(0, 4).map(e => ({ title: e.title, source: e.source, time: e.time })),
     };
     if (cbrn) ctx.cbrn = {

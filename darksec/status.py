@@ -139,6 +139,29 @@ def readiness(db: Database) -> dict:
     except Exception:
         pizzint_data = {}
 
+    # Count critical cached events within 2000 km of the operator so distant
+    # global headlines do not inflate the dashboard alert strip.
+    nearby_critical = 0
+    try:
+        if have_position:
+            latf, lonf = float(lat), float(lon)
+            import math
+            for ev in intel.live_events(db, limit=250):
+                sev = str(ev.get("severity") or "INFO").upper()
+                if sev not in ("CRITICAL", "SEVERE", "EXTREME"):
+                    continue
+                if ev.get("lat") is None or ev.get("lon") is None:
+                    continue
+                rlat1, rlon1 = math.radians(latf), math.radians(lonf)
+                rlat2, rlon2 = math.radians(float(ev["lat"])), math.radians(float(ev["lon"]))
+                dlat = rlat2 - rlat1; dlon = rlon2 - rlon1
+                a = math.sin(dlat/2)**2 + math.cos(rlat1)*math.cos(rlat2)*math.sin(dlon/2)**2
+                dist = 6371*2*math.asin(math.sqrt(a))
+                if dist <= 2000:
+                    nearby_critical += 1
+    except Exception:
+        nearby_critical = 0
+
     low_stock = [dict(r) for r in db.query("SELECT * FROM inventory WHERE min_qty > 0 AND qty <= min_qty ORDER BY (qty-min_qty) LIMIT 20")]
     expiring: list[dict] = []
     for it in db.query("SELECT * FROM inventory ORDER BY name LIMIT 24"):
@@ -247,7 +270,7 @@ def readiness(db: Database) -> dict:
     if critical_intel_count and not local_threat.get("events_scoped"):
         signals.append({"category": "THREATS",
                         "text": f"{critical_intel_count} critical cached feed item(s); confirm with official sources"})
-    if stale_feeds >= 3:
+    if stale_feeds >= 8:
         signals.append({"category": "INTEL", "text": f"{stale_feeds} intel feeds are stale; refresh when safe/networked"})
     if feed_rows and feed_coverage < 0.5:
         signals.append({"category": "INTEL",
@@ -275,5 +298,6 @@ def readiness(db: Database) -> dict:
         "categories": categories,
         "threat": {"score": int(local_threat_score), "band": local_threat.get("band"), "events_scoped": bool(local_threat.get("events_scoped"))},
         "pizzint": {"doughcon": doughcon, "status": pizzint_data.get("status", "")},
+        "nearby_critical_count": nearby_critical,
         "updated": utcnow(),
     }

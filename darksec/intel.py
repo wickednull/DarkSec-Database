@@ -133,13 +133,18 @@ def _event_from_item(feed: dict, item: dict) -> dict | None:
         return None
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return None
+    _sev = str(item.get("severity") or "INFO").upper()
+    if _sev in ("CRITICAL", "SEVERE", "EXTREME", "ALERT") and any(
+            w in f"{item.get('title') or ''} {item.get('summary') or ''} {item.get('category') or ''}".lower()
+            for w in ("fog", "visibility", "mist")):
+        _sev = "INFO"
     return {
         "id": f"{feed.get('id')}:{item.get('id') or item.get('title')}",
         "source": item.get("source") or feed.get("name") or "?",
         "feed_id": feed.get("id"),
         "kind": item.get("kind") or feed.get("kind"),
         "title": item.get("title") or "Event",
-        "severity": str(item.get("severity") or "INFO").upper(),
+        "severity": _sev,
         "time": item.get("time"),
         "age_hours": _age_hours(item.get("time")),
         "lat": lat, "lon": lon,
@@ -589,7 +594,12 @@ def threat_index(db: Database, events: list[dict] | None = None,
 
     return {
         "score": score, "band": band,
-        "critical_count": sum(1 for e in events if SEVERITY_WEIGHT.get(str(e.get("severity") or "INFO").upper(), 0) > 0),
+        "critical_count": sum(
+            1 for e in events
+            if SEVERITY_WEIGHT.get(str(e.get("severity") or "INFO").upper(), 0) > 0
+            and (lat is None or lon is None or e.get("lat") is None or e.get("lon") is None
+                 or _distance_km(float(lat), float(lon), float(e["lat"]), float(e["lon"])) <= 2000)
+        ),
         "weighted_event_count": len(weighted_events),
         "near_count": near_count,
         "local_critical_count": local_critical,
