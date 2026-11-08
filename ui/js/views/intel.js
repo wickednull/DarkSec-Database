@@ -53,6 +53,8 @@ export async function render(root, params = {}) {
   const diseaseSummary = data.disease_summary || null;
   const feeds = data.feeds || [];
   const threatBand = String(threat.band || "NO DATA");
+  let pizzint = null;
+  try { pizzint = await api.get("/api/pizzint"); } catch (err) { pizzint = { error: err.message }; }
   const positionInfo = positionConfidence(store.settings || {});
   const observer = fmt.coord(store.settings?.lat, store.settings?.lon, 4);
   const feedById = Object.fromEntries(feeds.map((f) => [f.id, f]));
@@ -101,6 +103,36 @@ export async function render(root, params = {}) {
     try { history.replaceState(null, "", `#/intel?tab=${id}`); } catch {}
     render(root);
   });
+
+  // Pizza intelligence (PizzINT) panel
+  if (pizzint) {
+    const locs = pizzint.locations || [];
+    const doughcon = pizzint.doughcon != null ? `DOUGHCON ${pizzint.doughcon}` : "DOUGHCON ?";
+    const status = pizzint.status || (pizzint.error ? "UNAVAILABLE" : "");
+    const body = h("div", { class: "col gap-6" });
+    body.appendChild(h("div", { class: "row gap-8 items-center" },
+      badge(doughcon, pizzint.doughcon >= 4 ? "green" : pizzint.doughcon === 3 ? "amber" : "red"),
+      h("span", { class: "small", text: status }),
+      pizzint.error ? h("span", { class: "tiny muted", text: `(${pizzint.error})` }) : null));
+    if (locs.length) {
+      const list = h("div", { class: "row wrap gap-6" });
+      for (const l of locs) {
+        list.appendChild(h("span", { class: "badge muted", text: `${l.name}: ${l.status}${l.distance ? " · " + l.distance : ""}` }));
+      }
+      body.appendChild(list);
+    }
+    body.appendChild(h("div", { class: "tiny muted", text: "Advisory OSINT only. Pizza activity is not a verified military indicator. Source: pizzint.watch" }));
+    root.appendChild(panel({
+      title: "Pizza Intelligence (PizzINT)", icon: "flame",
+      sub: "Open-source readiness signal from public pizza activity near sensitive sites",
+      tools: [btn("REFRESH", { size: "sm", icon: "refresh", onClick: async () => {
+        try { pizzint = await api.post("/api/pizzint/refresh"); render(root); }
+        catch (err) { toast(err.message || "PizzINT refresh failed", "error"); }
+      } })],
+      body,
+    }));
+  }
+
   root.appendChild(h("div", { class: "mt-14" }, tabBar));
 
   const body = h("div", { class: "mt-14" });

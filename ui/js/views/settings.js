@@ -165,6 +165,72 @@ export async function render(root) {
     else if (!opsec) loadPhoneInterfaces();
   }));
 
+  /* ---------------------------------------------------- LAN / mobile access */
+  const lanToggle = checkbox("Enable LAN / mobile access", !!settings.lan_access_enabled);
+  const lanInput = lanToggle.querySelector("input");
+  const lanStatus = h("div", { class: "small muted", text: "Checking..." });
+  const lanUrl = h("div", { class: "small mono wrap-any", text: "" });
+  const lanQr = h("img", { alt: "LAN access QR code", style: { display: "none", maxWidth: "320px", height: "auto", border: "1px solid var(--line)", background: "#fff" } });
+  const lanCopy = btn("COPY URL", { size: "sm", icon: "copy", onClick: async () => {
+    const url = lanUrl.textContent.trim();
+    if (!url) return;
+    try { await navigator.clipboard.writeText(url); toast("LAN URL copied", "ok"); }
+    catch { toast("Could not copy; select the URL manually", "warn"); }
+  } });
+  const lanPanel = panel({
+    title: "LAN / mobile access", icon: "wifi",
+    sub: "Optional second HTTPS listener for phones/tablets on the trusted local network",
+    body: h("div", { class: "col gap-8" },
+      h("div", { class: "callout warn small", text: "Binds a separate HTTPS listener to all interfaces using a self-signed certificate. The main API stays loopback-only. OPSEC mode disables LAN access. Do not expose to the public internet." }),
+      lanToggle,
+      h("div", { class: "row gap-6" }, h("span", { class: "small muted", text: "Status:" }), lanStatus),
+      lanUrl,
+      lanQr,
+      h("div", { class: "row gap-6" }, lanCopy),
+      h("div", { class: "tiny muted", text: "Scan the QR (or open the URL) on the phone, accept the certificate warning, and the session cookie is set." }),
+    ),
+  });
+  grid.appendChild(lanPanel);
+  lanInput.disabled = !!settings.opsec_mode;
+
+  async function refreshLan() {
+    try {
+      const st = await api.get("/api/lan/status");
+      lanInput.checked = !!st.enabled;
+      lanStatus.textContent = st.enabled ? `ACTIVE · ${st.ip}:${st.port}` : "INACTIVE";
+      if (st.enabled && st.url) {
+        lanUrl.textContent = st.url;
+        lanQr.src = `/api/lan/qr?${Date.now()}`;
+        lanQr.style.display = "block";
+      } else {
+        lanUrl.textContent = "";
+        lanQr.style.display = "none";
+      }
+    } catch (err) {
+      lanStatus.textContent = err.message || "unavailable";
+    }
+  }
+  lanInput.addEventListener("change", async () => {
+    try {
+      if (lanInput.checked) await api.post("/api/lan/start");
+      else await api.post("/api/lan/stop");
+      await refreshLan();
+      toast(lanInput.checked ? "LAN access started" : "LAN access stopped", "warn");
+    } catch (err) {
+      toast(err.message || "LAN toggle failed", "error");
+      lanInput.checked = !lanInput.checked;
+      await refreshLan();
+    }
+  });
+  refreshLan();
+  cleanups.push(store.subscribe((state, type) => {
+    if (!["opsec", "settings"].includes(type)) return;
+    const opsec = !!state.opsec || !!state.settings?.opsec_mode;
+    lanInput.disabled = opsec;
+    if (opsec) { api.post("/api/lan/stop").then(refreshLan).catch(() => {}); }
+    else refreshLan();
+  }));
+
   /* --------------------------------------------------------------- radio */
   const lna = input({ type: "number", min: 0, max: 40, value: settings.sdr_lna_gain ?? 32 });
   const vga = input({ type: "number", min: 0, max: 62, value: settings.sdr_rx_gain ?? 40 });

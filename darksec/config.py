@@ -116,4 +116,5 @@ def default_settings() -> dict:
         "assistant_num_ctx": 4096,
         "assistant_max_tokens": 2048,
         "assistant_think": False,
+        "lan_access_enabled": False,
     }

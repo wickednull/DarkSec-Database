@@ -61,6 +61,27 @@ STALE_AFTER = {
 DATA_STALE_AFTER = {
     "gdacs": 48 * 3600,
     "gdelt_conflict": 3 * 3600,
+    "bbc_world": 24 * 3600,
+    "bbc_middle_east": 24 * 3600,
+    "guardian_world": 24 * 3600,
+    "france24_world": 24 * 3600,
+    "dw_news": 24 * 3600,
+    "aljazeera_world": 24 * 3600,
+    "twz_defense": 7 * 86400,
+    "breaking_defense": 7 * 86400,
+    "defense_one": 7 * 86400,
+    "long_war_journal": 14 * 86400,
+    "bbc_world": 24 * 3600,
+    "bbc_middle_east": 24 * 3600,
+    "guardian_world": 24 * 3600,
+    "france24_world": 24 * 3600,
+    "dw_news": 24 * 3600,
+    "aljazeera_world": 24 * 3600,
+    "twz_defense": 7 * 86400,
+    "breaking_defense": 7 * 86400,
+    "defense_one": 7 * 86400,
+    "long_war_journal": 14 * 86400,
+    "crisisgroup": 21 * 86400,
     "rsoe_edis": 4 * 3600,
     "ucdp_candidate": 50 * 86400,
     "celestrak_tle": 24 * 3600,
@@ -1183,7 +1204,12 @@ def _normalize(kind: str, raw: str, source: str = "RSS") -> list[dict]:
         return _parse_rss(raw, source)
     if kind == "rsoe":
         return _parse_rsoe(raw, source)
-    payload = json.loads(raw)
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        if raw.lstrip().lower().startswith(("<!doctype", "<html")):
+            raise RuntimeError("provider returned an HTML page instead of a feed")
+        raise RuntimeError(f"provider returned non-JSON data ({raw[:80].strip()!r})")
     if kind == "usgs":
         return _parse_usgs(payload)
     if kind == "swpc_kp":
@@ -1272,8 +1298,24 @@ def _refresh_overpass_cctv(db: Database, row) -> list[dict]:
   relation["man_made"="surveillance"](around:{radius_m},{lat:.5f},{lon:.5f});
 );
 out center tags;"""
-    resp = requests.post("https://overpass-api.de/api/interpreter", data={"data": query}, headers=UA, timeout=40)
-    resp.raise_for_status()
+    overpass_urls = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    ]
+    last_exc = None
+    resp = None
+    for ou in overpass_urls:
+        try:
+            resp = requests.post(ou, data={"data": query}, headers=UA, timeout=40)
+            resp.raise_for_status()
+            break
+        except Exception as exc:
+            last_exc = exc
+            resp = None
+            continue
+    if resp is None:
+        raise last_exc or RuntimeError("Overpass unavailable")
     data = resp.json()
     items = []
     for el in (data.get("elements") or []):

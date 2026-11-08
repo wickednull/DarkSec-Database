@@ -87,10 +87,10 @@ def test_readiness_position_risk_scales_with_source(client):
         return next(c["risk"] for c in categories if c["category"] == "POSITION")
 
     try:
-        assert risk_for("unverified") == 8
-        assert risk_for("manual") == 4
-        assert risk_for("gpsd") == 7  # no fix timestamp -> treated as stale
-        assert risk_for("geocoded") == 4
+        assert risk_for("unverified") == 4
+        assert risk_for("manual") == 2
+        assert risk_for("gpsd") == 4  # no fix timestamp -> treated as stale
+        assert risk_for("geocoded") == 2
         assert risk_for("gpsd") > risk_for("manual")
     finally:
         client.put("/api/settings", json={
@@ -226,3 +226,18 @@ def test_search_and_manual(client):
     assert index["docs"]
     doc = client.get(f"/api/manual/{index['docs'][0]['id']}")
     assert doc.status_code == 200 and doc.text
+
+
+# ------------------------------------------------------------------- pizzint
+def test_pizzint_shape(client):
+    data = client.get("/api/pizzint").json()
+    assert "source" in data
+    assert "doughcon" in data
+    assert isinstance(data.get("locations", []), list)
+
+
+# ---------------------------------------------------------------------- lan
+def test_lan_status_shape(client):
+    data = client.get("/api/lan/status").json()
+    assert "enabled" in data
+    assert "ip" in data

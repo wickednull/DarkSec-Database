@@ -100,9 +100,35 @@ Set the endpoint (default `http://127.0.0.1:11434`) and model name in
 cloud service. The assistant can include cached intelligence context when asked.
 
 
+### Desktop shell (Electron)
+
+```bash
+npm install        # once
+./launch-desktop.sh
+```
+
 The Electron main process starts the Python backend itself, reads the JSON
 handshake from stdout, and loads the console. Closing the window terminates the
 backend. Set `DARKSEC_PYTHON` if your interpreter is not `python3`.
+
+### LAN / mobile access (optional)
+
+By default DarkSec binds to `127.0.0.1` only. To use a phone or tablet on the
+same trusted network while the PC runs the console:
+
+```bash
+python3 -m darksec --lan
+```
+
+This binds to all interfaces, serves over HTTPS with an auto-generated
+self-signed certificate, and prints a token URL. Open that URL on the phone,
+accept the certificate warning, and the session cookie is set exactly as on
+desktop. `--lan-ip ADDRESS` overrides the auto-detected address; `--port N`
+still applies. OPSEC mode disables LAN access.
+
+Do **not** expose this to the public internet. There is no rate limiting or
+account system beyond the per-launch token; treat the LAN like a trusted
+environment.
 
 ## Data locations
 

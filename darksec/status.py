@@ -16,7 +16,7 @@ from typing import Any
 
 import psutil
 
-from . import config, feeds, intel, sdr, sitrep
+from . import config, feeds, intel, pizzint, sdr, sitrep
 from .db import Database, utcnow
 
 
@@ -132,6 +132,13 @@ def readiness(db: Database) -> dict:
     cached_feeds = sum(1 for f in feed_rows if f.get("status") in ("OK", "STALE"))
     feed_coverage = (cached_feeds / len(feed_rows)) if feed_rows else 1.0
 
+    # PizzINT: advisory OSINT readiness signal from public pizza activity.
+    pizzint_data = {}
+    try:
+        pizzint_data = pizzint.fetch() or {}
+    except Exception:
+        pizzint_data = {}
+
     low_stock = [dict(r) for r in db.query("SELECT * FROM inventory WHERE min_qty > 0 AND qty <= min_qty ORDER BY (qty-min_qty) LIMIT 20")]
     expiring: list[dict] = []
     for it in db.query("SELECT * FROM inventory ORDER BY name LIMIT 24"):
@@ -163,20 +170,20 @@ def readiness(db: Database) -> dict:
     # should reflect decision quality, not pretend the operator has no position.
     gps_stale = (source == "gpsd" and (age_seconds is None or age_seconds > 6 * 3600)) or (source == "phone" and (age_seconds is None or age_seconds > 24 * 3600))
     if not have_position:
-        position_risk = 15.0
-    elif source == "unverified":
         position_risk = 8.0
-    elif gps_stale:
-        position_risk = 7.0
-    elif source in ("manual", "geocoded"):
+    elif source == "unverified":
         position_risk = 4.0
+    elif gps_stale:
+        position_risk = 4.0
+    elif source in ("manual", "geocoded"):
+        position_risk = 2.0
     else:
         position_risk = 0.0
 
     # THREATS: combine operator incidents with location-weighted cached intel.
     local_threat_score = float(local_threat.get("score") or 0.0)
     local_crit = int(local_threat.get("local_critical_count") or 0)
-    threat_from_intel = min(20.0, local_threat_score * 0.22) if local_threat.get("events_scoped") else min(12.0, local_threat_score * 0.12)
+    threat_from_intel = min(8.0, local_threat_score * 0.08) if local_threat.get("events_scoped") else min(4.0, local_threat_score * 0.04)
     threat_risk = min(30.0, 18.0 * len(crit_inc) + 14.0 * local_crit + 8.0 * len(crit_events[:3]) + threat_from_intel)
     threat_risk += min(10.0, 5.0 * len(warn_inc))
     # If the weighted index could not scope any events, keep a small fallback
@@ -186,13 +193,21 @@ def readiness(db: Database) -> dict:
         threat_risk += min(6.0, 1.5 * min(4, critical_intel_count))
     threat_risk = min(35.0, threat_risk)
 
+    # PizzINT advisory signal: low DOUGHCON (1-2) raises threat risk; 5 is nominal.
+    doughcon = pizzint_data.get("doughcon")
+    if isinstance(doughcon, int):
+        if doughcon <= 2:
+            threat_risk = min(35.0, threat_risk + 12.0)
+        elif doughcon == 3:
+            threat_risk = min(35.0, threat_risk + 5.0)
+
     supply_risk = min(25.0, 7.0 * len(low_stock) + 4.0 * len(expiring))
     # INTEL measures coverage and freshness, not event severity. Critical
     # events are a THREATS concern; counting them here double-penalised the
     # operator for the same cached headline.
-    intel_risk = min(15.0, 8.0 * (1.0 - feed_coverage) + 1.0 * min(5, stale_feeds))
+    intel_risk = min(15.0, 4.0 * (1.0 - feed_coverage) + 0.5 * min(5, stale_feeds))
     if feed_rows and cached_feeds == 0:
-        intel_risk = max(intel_risk, 6.0)
+        intel_risk = max(intel_risk, 3.0)
     if local_threat.get("factors", {}).get("position_used") is False and have_position is False:
         intel_risk = min(15.0, intel_risk + 2.0)
 
@@ -219,7 +234,7 @@ def readiness(db: Database) -> dict:
     if local_threat.get("events_scoped"):
         if local_crit:
             signals.append({"category": "THREATS", "text": f"{local_crit} critical cached event(s) near position (weighted threat {int(local_threat_score)}/100)"})
-        elif local_threat_score >= 45:
+        elif local_threat_score >= 45 and (local_crit or crit_events):
             signals.append({"category": "THREATS", "text": f"Location-weighted cached threat elevated ({int(local_threat_score)}/100, {local_threat.get('band')})"})
     for e in crit_events[:3]:
         d = e.get("distance_km")
@@ -237,6 +252,9 @@ def readiness(db: Database) -> dict:
     if feed_rows and feed_coverage < 0.5:
         signals.append({"category": "INTEL",
                         "text": f"Only {cached_feeds}/{len(feed_rows)} intel feeds cached; run SYNC NOW when networked"})
+    if isinstance(doughcon, int) and doughcon <= 3:
+        signals.append({"category": "THREATS",
+                        "text": f"PizzINT DOUGHCON {doughcon}: {pizzint_data.get('status', '')}".strip()})
     if not have_position:
         signals.append({"category": "POSITION", "text": "No position set; location-scoped threat and map results are unavailable"})
     elif source == "unverified":
@@ -256,5 +274,6 @@ def readiness(db: Database) -> dict:
         "signals": signals,
         "categories": categories,
         "threat": {"score": int(local_threat_score), "band": local_threat.get("band"), "events_scoped": bool(local_threat.get("events_scoped"))},
+        "pizzint": {"doughcon": doughcon, "status": pizzint_data.get("status", "")},
         "updated": utcnow(),
     }
