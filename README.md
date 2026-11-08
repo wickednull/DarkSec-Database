@@ -53,6 +53,9 @@ database.
   mission log. Auto-sync pauses offline and in OPSEC mode.
 - **Settings** — identity, position, grid format, radio limits, map tiles,
   appearance, vault timeout, diagnostics and data custody.
+- **Local AI assistant (Delamain)** — optional chat backed by a local Ollama
+  instance. Detects installed models, can include cached intelligence context,
+  and has no cloud dependency. Configure the endpoint and model in Settings.
 
 ## Run it
 
@@ -81,12 +84,21 @@ Optional flags:
 --log-level ...   critical|error|warning|info|debug
 ```
 
-### Desktop shell (Electron)
+### Local AI assistant (optional)
+
+Delamain uses a locally running [Ollama](https://ollama.com) instance. The console
+works fully without it; the assistant view will report **NO MODELS** until one is
+available.
 
 ```bash
-npm install        # once
-./launch-desktop.sh
+# install Ollama, then pull at least one model
+ollama pull llama3.2
 ```
+
+Set the endpoint (default `http://127.0.0.1:11434`) and model name in
+**Settings → Assistant**. Only local endpoints are used; nothing is sent to a
+cloud service. The assistant can include cached intelligence context when asked.
+
 
 The Electron main process starts the Python backend itself, reads the JSON
 handshake from stdout, and loads the console. Closing the window terminates the
@@ -213,7 +225,8 @@ You are responsible for every transmission. Prefer a dummy load for testing.
 
 Public feeds auto-sync while online by default (10-minute base cadence, with
 per-source minimums and conservative backoff). Change or disable this in
-**System Settings → Intelligence feeds**. OPSEC blackout and offline status
+**System Settings → Intelligence feeds**. Set `DARKSEC_NO_SYNC=1` to disable
+automatic sync entirely at launch. OPSEC blackout and offline status
 pause outbound fetches; cached results remain readable with their source age.
 Dashboard, Intel, Weather and CBRN views refresh their presentation while open.
 Use **SYNC NOW** for a one-shot refresh even when automatic sync is disabled.
