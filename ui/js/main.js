@@ -84,6 +84,13 @@ async function boot() {
   applyAppearance();
   updateStatusUI(lastStatus);
   document.getElementById("app").hidden = false;
+  try {
+    if (localStorage.getItem("darksec.nav.collapsed") === "1") {
+      document.getElementById("app")?.classList.add("nav-collapsed");
+      const m = document.getElementById("menuBtn");
+      if (m) { m.setAttribute("aria-expanded", "false"); m.setAttribute("aria-label", "Expand navigation"); }
+    }
+  } catch {}
   bootEl.classList.add("done");
   setTimeout(() => bootEl.remove(), 600);
   window.addEventListener("hashchange", route);
@@ -181,9 +188,18 @@ function bindChrome() {
   const sidebar = document.getElementById("sidebar");
   const scrim = document.getElementById("sidebarScrim");
   if (menu) menu.addEventListener("click", () => {
-    sidebar.classList.toggle("open");
-    scrim.classList.toggle("open", sidebar.classList.contains("open"));
-    menu.setAttribute("aria-expanded", sidebar.classList.contains("open") ? "true" : "false");
+    const mobile = window.matchMedia("(max-width: 860px)").matches;
+    if (mobile) {
+      sidebar.classList.toggle("open");
+      scrim.classList.toggle("open", sidebar.classList.contains("open"));
+      menu.setAttribute("aria-expanded", sidebar.classList.contains("open") ? "true" : "false");
+      return;
+    }
+    const app = document.getElementById("app");
+    const collapsed = app.classList.toggle("nav-collapsed");
+    try { localStorage.setItem("darksec.nav.collapsed", collapsed ? "1" : "0"); } catch {}
+    menu.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    menu.setAttribute("aria-label", collapsed ? "Expand navigation" : "Collapse navigation");
   });
   if (scrim) scrim.addEventListener("click", () => {
     sidebar.classList.remove("open");
