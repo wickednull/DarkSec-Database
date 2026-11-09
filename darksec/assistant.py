@@ -239,6 +239,7 @@ def _library_context(db: Database, query: str, limit: int = 5, max_chars: int = 
                 continue
         hits = collected
     chunks: list[str] = []
+    unreadable: list[str] = []
     used = 0
     for h in (hits or []):
         if not isinstance(h, dict):
@@ -269,11 +270,9 @@ def _library_context(db: Database, query: str, limit: int = 5, max_chars: int = 
             except Exception:
                 snippet = ""
         if not snippet:
-            # Still surface the document name so Delamain can point to it.
             name = str(h.get("name") or "").strip()
             if name:
-                chunks.append(f"[{name}" + (f" — {str(h.get('category') or '').strip()}" if h.get("category") else "") + "]\n(text not extractable / not yet indexed)")
-                used += len(chunks[-1])
+                unreadable.append(name)
             continue
         head = f"[{name}" + (f" — {category}" if category else "") + "]"
         block = f"{head}\n{snippet}"
@@ -286,12 +285,19 @@ def _library_context(db: Database, query: str, limit: int = 5, max_chars: int = 
             break
         chunks.append(block)
         used += len(block)
-    if not chunks:
+    if not chunks and not unreadable:
         return ""
+    parts = list(chunks)
+    if unreadable:
+        parts.append(
+            "Found but could NOT be read (likely scanned/image PDFs or not yet indexed) — "
+            "do not invent their contents; direct the operator to the Library viewer: "
+            + ", ".join(unreadable)
+        )
     return (
         "\nRetrieved from the indexed document library (PDFs/field manuals; "
         "may be partial/stale — verify before relying on it):\n"
-        + "\n\n".join(chunks)
+        + "\n\n".join(parts)
     )
 
 
