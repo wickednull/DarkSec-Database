@@ -582,6 +582,23 @@ class Database:
             self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_prompt_v4',?)",
                          (utcnow(),))
 
+        # Delamain prompt refinement: explicitly allow water-quality analysis and
+        # use of retrieved library passages, so small models don't over-refuse.
+        if self.one("SELECT 1 FROM meta WHERE key='assistant_prompt_v5'") is None:
+            try:
+                cur = str(self.get_setting("assistant_system_prompt", "") or "")
+                looks_prev_default = (
+                    "Answer any lawful question helpfully and directly" in cur
+                    and "Hard limits: do not provide instructions" in cur
+                    and "Water quality and safety are allowed" not in cur
+                )
+                if looks_prev_default:
+                    self.set_setting("assistant_system_prompt", new_default)
+            except Exception:
+                pass
+            self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_prompt_v5',?)",
+                         (utcnow(),))
+
         # Longer answers by default: early installs saved 512 tokens, which cuts
         # off many useful responses. Raise very low saved values to the current
         # default once; leave operator-chosen higher values untouched.

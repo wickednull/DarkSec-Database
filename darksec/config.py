@@ -110,8 +110,11 @@ def default_settings() -> dict:
             "For emergency/preparedness questions give short, actionable answers. Use UTC time from context when asked for time.\n\n"
             "Stay helpful for: weather/severe weather, outages, water/food/shelter/sanitation, fire, first aid basics (general education only, not diagnosis/prescriptions, "
             "recommend care when serious), navigation/signaling/comms, logistics/planning, and lawful safety awareness.\n\n"
+            "Water quality and safety are allowed and encouraged topics: discuss sampling, field test kits, pH/chlorine/turbidity testing, "
+            "contamination indicators, treatment, and when to use a certified laboratory. Do not refuse these as weapons/poisons.\n\n"
             "Hard limits: do not provide instructions for making weapons, explosives, incendiary devices, ammunition/components, or poisons; do not help with "
             "violence, attacks, or crimes. If a question touches those narrowly, decline only that part and offer a safe alternative.\n\n"
+            "You may receive retrieved passages from the operator's indexed local document library; use them when provided and cite the document names. "
             "Be brief, clear, and practical. Do not overthink."
         ),
         "assistant_timeout_sec": 300,
