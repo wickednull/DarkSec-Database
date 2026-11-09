@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -144,6 +147,60 @@ def _history_is_poisoned(m: dict) -> bool:
     return False
 
 
+def _quick_extract(path_str: str, max_chars: int = 1500) -> str:
+    """Best-effort, short text extraction for a single document.
+
+    Used when a library hit has no indexed text yet. Never raises.
+    """
+    if not path_str:
+        return ""
+    p = Path(path_str)
+    if not p.is_file():
+        return ""
+    ext = p.suffix.lower()
+    if ext == ".pdf" and shutil.which("pdftotext"):
+        try:
+            proc = subprocess.run(
+                ["pdftotext", "-q", "-layout", "-f", "1", "-l", "5", str(p), "-"],
+                capture_output=True, timeout=10, check=False,
+            )
+            text = proc.stdout.decode("utf-8", errors="ignore")[:max_chars]
+            if text.strip():
+                return text.strip()
+        except Exception:
+            pass
+    if ext == ".pdf":
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(str(p))
+            chunks = []
+            for i in range(min(5, len(reader.pages))):
+                try:
+                    chunks.append(reader.pages[i].extract_text() or "")
+                except Exception:
+                    continue
+            text = "\n".join(chunks)[:max_chars]
+            if text.strip():
+                return text.strip()
+        except Exception:
+            pass
+    if ext in (".txt", ".md"):
+        try:
+            return p.read_text(encoding="utf-8", errors="ignore")[:max_chars].strip()
+        except Exception:
+            pass
+    if ext in (".html", ".htm"):
+        try:
+            import html as _html
+            raw = p.read_text(encoding="utf-8", errors="ignore")[:max_chars]
+            raw = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", raw)
+            raw = re.sub(r"(?s)<[^>]+>", " ", raw)
+            return _html.unescape(raw).strip()
+        except Exception:
+            pass
+    return ""
+
+
 def _library_context(db: Database, query: str, limit: int = 5, max_chars: int = 6000) -> str:
     """Retrieve relevant snippets from the indexed document library (PDFs etc.).
 
@@ -190,15 +247,33 @@ def _library_context(db: Database, query: str, limit: int = 5, max_chars: int = 
         category = str(h.get("category") or "").strip()
         snippet = str(h.get("snippet") or "").strip().replace("[[[", "").replace("]]]", "")
         if not snippet:
-            # Fall back to a truncated stored text if FTS snippet is empty.
+            # Fall back to stored indexed text, then to a quick on-the-fly
+            # extraction (helps PDFs that exist but aren't deep-indexed yet).
             try:
-                row = db.one("SELECT text FROM library_docs WHERE id=?", (h.get("id"),))
+                row = db.one("SELECT text, path, rel_path FROM library_docs WHERE id=?", (h.get("id"),))
                 text = str((row or {}).get("text") or "").strip() if row else ""
                 if text:
                     snippet = text[:400]
+                elif row:
+                    cand = (row.get("rel_path") or row.get("path") or "").strip()
+                    resolved = None
+                    if cand:
+                        try:
+                            resolved = _library.resolve_doc(cand)
+                        except Exception:
+                            resolved = None
+                    if resolved is None and cand and Path(cand).is_file():
+                        resolved = Path(cand)
+                    if resolved is not None:
+                        snippet = _quick_extract(str(resolved))[:400]
             except Exception:
                 snippet = ""
         if not snippet:
+            # Still surface the document name so Delamain can point to it.
+            name = str(h.get("name") or "").strip()
+            if name:
+                chunks.append(f"[{name}" + (f" — {str(h.get('category') or '').strip()}" if h.get("category") else "") + "]\n(text not extractable / not yet indexed)")
+                used += len(chunks[-1])
             continue
         head = f"[{name}" + (f" — {category}" if category else "") + "]"
         block = f"{head}\n{snippet}"
@@ -236,6 +311,7 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
     lib_ctx = _library_context(db, user_text)
     if lib_ctx:
         sys += lib_ctx
+        sys += "\nWhen you use the retrieved library passages above, cite the document name(s) you relied on."
     msgs.append({"role": "system", "content": sys})
     kept = 0
     for m in reversed((history or [])[-20:]):
