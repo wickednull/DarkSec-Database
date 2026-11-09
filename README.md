@@ -40,19 +40,24 @@ database.
   KI warnings.
 - **Security & vault** — AES-256-GCM encrypted notes, incident log, OPSEC
   controls, audit trail and a phrase-gated purge.
-- **Logistics** — mission tasks, cache register, offline trip plans and local
-  check-in deadlines, low-stock view, backups, JSON/CSV export and restore.
-  Check-ins are not sent to an off-site contact.
-- **Weather & environment** — manual observations, charts, auto-synced
-  NOAA/USGS/NWS/GDACS and Open-Meteo feeds with offline caching, plus nowcast
-  calculators.
+- **Logistics** — mission tasks (including recurring tasks that roll forward
+  when completed), cache register, offline trip plans and local check-in
+  deadlines, a maintenance/expiry-due view, low-stock view, backups, JSON/CSV
+  export and restore. Check-ins are not sent to an off-site contact.
+- **Weather & environment** — manual observations, charts, a 3-day Open-Meteo
+  forecast, hourly AQI trend, auto-synced NOAA/USGS/NWS/GDACS feeds with offline
+  caching, plus nowcast calculators.
+- **Field medicine** — patient registry, triage board, vitals trends and a
+  medication administration log (dose, route, indication, who administered,
+  reaction). Record-keeping only, not prescribing or diagnosis.
 - **Global threat & live intel** — cached public live feeds (OpenSky aircraft,
   CelesTrak TLE/SGP4 satellites, USGS earthquakes, NOAA SWPC, GDACS/EONET,
   Safecast, Smithsonian volcano reports, world news and Open-Meteo), a local
   weighted threat index, solar/day-night state and live event logging into the
   mission log. Auto-sync pauses offline and in OPSEC mode.
 - **Settings** — identity, position, grid format, radio limits, map tiles,
-  appearance, vault timeout, diagnostics and data custody.
+  appearance, feed source health/editing, vault timeout, diagnostics and data
+  custody.
 - **Local AI assistant (Delamain)** — optional chat backed by a local Ollama
   instance. Detects installed models, can include cached intelligence context,
   and has no cloud dependency. Configure the endpoint and model in Settings.
@@ -294,6 +299,9 @@ index from cached live events and adds live-source panels:
   with altitude / speed / heading. Military traffic is often not published.
 - **Satellite watch** — cached CelesTrak TLE set propagated with SGP4; shows
   overhead passes for the operator position.
+- **Future pass planner** — next rises/peaks/sets above a chosen elevation from
+  the cached TLE catalogue, with duration, peak azimuth and name/NORAD filtering
+  for observation or SDR capture planning.
 - **CBRN picture** — NOAA space-weather scales, nearby Safecast reports, local
   dosimetry log, Smithsonian/USGS volcano reports, NASA EONET hazards and
   Open-Meteo air quality. These are advisory public proxies, not a confirmed

@@ -24,7 +24,7 @@ import math
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import feeds as feedstore
 from . import tilecache
@@ -343,7 +343,7 @@ def live_satellites(db: Database, observer_lat: float, observer_lon: float, limi
     """Propagate the latest CelesTrak TLE snapshot and return passes over the observer."""
     # list_feeds intentionally omits the raw payload from API responses, so
     # read the cached TLE blob directly here.
-    row = db.one("SELECT payload FROM feeds WHERE kind='celestrak' "
+    row = db.one("SELECT payload FROM feeds WHERE id='celestrak_tle' "
                  "ORDER BY fetched_at DESC LIMIT 1")
     if not row or not row["payload"]:
         return []
@@ -411,6 +411,218 @@ def live_satellites(db: Database, observer_lat: float, observer_lon: float, limi
     return out[:limit]
 
 
+# --------------------------------------------------------- future pass planner
+# Scanning the full CelesTrak catalogue for future passes would cost minutes.
+# Restrict the default planner to satellites an operator can plausibly receive
+# or observe (weather imaging, ISS/CSS, amateur radio). A free-text query
+# overrides the allowlist so any named object can be planned for.
+_PASS_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
+_PASS_CACHE_LOCK = threading.Lock()
+_PASS_CACHE_TTL = 300.0
+_PASS_STEP_SECONDS = 60.0
+_PASS_MAX_CANDIDATES = 400
+_PASS_NAME_RE = re.compile(
+    r"(ISS|ZARYA|CSS|TIANHE|NOAA|METEOR|GOES|HIMAWARI|FENGYUN|ELEKTRO|SUOMI|DMSP|"
+    r"AQUA|TERRA|LANDSAT|SENTINEL|S-NET|AISSAT|OSCAR|RADIO|FOX|SAUDISAT|XW-|"
+    r"HOPE|CUBESAT|AMSAT|SO-|AO-|VO-|PO-|TO-|UKUBE|FUNCUBE|NAYIF|CAS-|JY1|"
+    r"LAPAN|GAOFEN|ZY-|RESURS|OCEANSAT|SCATSAT|SARAL|METOP|METEOSAT|INSAT|"
+    r"GSAT|CARTOSAT|RISAT|YAOGAN|ARGOS|ORBCOMM|IRIDIUM|GLOBALSTAR)",
+    re.IGNORECASE,
+)
+
+
+def _observer_ecef(lat_deg: float, lon_deg: float, alt_km: float = 0.0) -> tuple[float, float, float]:
+    """WGS84 observer position in earth-centred, earth-fixed coordinates."""
+    a = 6378.137
+    f = 1.0 / 298.257223563
+    e2 = f * (2.0 - f)
+    lat = math.radians(lat_deg)
+    lon = math.radians(lon_deg)
+    n = a / math.sqrt(1.0 - e2 * math.sin(lat) ** 2)
+    return ((n + alt_km) * math.cos(lat) * math.cos(lon),
+            (n + alt_km) * math.cos(lat) * math.sin(lon),
+            (n * (1.0 - e2) + alt_km) * math.sin(lat))
+
+
+def _gmst_rad(dt: datetime) -> float:
+    """Greenwich mean sidereal time (IAU 1982) for a UTC datetime."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    seconds = (dt - datetime(2000, 1, 1, 12, tzinfo=timezone.utc)).total_seconds()
+    days = seconds / 86400.0
+    gmst_deg = 280.46061837 + 360.98564736629 * days
+    return math.radians(gmst_deg % 360.0)
+
+
+def _look_angles(r_eci: tuple[float, float, float], dt: datetime,
+                 obs: tuple[float, float, float], lat_deg: float, lon_deg: float) -> tuple[float, float]:
+    """Return (elevation_deg, azimuth_deg) from an ECI position."""
+    theta = _gmst_rad(dt)
+    x, y, z = r_eci
+    # Rotate ECI -> ECEF about the z axis.
+    sx = x * math.cos(theta) + y * math.sin(theta)
+    sy = -x * math.sin(theta) + y * math.cos(theta)
+    sz = z
+    dx, dy, dz = sx - obs[0], sy - obs[1], sz - obs[2]
+    lat = math.radians(lat_deg)
+    lon = math.radians(lon_deg)
+    east = -math.sin(lon) * dx + math.cos(lon) * dy
+    north = (-math.sin(lat) * math.cos(lon) * dx
+             - math.sin(lat) * math.sin(lon) * dy
+             + math.cos(lat) * dz)
+    up = (math.cos(lat) * math.cos(lon) * dx
+          + math.cos(lat) * math.sin(lon) * dy
+          + math.sin(lat) * dz)
+    rng = math.sqrt(east * east + north * north + up * up)
+    if rng <= 0:
+        return -90.0, 0.0
+    elev = math.degrees(math.asin(max(-1.0, min(1.0, up / rng))))
+    az = math.degrees(math.atan2(east, north)) % 360.0
+    return elev, az
+
+
+def next_satellite_passes(db: Database, observer_lat: float, observer_lon: float,
+                          hours: int = 12, min_elevation_deg: float = 10.0,
+                          limit: int = 40, query: str = "") -> list[dict]:
+    """Predict upcoming passes from the cached CelesTrak TLE snapshot.
+
+    Returns rise/peak/set times, maximum elevation and peak azimuth. Intended
+    for planning a manual observation or SDR capture, not for antenna pointing
+    without a fresh TLE and a local time reference.
+    """
+    # The active catalogue supplies the full object set but no names; the
+    # stations/weather/amateur groups supply human-readable labels. Merge both.
+    rows = db.query("SELECT id,payload FROM feeds WHERE kind='celestrak' "
+                    "AND payload IS NOT NULL AND payload<>'' "
+                    "ORDER BY CASE id WHEN 'celestrak_stations' THEN 0 "
+                    "WHEN 'celestrak_weather' THEN 0 WHEN 'celestrak_amateur' THEN 0 "
+                    "ELSE 1 END, id")
+    if not rows:
+        return []
+    raw = "\n".join(str(r["payload"] or "") for r in rows)
+    q = str(query or "").strip().lower()
+    cache_key = (round(float(observer_lat), 2), round(float(observer_lon), 2),
+                 int(hours), round(float(min_elevation_deg), 1), q,
+                 len(raw), hash(raw))
+    mono = time.monotonic()
+    with _PASS_CACHE_LOCK:
+        cached = _PASS_CACHE.get(cache_key)
+        if cached is not None and mono - cached[0] < _PASS_CACHE_TTL:
+            return cached[1][:limit]
+
+    seen: set[int] = set()
+    items: list[dict] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except Exception:
+            continue
+        for it in payload.get("items") or []:
+            norad = int(it.get("norad") or 0)
+            if norad and norad in seen:
+                continue
+            if norad:
+                seen.add(norad)
+            items.append(it)
+
+    candidates = []
+    for it in items:
+        if not it.get("line1") or not it.get("line2"):
+            continue
+        # Geostationary objects do not "pass"; they sit in view continuously.
+        try:
+            if float(it["line2"][52:63]) < 2.0:
+                continue
+        except (ValueError, IndexError):
+            pass
+        name = str(it.get("name") or "")
+        if q:
+            if q not in name.lower() and q != str(it.get("norad") or ""):
+                continue
+        elif not _PASS_NAME_RE.search(name):
+            continue
+        candidates.append(it)
+        if len(candidates) >= _PASS_MAX_CANDIDATES:
+            break
+
+    try:
+        from sgp4.api import Satrec
+        from sgp4 import propagation
+    except Exception:
+        return []
+
+    now = datetime.now(timezone.utc)
+    obs = _observer_ecef(observer_lat, observer_lon)
+    horizon = now + timedelta(hours=max(1, int(hours)))
+    step = timedelta(seconds=_PASS_STEP_SECONDS)
+    passes: list[dict] = []
+
+    for it in candidates:
+        name = str(it.get("name") or "UNKNOWN")
+        try:
+            sat = Satrec.twoline2rv(it["line1"], it["line2"])
+            epoch = datetime(2000 + int(str(sat.epochyr or "20")), 1, 1,
+                             tzinfo=timezone.utc) + timedelta(days=float(sat.epochdays))
+        except Exception:
+            continue
+        current = None
+        stamp = now
+        while stamp <= horizon:
+            try:
+                r, _v = propagation.sgp4(sat, (stamp - epoch).total_seconds() / 60.0)
+            except Exception:
+                r = None
+            if getattr(sat, "error", False):
+                break
+            if not r:
+                stamp += step
+                continue
+            elev, az = _look_angles((r[0], r[1], r[2]), stamp, obs,
+                                    observer_lat, observer_lon)
+            if elev >= float(min_elevation_deg):
+                if current is None:
+                    current = {"rise": stamp, "peak": stamp, "azimuth_deg": az,
+                               "max_elevation_deg": elev}
+                elif elev > current["max_elevation_deg"]:
+                    current.update(peak=stamp, azimuth_deg=az, max_elevation_deg=elev)
+            elif current is not None:
+                current["set"] = stamp
+                current["duration_min"] = round((stamp - current["rise"]).total_seconds() / 60.0, 1)
+                current["ongoing"] = False
+                passes.append(_pass_row(it, name, current))
+                current = None
+            stamp += step
+        if current is not None:
+            current["set"] = None
+            current["duration_min"] = round((horizon - current["rise"]).total_seconds() / 60.0, 1)
+            current["ongoing"] = True
+            passes.append(_pass_row(it, name, current))
+
+    passes.sort(key=lambda p: p["rise"])
+    with _PASS_CACHE_LOCK:
+        for old in [k for k, (ts, _) in _PASS_CACHE.items() if mono - ts > 1800]:
+            _PASS_CACHE.pop(old, None)
+        _PASS_CACHE[cache_key] = (mono, passes)
+    return passes[:limit]
+
+
+def _pass_row(item: dict, name: str, current: dict) -> dict:
+    rise = current["rise"]
+    return {
+        "norad": int(item.get("norad") or 0),
+        "name": name,
+        "rise": rise.isoformat(),
+        "peak": current["peak"].isoformat(),
+        "set": current["set"].isoformat() if current.get("set") else None,
+        "max_elevation_deg": round(current["max_elevation_deg"], 1),
+        "azimuth_deg": round(current["azimuth_deg"], 1),
+        "duration_min": current["duration_min"],
+        "ongoing": bool(current.get("ongoing")),
+        "source": "CelesTrak SGP4",
+    }
+
+
 def layer_feed_items(db: Database, kinds: set[str] | tuple[str, ...], feed_ids: set[str] | tuple[str, ...] | None = None,
                       max_age_hours: float | None = None, limit: int = 2000) -> list[dict]:
     """Cached geolocated items from specific feed kinds/ids for dedicated map layers.
@@ -460,7 +672,12 @@ def layer_feed_items(db: Database, kinds: set[str] | tuple[str, ...], feed_ids: 
             for k in ("mmsi", "imo", "callsign", "vessel", "speed_kn", "course_deg", "heading_deg",
                       "cable_id", "capacity", "operator", "camera_id",
                       "alpr", "flock_tagged", "surveillance_type", "camera_type", "brand",
-                      "operator_name", "direction", "surveillance_zone", "status"):
+                      "operator_name", "direction", "surveillance_zone", "status",
+                      "snapshot_url", "feed_type", "feedType", "frame_refresh_ms", "frameRefreshMs",
+                      "credit", "license", "provider", "region",
+                      "source_kind", "heading_confidence", "headingConfidence",
+                      "pitch_deg", "fov_deg", "range_m", "mount_height_m", "ground_elevation_m",
+                      "viewer_url", "city", "import_source", "stream_url"):
                 if it.get(k) is not None and it.get(k) != "":
                     row[k] = it.get(k)
             out.append(row)

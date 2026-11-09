@@ -139,6 +139,110 @@ def test_record_crud(client):
     assert client.get(f"/api/records/tasks/{row['id']}").status_code == 404
 
 
+def test_recurring_task_rolls_forward(client):
+    title = _unique("recurring")
+    created = client.post("/api/records/tasks", json={
+        "title": title, "due": "2026-01-01 08:00", "recurrence": "WEEKLY",
+    }).json()["item"]
+    assert created["recurrence"] == "WEEKLY"
+
+    patched = client.patch(f"/api/records/tasks/{created['id']}", json={"done": True}).json()
+    assert patched["item"]["done"] == 1
+    assert patched["next_task_id"]
+
+    following = client.get(f"/api/records/tasks/{patched['next_task_id']}").json()
+    assert following["done"] == 0
+    assert following["recurrence"] == "WEEKLY"
+    assert following["due"] == "2026-01-08 08:00"
+    assert following["title"] == title
+
+    client.delete(f"/api/records/tasks/{created['id']}")
+    client.delete(f"/api/records/tasks/{patched['next_task_id']}")
+
+
+def test_medication_log_and_summary(client):
+    callsign = _unique("patient")
+    patient = client.post("/api/records/patients", json={"callsign": callsign}).json()["item"]
+    med = client.post("/api/records/medication_log", json={
+        "patient_id": patient["id"], "medication": "TESTDRUG", "dose": "1 tablet",
+        "route": "PO", "administered_by": "operator", "indication": "test",
+    }).json()["item"]
+    assert med["medication"] == "TESTDRUG"
+
+    listed = client.get(f"/api/medical/patients/{patient['id']}/medications").json()["items"]
+    assert any(item["id"] == med["id"] for item in listed)
+
+    summary = client.get("/api/medical/summary").json()
+    assert "recent_medications" in summary
+    assert any(item["id"] == med["id"] for item in summary["recent_medications"])
+
+    client.delete(f"/api/records/medication_log/{med['id']}")
+    client.delete(f"/api/records/patients/{patient['id']}")
+
+
+def test_feed_update_clears_cache_on_source_change(client):
+    feeds = client.get("/api/feeds").json()["feeds"]
+    original = next(f for f in feeds if f["id"] == "bbc_world")
+    updated = client.put("/api/feeds/bbc_world", json={
+        "name": "BBC World (test)", "url": "https://example.invalid/rss.xml", "kind": "rss",
+    })
+    assert updated.status_code == 200
+    assert updated.json()["source_changed"] is True
+
+    after = next(f for f in client.get("/api/feeds").json()["feeds"] if f["id"] == "bbc_world")
+    assert after["status"] == "NEVER"
+    assert after["count"] == 0
+
+    restored = client.put("/api/feeds/bbc_world", json={
+        "name": original["name"], "url": original["url"], "kind": original["kind"],
+    })
+    assert restored.status_code == 200
+
+
+def test_maintenance_due(client):
+    task = client.post("/api/records/tasks", json={
+        "title": _unique("maintenance"), "due": "2000-01-01",
+    }).json()["item"]
+    item = client.post("/api/records/inventory", json={
+        "name": _unique("expiring"), "expires": "2000-01",
+    }).json()["item"]
+
+    out = client.get("/api/maintenance/due", params={"days": 30}).json()
+    assert any(row["id"] == task["id"] and row["overdue"] for row in out["tasks"])
+    assert any(row["id"] == item["id"] and row["expired"] for row in out["inventory"])
+
+    client.delete(f"/api/records/tasks/{task['id']}")
+    client.delete(f"/api/records/inventory/{item['id']}")
+
+
+def test_weather_and_air_parsers_preserve_forecast(client):
+    from darksec import feeds
+
+    wx = feeds._parse_weather({
+        "latitude": 1.0, "longitude": 2.0,
+        "current": {"temperature_2m": 10, "weather_code": 1},
+        "daily": {
+            "time": ["2026-11-08"],
+            "temperature_2m_max": [12.5],
+            "temperature_2m_min": [4.0],
+            "precipitation_sum": [0.4],
+            "weather_code": [3],
+        },
+    })[0]
+    assert wx["forecast"][0]["temp_max_c"] == 12.5
+    assert wx["forecast"][0]["condition"] == "overcast"
+
+    aq = feeds._parse_air_quality({
+        "latitude": 1.0, "longitude": 2.0,
+        "current": {"us_aqi": 42, "time": "2026-11-08T00:00:00Z"},
+        "hourly": {"time": ["2026-11-08T00:00", "2026-11-08T01:00"], "us_aqi": [42, 55]},
+    })[0]
+    assert aq["trend"] == [
+        {"time": "2026-11-08T00:00", "aqi": 42},
+        {"time": "2026-11-08T01:00", "aqi": 55},
+    ]
+
+
 def test_record_validation_and_unknown_table(client):
     assert client.post("/api/records/tasks", json={}).status_code == 400
     assert client.get("/api/records/not_a_table").status_code == 404
@@ -241,3 +345,186 @@ def test_lan_status_shape(client):
     data = client.get("/api/lan/status").json()
     assert "enabled" in data
     assert "ip" in data
+
+
+# ----------------------------------------------------------------------- map
+def test_map_intel_includes_all_cached_layers(client):
+    import json
+    from darksec import config
+    from darksec.db import Database
+
+    db = Database(config.DB_PATH)
+    cctv_payload = {
+        "items": [{
+            "id": "cam-global-1", "kind": "cctv", "title": "CCTV A",
+            "lat": 51.5074, "lon": -0.1278, "time": "2026-01-01T00:00:00Z",
+            "source": "OSM", "camera_id": "cam-global-1", "surveillance_type": "camera",
+        }],
+        "fetched_at": "2026-01-01T00:00:00Z",
+    }
+    cable_payload = {
+        "items": [{
+            "id": "cp-global-1", "kind": "cables", "title": "Cable Landing X",
+            "lat": -33.8688, "lon": 151.2093, "source": "cables",
+        }],
+    }
+    db.execute("update feeds set payload=?, status='ERROR', fetched_at=? where id='public_cctv'",
+               (json.dumps(cctv_payload), "2026-01-01T00:00:00Z"))
+    db.execute("update feeds set payload=?, status='OK', fetched_at=? where id='infra_cables'",
+               (json.dumps(cable_payload), "2026-01-01T00:00:00Z"))
+
+    data = client.get("/api/map/intel").json()
+    assert isinstance(data.get("cctv"), list)
+    assert any(c.get("title") == "CCTV A" and c.get("lat") == 51.5074 for c in data["cctv"])
+    assert isinstance(data.get("cables"), list)
+    assert any(c.get("title") == "Cable Landing X" and c.get("lon") == 151.2093 for c in data["cables"])
+    summary = data.get("summary") or {}
+    assert summary.get("cctv", 0) >= 1
+    assert summary.get("cables", 0) >= 1
+    # Cached layers are returned globally (not filtered to operator proximity).
+    assert any(abs(float(c.get("lon") or 0) - (-0.1278)) < 0.001 for c in data["cctv"])
+
+# ---------------------------------------------------------------------- cctv
+def test_cctv_catalog_endpoints_shape(client):
+    status = client.get("/api/cctv/catalog/status")
+    assert status.status_code == 200
+    data = status.json()
+    assert "frame_cache" in data
+    assert "candidate_files" in data or "pack_stats" in data
+
+    packs = client.get("/api/cctv/catalog/packs")
+    assert packs.status_code == 200
+    pdata = packs.json()
+    assert "packs" in pdata
+    assert "disabled" in pdata
+
+
+def test_cctv_stream_info_registered_only(client):
+    import json
+    from darksec import config
+    from darksec.db import Database
+
+    db = Database(config.DB_PATH)
+    payload = {
+        "items": [{
+            "id": "stream-cam-1", "kind": "cctv", "title": "Test HLS Cam",
+            "lat": 40.0, "lon": -74.0, "feed_type": "hls",
+            "stream_url": "https://example.test/live/cam.m3u8",
+            "snapshot_url": "https://example.test/snap.jpg",
+            "source": "test", "credit": "Test Credit", "license": "Test License",
+        }, {
+            "id": "img-cam-1", "kind": "cctv", "title": "Test Image Cam",
+            "lat": 41.0, "lon": -73.0, "feed_type": "image",
+            "snapshot_url": "https://example.test/image.jpg",
+            "source": "test",
+        }],
+    }
+    db.execute("update feeds set payload=?, status='OK', fetched_at=? where id='cctv_catalog'",
+               (json.dumps(payload), "2026-01-01T00:00:00Z"))
+
+    r = client.get("/api/cctv/stream/info", params={"id": "cctv_catalog:stream-cam-1"})
+    assert r.status_code == 200
+    info = r.json()
+    assert info["ok"] is True
+    assert info["feed_type"] == "hls"
+    assert "/api/cctv/stream/manifest" in (info.get("proxied_url") or "")
+    assert info.get("credit") == "Test Credit"
+
+    r2 = client.get("/api/cctv/stream/info", params={"id": "cctv_catalog:img-cam-1"})
+    assert r2.status_code == 200
+    assert r2.json().get("proxied_url") is None
+
+    missing = client.get("/api/cctv/stream/info", params={"id": "cctv_catalog:nope"})
+    assert missing.status_code == 404
+
+
+def test_cctv_frame_registered_only(client):
+    import json
+    from darksec import config
+    from darksec.db import Database
+
+    db = Database(config.DB_PATH)
+    payload = {"items": [{"id": "nosnap-1", "kind": "cctv", "title": "No Snap", "lat": 1, "lon": 2, "source": "test"}]}
+    db.execute("update feeds set payload=?, status='OK' where id='cctv_catalog'", (json.dumps(payload),))
+    r = client.get("/api/cctv/frame", params={"id": "cctv_catalog:nosnap-1"})
+    assert r.status_code == 404  # no registered snapshot
+
+
+def test_cctv_stream_manifest_rewrites_registered_hls(client, monkeypatch):
+    import json
+    from darksec import config
+    from darksec.db import Database
+
+    db = Database(config.DB_PATH)
+    payload = {"items": [{"id": "hls-1", "kind": "cctv", "title": "HLS", "lat": 1, "lon": 2,
+                          "feed_type": "hls", "stream_url": "https://cam.example.test/path/live.m3u8", "source": "test"}]}
+    db.execute("update feeds set payload=?, status='OK' where id='cctv_catalog'", (json.dumps(payload),))
+
+    manifest = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nlow.m3u8\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.key\"\nseg1.ts\nhttps://evil.example/other.ts\n"
+
+    class FakeResp:
+        status_code = 200
+        headers = {"content-type": "application/vnd.apple.mpegurl"}
+        text = manifest
+        def raise_for_status(self): return None
+        def close(self): return None
+    monkeypatch.setattr("darksec.server.requests.get", lambda *a, **k: FakeResp())
+
+    r = client.get("/api/cctv/stream/manifest", params={"id": "cctv_catalog:hls-1"})
+    assert r.status_code == 200
+    body = r.text
+    assert "/api/cctv/stream/resource" in body
+    assert "https://cam.example.test" not in body  # rewritten
+    # cross-host absolute URI should remain unrewritten/preserved (safety: not proxied as same-host)
+    assert "https://evil.example/other.ts" in body
+
+
+def test_cctv_stream_resource_blocks_cross_host(client, monkeypatch):
+    import base64, json
+    from darksec import config
+    from darksec.db import Database
+
+    db = Database(config.DB_PATH)
+    payload = {"items": [{"id": "hls-2", "kind": "cctv", "title": "HLS", "lat": 1, "lon": 2,
+                          "feed_type": "hls", "stream_url": "https://cam.example.test/live.m3u8", "source": "test"}]}
+    db.execute("update feeds set payload=?, status='OK' where id='cctv_catalog'", (json.dumps(payload),))
+    evil = base64.urlsafe_b64encode(b"https://evil.example/seg.ts").decode().rstrip("=")
+    r = client.get("/api/cctv/stream/resource", params={"id": "cctv_catalog:hls-2", "u": evil})
+    assert r.status_code == 400
+
+def test_cctv_stream_allowlist_rewrites_configured_hosts(client, monkeypatch):
+    import json
+    from darksec import config
+    from darksec.db import Database
+    import darksec.server as srv
+
+    db = Database(config.DB_PATH)
+    payload = {"items": [{"id": "hls-allow", "kind": "cctv", "title": "HLS", "lat": 1, "lon": 2,
+                          "feed_type": "hls", "stream_url": "https://cam.example.test/live.m3u8", "source": "test"}]}
+    db.execute("update feeds set payload=?, status='OK' where id='cctv_catalog'", (json.dumps(payload),))
+    manifest = '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.allowed.test/key.key"\nhttps://cdn.allowed.test/seg1.ts\nseg2.ts\n'
+
+    class FakeResp:
+        status_code = 200
+        headers = {"content-type": "application/vnd.apple.mpegurl"}
+        text = manifest
+        def raise_for_status(self): return None
+    monkeypatch.setattr(srv.requests, "get", lambda *a, **k: FakeResp())
+
+    # Without allowlist, cross-host CDN URIs remain unrewritten (safe default)
+    client.put("/api/settings", json={"cctv_stream_host_allowlist": "[]"})
+    r = client.get("/api/cctv/stream/manifest", params={"id": "cctv_catalog:hls-allow"})
+    assert r.status_code == 200
+    assert "https://cdn.allowed.test/key.key" in r.text
+    assert "https://cdn.allowed.test/seg1.ts" in r.text
+    assert "/api/cctv/stream/resource" in r.text  # same-host seg2.ts rewritten
+
+    # With allowlist, configured CDN host is rewritten/proxied
+    db.set_setting("cctv_stream_host_allowlist", json.dumps(["cdn.allowed.test"]))
+    r = client.get("/api/cctv/stream/manifest", params={"id": "cctv_catalog:hls-allow"})
+    assert r.status_code == 200
+    assert "/api/cctv/stream/resource" in r.text
+    assert "https://cdn.allowed.test/key.key" not in r.text
+    assert "https://cdn.allowed.test/seg1.ts" not in r.text
+    # cleanup
+    db.set_setting("cctv_stream_host_allowlist", "[]")

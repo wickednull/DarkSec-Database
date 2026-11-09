@@ -19,6 +19,7 @@ TEST_DATA = Path(tempfile.mkdtemp(prefix="darksec-pytest-"))
 os.environ["DARKSEC_DATA"] = str(TEST_DATA)
 os.environ["DARKSEC_NO_SYNC"] = "1"
 os.environ["DARKSEC_NO_INDEX"] = "1"
+os.environ["DARKSEC_NO_CATALOG_AUTOSYNC"] = "1"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

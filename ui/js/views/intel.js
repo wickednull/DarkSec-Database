@@ -1,7 +1,8 @@
 import { api } from "../api.js";
 import { store } from "../store.js";
 import {
-  h, panel, stat, gauge, badge, btn, pageHead, alertStrip, emptyState, loading, fmt, toast, tabs, sectionTitle,
+  h, panel, stat, gauge, badge, btn, pageHead, alertStrip, emptyState, loading, fmt, toast,
+  tabs, sectionTitle, input, select, field,
 } from "../components.js";
 import { feedBadge, severityBadge, positionConfidence } from "./shared.js";
 import * as U from "../units.js";
@@ -152,7 +153,7 @@ export async function render(root, params = {}) {
   else if (activeTab === "conflict") renderConflict(body);
   else if (activeTab === "cyber") renderCyber(body);
   else if (activeTab === "events") renderEvents(body);
-  else if (activeTab === "sensors") renderSensors(body);
+  else if (activeTab === "sensors") await renderSensors(body);
 
   root.appendChild(h("div", { class: "tiny dim mt-14", text: "INTEL SOURCES: The Hacker News (cybersecurity RSS), GDELT 2.0 (automated media coding), UCDP Candidate Events (monthly verified), OpenSky Network, CelesTrak (TLE/SGP4), NASA NEO/EONET, USGS, BBC/Al Jazeera/Guardian/France24/DW, International Crisis Group, Open-Meteo, NOAA SWPC, NWS, ReliefWeb, GDACS, WHO, Safecast. Every item shows its age; cached snapshots are never live warnings." }));
 
@@ -349,7 +350,7 @@ export async function render(root, params = {}) {
     }
   }
 
-  function renderSensors(host) {
+  async function renderSensors(host) {
     host.appendChild(sectionTitle("Air, Space & Environment", "Public aircraft positions, satellite passes, and air quality"));
     const grid = h("div", { class: "panel-grid grid-2 mt-10" });
     host.appendChild(grid);
@@ -366,6 +367,14 @@ export async function render(root, params = {}) {
       sub: `SGP4 prediction for observer ${observer} · ${positionInfo.mapLabel}`,
       icon: "satellite",
       body: buildSats(satellites),
+    }));
+
+    grid.appendChild(panel({
+      title: "Future Satellite Pass Planner",
+      sub: `Next passes above 10° · observer ${observer}`,
+      icon: "satellite",
+      cls: "span-2",
+      body: buildPassPlanner(),
     }));
 
     const airBody = air ? h("div", { class: "col gap-4" },
@@ -456,6 +465,61 @@ export async function render(root, params = {}) {
     }
     wrap.appendChild(list);
     return wrap;
+  }
+
+  function buildPassPlanner() {
+    const body = h("div", { class: "col gap-8" });
+    const windowCtl = select([
+      { value: "6", label: "Next 6 hours" },
+      { value: "12", label: "Next 12 hours" },
+      { value: "24", label: "Next 24 hours" },
+    ], "12");
+    const filter = input({ type: "search", placeholder: "ISS, NOAA 19, METEOR, 25544…" });
+    const results = h("div", { class: "col gap-6" });
+    const run = () => loadPasses(results, windowCtl.value, filter.value.trim());
+    const controls = h("div", { class: "row wrap gap-10 items-end" },
+      field("Window", windowCtl),
+      field("Name / NORAD filter", filter),
+      btn("PREDICT", { size: "sm", tone: "primary", icon: "refresh", onClick: run }));
+    filter.addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+    windowCtl.addEventListener("change", run);
+    body.append(controls, results);
+    setTimeout(run, 40);
+    return body;
+  }
+
+  async function loadPasses(target, hours = "12", query = "") {
+    target.replaceChildren(loading("COMPUTING SGP4 PASSES"));
+    try {
+      const params = new URLSearchParams({ hours: String(hours), min_elevation: "10", limit: "30" });
+      if (query) params.set("q", query);
+      const out = await api.get(`/api/intel/satellite-passes?${params.toString()}`);
+      const items = out.items || [];
+      if (!target.isConnected) return;
+      target.replaceChildren();
+      if (!items.length) {
+        target.appendChild(emptyState("No passes above 10° in this window",
+          "Refresh CelesTrak TLEs while online, widen the window, or search a specific satellite. The planner uses the cached catalogue; it does not fetch on demand.",
+          "satellite"));
+        return;
+      }
+      const list = h("div", { class: "list" });
+      for (const p of items) {
+        const row = h("div", { class: "list-item" });
+        const main = h("div", { class: "li-main" });
+        main.appendChild(h("div", { class: "li-title", text: `${p.name} (NORAD ${p.norad})` }));
+        main.appendChild(h("div", { class: "li-sub", text: `rise ${fmt.time(p.rise)} · peak ${fmt.time(p.peak)} · set ${p.set ? fmt.time(p.set) : "ongoing"} · ${p.duration_min} min · azimuth ${Math.round(p.azimuth_deg)}°` }));
+        row.appendChild(main);
+        row.appendChild(badge(`MAX ${Math.round(p.max_elevation_deg)}°`, p.max_elevation_deg >= 45 ? "green" : p.max_elevation_deg >= 25 ? "amber" : "muted"));
+        if (p.ongoing) row.appendChild(badge("IN VIEW", "cyan"));
+        list.appendChild(row);
+      }
+      target.appendChild(list);
+      target.appendChild(h("div", { class: "tiny dim mt-6",
+        text: "Predicted from cached TLEs; times shown in device local time. Recheck before a capture and use a freshly downloaded TLE for precision pointing." }));
+    } catch (err) {
+      if (target.isConnected) target.replaceChildren(h("div", { class: "callout danger small", text: err.message || "Pass prediction failed" }));
+    }
   }
 
   function buildWar(items) {

@@ -2,7 +2,7 @@ import { api } from "../api.js";
 import { store } from "../store.js";
 import {
   h, panel, stat, badge, btn, pageHead, alertStrip, emptyState, loading, fmt, toast,
-  modal, field, input, textarea, select,
+  modal, field, input, textarea, select, sparkline,
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { calculatorGrid } from "../calculators.js";
@@ -113,6 +113,20 @@ export async function render(root) {
     cls: "span-2",
     tools: [btn("REFRESH", { size: "sm", tone: "ghost", icon: "refresh", onClick: () => refreshFeed(wx || { id: "open_meteo_weather", name: "Open-Meteo Local Weather" }) })],
     body: buildConditions(wx, wxItem, aq, aqItem, positionInfo),
+  }));
+
+  grid.appendChild(panel({
+    title: "3-Day Forecast (Open-Meteo)",
+    sub: "Daily model outlook · not an observation",
+    icon: "cloud",
+    body: buildForecast(wxItem),
+  }));
+
+  grid.appendChild(panel({
+    title: "Air Quality Trend",
+    sub: "Hourly US AQI model · next 72 h",
+    icon: "activity",
+    body: buildAqiTrend(aqItem),
   }));
 
   grid.appendChild(panel({
@@ -289,6 +303,61 @@ function buildConditions(wx, wxItem, aq, aqItem, positionInfo) {
         h("div", { class: "tiny muted", text: feedMeta(aq) })),
       h("div", { class: "tiny muted mt-6", text: aqItem.summary || "Air quality index for the operator position. Not for evacuation decisions alone." })));
   }
+  return wrap;
+}
+
+function buildForecast(wxItem) {
+  const days = Array.isArray(wxItem?.forecast) ? wxItem.forecast : [];
+  const wrap = h("div", { class: "col gap-8" });
+  if (!days.length) {
+    wrap.appendChild(emptyState("No daily forecast cached", "Refresh Open-Meteo weather while online. The feed requests a 3-day outlook for the configured position.", "cloud"));
+    return wrap;
+  }
+  for (const day of days.slice(0, 3)) {
+    let label = day.date || "—";
+    const dt = day.date ? new Date(`${day.date}T12:00:00`) : null;
+    if (dt && !Number.isNaN(dt.getTime())) {
+      label = dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+    }
+    const row = h("div", { class: "row between items-center gap-10", style: { padding: "8px 0", borderBottom: "1px solid rgba(93,255,154,.08)" } });
+    const left = h("div", { class: "col gap-2" });
+    left.appendChild(h("div", { class: "li-title", text: label }));
+    left.appendChild(h("div", { class: "tiny muted", text: String(day.condition || "model").toUpperCase() }));
+    const right = h("div", { class: "col gap-2", style: { textAlign: "right" } });
+    right.appendChild(h("div", { class: "row gap-8 items-center" },
+      badge(day.temp_max_c != null ? U.tempC(day.temp_max_c) : "—", "amber"),
+      h("span", { class: "tiny muted", text: day.temp_min_c != null ? `min ${U.tempC(day.temp_min_c)}` : "" })));
+    right.appendChild(h("div", { class: "tiny muted", text: `precip ${U.precipMm(day.precip_mm)}` }));
+    row.append(left, right);
+    wrap.appendChild(row);
+  }
+  wrap.appendChild(h("div", { class: "tiny dim", text: "Daily highs/lows from a gridded model. Local terrain and microclimate can differ; confirm with your instruments." }));
+  return wrap;
+}
+
+function buildAqiTrend(aqItem) {
+  const trend = Array.isArray(aqItem?.trend) ? aqItem.trend : [];
+  const wrap = h("div", { class: "col gap-6" });
+  if (!trend.length) {
+    wrap.appendChild(emptyState("No AQI trend cached", "Refresh air quality while online to store the hourly US AQI series.", "activity"));
+    return wrap;
+  }
+  const values = trend.map((p) => Number(p.aqi)).filter((v) => Number.isFinite(v));
+  const peak = Math.max(...values);
+  const low = Math.min(...values);
+  wrap.appendChild(h("div", { class: "row between items-center" },
+    h("div", { class: "row gap-8 items-center" },
+      badge(`NOW ${trend[0]?.aqi ?? "—"}`, aqItem?.severity === "CRITICAL" ? "red" : aqItem?.severity === "SEVERE" ? "amber" : "green"),
+      badge(`PEAK ${peak}`, peak > 150 ? "amber" : "muted"),
+      h("span", { class: "tiny muted", text: `min ${low} · ${trend.length} hourly points` })),
+    h("span", { class: "tiny muted", text: aqItem?.category || "" })));
+  const canvas = h("canvas", { class: "vital-chart", style: { height: "120px" } });
+  wrap.appendChild(canvas);
+  const timeSpan = trend.length > 1 ? `${trend[0].time?.slice(11, 16) || ""} → ${trend[trend.length - 1].time?.slice(11, 16) || ""}` : "";
+  wrap.appendChild(h("div", { class: "row between tiny muted" },
+    h("span", { text: timeSpan }),
+    h("span", { text: "forecast model · not a sensor reading" })));
+  setTimeout(() => sparkline(canvas, [{ data: trend.map((p) => Number(p.aqi)), color: peak > 150 ? "#ffb02e" : "#5dff9a" }], { labels: true }), 30);
   return wrap;
 }
 

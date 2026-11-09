@@ -18,9 +18,9 @@ export async function render(root, params = {}) {
   currentParams = params;
   if (["mission", "caches", "movement", "trips", "data"].includes(params.tab)) lastTab = params.tab;
   root.replaceChildren(loading("LOADING LOGISTICS"));
-  let tasks, caches, waypoints, inventory, low, backups, trips;
+  let tasks, caches, waypoints, inventory, low, backups, trips, maintenance;
   try {
-    [tasks, caches, waypoints, inventory, low, backups, trips] = await Promise.all([
+    [tasks, caches, waypoints, inventory, low, backups, trips, maintenance] = await Promise.all([
       api.get("/api/records/tasks?limit=500"),
       api.get("/api/records/caches?limit=500"),
       api.get("/api/records/waypoints?limit=500"),
@@ -28,6 +28,7 @@ export async function render(root, params = {}) {
       api.get("/api/logistics/low-stock"),
       api.get("/api/logistics/backups"),
       api.get("/api/trips"),
+      api.get("/api/maintenance/due?days=30").catch(() => ({ tasks: [], inventory: [], recurring: [] })),
     ]);
   } catch (err) {
     root.replaceChildren(h("div", { class: "callout danger", text: err.message || "Could not load logistics data." }));
@@ -89,7 +90,7 @@ export async function render(root, params = {}) {
     { id: "data", label: "OPERATOR DATA", count: backupItems.length },
   ], lastTab, (id) => { lastTab = id; render(root, params); })));
 
-  if (lastTab === "mission") missionSection(root, openTasks, taskItems);
+  if (lastTab === "mission") missionSection(root, openTasks, taskItems, maintenance);
   else if (lastTab === "caches") cachesSection(root, cacheItems);
   else if (lastTab === "movement") movementSection(root, waypointItems);
   else if (lastTab === "trips") tripSection(root, tripItems, waypointItems);
@@ -98,7 +99,7 @@ export async function render(root, params = {}) {
 
 /* ----------------------------------------------------------------- mission */
 
-function missionSection(root, open, all) {
+function missionSection(root, open, all, maintenance = {}) {
   const done = all.filter((t) => t.done).slice(0, 20);
   const list = h("div", { class: "list" });
   if (!open.length) {
@@ -119,6 +120,7 @@ function missionSection(root, open, all) {
     main.appendChild(h("div", { class: "li-title", text: t.title }));
     const bits = [t.priority || "ROUTINE"];
     if (t.due) bits.push(`due ${t.due}`);
+    if (t.recurrence) bits.push(`repeats ${String(t.recurrence).toLowerCase()}`);
     if (t.category) bits.push(t.category);
     main.appendChild(h("div", { class: "li-sub", text: bits.join(" · ") }));
     if (t.detail) main.appendChild(h("div", { class: "small muted mt-4", text: t.detail }));
@@ -133,6 +135,8 @@ function missionSection(root, open, all) {
     tools: [btn("ADD TASK", { size: "sm", icon: "plus", onClick: () => addTask(root) })],
     body: list,
   }));
+
+  root.appendChild(buildMaintenancePanel(maintenance));
 
   const doneList = h("div", { class: "list mt-10" });
   if (!done.length) doneList.appendChild(emptyState("Nothing completed yet", "Finished tasks collect here.", "check"));
@@ -159,6 +163,63 @@ function missionSection(root, open, all) {
     sub: "Last 20 completed items.",
     body: doneList,
   }));
+}
+
+function buildMaintenancePanel(m = {}) {
+  const tasks = m.tasks || [];
+  const inv = m.inventory || [];
+  const recurring = m.recurring || [];
+  const body = h("div", { class: "col gap-10" });
+  if (!tasks.length && !inv.length) {
+    body.appendChild(emptyState("Nothing due in the next 30 days",
+      "Tasks with a due date and inventory lines with an expiry appear here. Recurring tasks roll forward when completed.",
+      "check"));
+  }
+  if (tasks.length) {
+    body.appendChild(h("div", { class: "side-label", text: `TASKS DUE · ${tasks.length}` }));
+    const list = h("div", { class: "list" });
+    for (const t of tasks) {
+      const days = Number(t.due_in_days ?? 0);
+      const when = days < 0 ? `${Math.abs(days).toFixed(1)} day(s) overdue` : days < 1 ? "due within 24 h" : `in ${days.toFixed(1)} day(s)`;
+      const row = h("div", { class: `list-item ${t.overdue ? "alert" : ""}` });
+      const main = h("div", { class: "li-main" });
+      main.appendChild(h("div", { class: "li-title", text: t.title }));
+      main.appendChild(h("div", { class: "li-sub", text: [t.due, when, t.recurrence ? `repeats ${String(t.recurrence).toLowerCase()}` : "", t.category].filter(Boolean).join(" · ") }));
+      row.appendChild(main);
+      row.appendChild(badge(t.overdue ? "OVERDUE" : "DUE", t.overdue ? "red" : "amber"));
+      row.appendChild(iconBtn("edit", "Edit task", () => openRecordForm({ table: "tasks", item: t, onSaved: () => reRender() })));
+      list.appendChild(row);
+    }
+    body.appendChild(list);
+  }
+  if (inv.length) {
+    body.appendChild(h("div", { class: "side-label mt-10", text: `EXPIRING INVENTORY · ${inv.length}` }));
+    const list = h("div", { class: "list" });
+    for (const item of inv) {
+      const days = Number(item.expires_in_days ?? 0);
+      const when = days < 0 ? `expired ${Math.abs(days).toFixed(0)} day(s) ago` : days < 1 ? "expires within 24 h" : `expires in ${days.toFixed(0)} day(s)`;
+      const row = h("div", { class: `list-item ${item.expired ? "alert" : ""}` });
+      const main = h("div", { class: "li-main" });
+      main.appendChild(h("div", { class: "li-title", text: item.name }));
+      main.appendChild(h("div", { class: "li-sub", text: [item.expires, when, item.qty != null ? `${fmt.num(item.qty, 2)} ${item.unit || ""}` : "", item.location].filter(Boolean).join(" · ") }));
+      row.appendChild(main);
+      row.appendChild(badge(item.expired ? "EXPIRED" : "ROTATE", item.expired ? "red" : "amber"));
+      row.appendChild(iconBtn("edit", "Edit inventory item", () => openRecordForm({ table: "inventory", item, onSaved: () => reRender() })));
+      list.appendChild(row);
+    }
+    body.appendChild(list);
+  }
+  if (recurring.length) {
+    body.appendChild(h("div", { class: "tiny muted mt-6",
+      text: `${recurring.length} recurring task(s) active. Marking one complete schedules the next occurrence automatically.` }));
+  }
+  return panel({
+    title: "Maintenance & expiry due",
+    sub: `Next ${m.window_days ?? 30} days · tasks and consumables`,
+    icon: "warning",
+    cls: "mt-14",
+    body,
+  });
 }
 
 function addTask(root) {

@@ -23,3 +23,31 @@ maps/tiles/cache/
 # OS
 .DS_Store
 Thumbs.db
+
+# Document binaries (PDFs and other large/proprietary source docs)
+*.pdf
+*.PDF
+*.epub
+*.djvu
+*.cbz
+
+# Sensitive / local-only artifacts
+fielddata/
+*.db
+*.sqlite
+*.sqlite3
+*.key
+*.crt
+*.pem
+.env
+.env.*
+*.secret
+
+# Duplicate library tree
+manuals - Copy/
+Books/
+
+# Misc local junk
+.directory
+__pycache__/
+.pytest_cache/

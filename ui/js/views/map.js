@@ -80,6 +80,7 @@ export async function render(root, params = {}) {
   let declInfo = null;
   let selectedIntel = null; // { kind: 'event'|'aircraft'|'sat'|'maritime'|'cable'|'cctv', data, feature? }
   let intelMaxAgeHours = 0; // 0 = all
+  let livePreviewTimer = null;
   try {
     const [l, w, t, intel, cel, dec] = await Promise.all([
       api.get("/api/map/layers").catch(() => ({ vector: [], raster: [] })),
@@ -119,6 +120,7 @@ export async function render(root, params = {}) {
     places: true, graticule: true, tracks: true, waypoints: true,
     basemap: true, labels: true,
     intelEvents: true, intelConflict: true, intelAircraft: true, intelSats: true, intelMaritime: true, intelCables: true, intelCctv: true, intelDayNight: true,
+    clusterDense: true, cctvShowAlpr: true,
   };
   const raster = (layers.raster || []);
   let tileAvailable = !!(raster.length || settings.mbtiles_path);
@@ -264,6 +266,11 @@ export async function render(root, params = {}) {
     }
     layerRows.appendChild(cb);
   }
+  const displayOpts = h("div", { class: "col gap-4 mt-8", style: { borderTop: '1px solid var(--line)', paddingTop: '8px' } });
+  displayOpts.appendChild(h("div", { class: "tiny muted", text: "DISPLAY / SCALE" }));
+  displayOpts.appendChild(checkbox("Cluster dense markers (CCTV/cables/maritime)", visible.clusterDense, (on) => { visible.clusterDense = on; draw(); }));
+  displayOpts.appendChild(checkbox("Show ALPR-tagged CCTV (OSM audited tags)", visible.cctvShowAlpr, (on) => { visible.cctvShowAlpr = on; draw(); renderIntelDetails(); }));
+  layerRows.appendChild(displayOpts);
   cacheStatusEl = h("div", { class: "map-cache-status tiny muted", text: cacheStatusText() });
   const intelSummaryEl = h("div", { class: "map-cache-status tiny", text: "Intel not loaded" });
   const ageFilter = select([
@@ -369,6 +376,7 @@ export async function render(root, params = {}) {
 
   function paint() {
     if (disposed) return;
+    _clusterHitRegions = [];
     const dpr = window.devicePixelRatio || 1;
     const w = Math.max(1, canvas.clientWidth || 900);
     const hh = Math.max(1, canvas.clientHeight || 560);
@@ -992,24 +1000,85 @@ export async function render(root, params = {}) {
 
 
 
+  let _clusterHitRegions = []; // [{x,y,r,lat,lon,zoomTo,kind,count}] for 2D cluster click-to-zoom
   function drawSimpleIntelPoints(ctx, w, hh, items, opts = {}) {
-    const { color = '#35c9ff', selKind = '', limit = 1500, labelKey = 'title', labelZoom = 9 } = opts;
+    const { color = '#35c9ff', selKind = '', limit = 1500, labelKey = 'title', labelZoom = 9, cluster = true, getColor = null, getLabel = null } = opts;
+    const arr = (items || []).slice(0, limit);
+    const itemColor = (it) => (getColor ? getColor(it) : color);
+    // Grid clustering for dense layers at low zoom (keeps "everything shows" usable).
+    if (cluster && visible.clusterDense !== false && view.zoom <= 8 && arr.length > 250) {
+      const cell = view.zoom <= 3 ? 52 : view.zoom <= 5 ? 40 : view.zoom <= 7 ? 30 : 22;
+      const buckets = new Map();
+      let selKey = null;
+      for (const it of arr) {
+        const lat = Number(it.lat), lon = Number(it.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+        const sp = latLonToScreen(lat, lon);
+        if (sp.x < -40 || sp.y < -40 || sp.x > w + 40 || sp.y > hh + 40) continue;
+        const k = `${Math.floor(sp.x / cell)}:${Math.floor(sp.y / cell)}`;
+        let b = buckets.get(k);
+        if (!b) { b = { x: 0, y: 0, lat: 0, lon: 0, n: 0, items: [], hasAlpr: false }; buckets.set(k, b); }
+        b.x += sp.x; b.y += sp.y; b.lat += lat; b.lon += lon; b.n += 1; if (b.items.length < 3) b.items.push(it);
+        if (it.alpr) b.hasAlpr = true;
+        if (selectedIntel?.kind === selKind && selectedIntel.data === it) selKey = k;
+      }
+      for (const [k, b] of buckets) {
+        const cx = b.x / b.n, cy = b.y / b.n;
+        if (b.n === 1) {
+          const it = b.items[0];
+          const sel = selectedIntel?.kind === selKind && selectedIntel.data === it;
+          const ic = itemColor(it);
+          const r = sel ? 5.2 : (view.zoom <= 5 ? 4.2 : 3.4);
+          ctx.save();
+          ctx.globalAlpha = 0.18; ctx.fillStyle = ic; ctx.beginPath(); ctx.arc(cx, cy, r + 3.5, 0, Math.PI*2); ctx.fill(); ctx.globalAlpha = 1;
+          ctx.fillStyle = sel ? '#ffffff' : ic;
+          ctx.strokeStyle = sel ? '#ffffff' : 'rgba(0,0,0,.7)'; ctx.lineWidth = sel ? 1.6 : 1.2;
+          ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+          ctx.restore();
+          continue;
+        }
+        const r = Math.max(9, Math.min(24, 8 + Math.sqrt(b.n) * 2.2));
+        const ccol = b.hasAlpr && selKind === 'cctv' ? '#d98cff' : color;
+        const clat = b.lat / b.n, clon = b.lon / b.n;
+        _clusterHitRegions.push({ x: cx, y: cy, r: r + 4, lat: clat, lon: clon, zoomTo: Math.min(18, view.zoom + 2), kind: selKind, count: b.n });
+        ctx.save();
+        ctx.globalAlpha = k === selKey ? 0.95 : 0.82;
+        ctx.fillStyle = ccol;
+        ctx.strokeStyle = 'rgba(0,0,0,.55)';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#041008';
+        ctx.font = `bold ${r >= 14 ? 10 : 9}px JetBrains Mono, monospace`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(String(b.n > 999 ? '999+' : b.n), cx, cy + 0.5);
+        ctx.restore();
+      }
+      return;
+    }
     const showLabels = view.zoom >= labelZoom;
-    for (const it of (items || []).slice(0, limit)) {
+    const baseR = view.zoom <= 3 ? 4.8 : view.zoom <= 6 ? 4.0 : 3.2;
+    for (const it of arr) {
       const lat = Number(it.lat), lon = Number(it.lon);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
       const sp = latLonToScreen(lat, lon);
       if (sp.x < -24 || sp.y < -24 || sp.x > w + 24 || sp.y > hh + 24) continue;
       const sel = selectedIntel?.kind === selKind && selectedIntel.data === it;
+      const ic = itemColor(it);
+      const r = sel ? Math.max(baseR + 1.4, 5) : baseR;
       ctx.save();
-      ctx.fillStyle = sel ? '#ffffff' : color;
-      ctx.strokeStyle = sel ? '#ffffff' : 'rgba(0,0,0,.45)';
-      ctx.lineWidth = sel ? 1.4 : 1;
-      ctx.beginPath(); ctx.arc(sp.x, sp.y, sel ? 4 : 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.globalAlpha = sel ? 0.35 : 0.18;
+      ctx.fillStyle = ic;
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, r + 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = sel ? '#ffffff' : ic;
+      ctx.strokeStyle = sel ? '#ffffff' : 'rgba(0,0,0,.7)';
+      ctx.lineWidth = sel ? 1.6 : 1.2;
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       if (sel) {
-        ctx.strokeStyle = color;
-        ctx.globalAlpha = 0.45;
-        ctx.beginPath(); ctx.arc(sp.x, sp.y, 9, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = ic;
+        ctx.globalAlpha = 0.5;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, r + 6, 0, Math.PI * 2); ctx.stroke();
         ctx.globalAlpha = 1;
       }
       ctx.restore();
@@ -1017,9 +1086,9 @@ export async function render(root, params = {}) {
         ctx.save();
         ctx.font = `${sel ? 'bold ' : ''}8px JetBrains Mono, monospace`;
         ctx.textBaseline = 'top';
-        const label = String(it[labelKey] || it.name || it.vessel || it.callsign || it.camera_id || it.cable_id || 'ITEM').slice(0, 28);
+        const label = getLabel ? getLabel(it) : String(it[labelKey] || it.name || it.vessel || it.callsign || it.camera_id || it.cable_id || 'ITEM').slice(0, 28);
         if (sel) { ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.lineWidth = 3; ctx.strokeText(label, sp.x + 8, sp.y + 2); }
-        ctx.fillStyle = sel ? '#fff' : color;
+        ctx.fillStyle = sel ? '#fff' : ic;
         ctx.fillText(label, sp.x + 8, sp.y + 2);
         ctx.restore();
       }
@@ -1034,44 +1103,16 @@ export async function render(root, params = {}) {
   }
   function drawIntelCctv(ctx, w, hh) {
     if (!visible.intelCctv) return;
-    const showLabels = view.zoom >= 11;
-    // Split so ALPR cameras are visually distinct but still use the same clickable data.
-    const normal = [], alpr = [];
-    for (const it of (intelCctv || [])) (it && it.alpr ? alpr : normal).push(it);
-    drawSimpleIntelPoints(ctx, w, hh, normal, { color: '#b7ff6a', selKind: 'cctv', labelKey: 'title', labelZoom: 11 });
-    // ALPR overlay: draw in a distinct color and mark labels when visible/selected.
-    ctx.save();
-    for (const it of alpr) {
-      const lat = Number(it.lat), lon = Number(it.lon);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      const sp = latLonToScreen(lat, lon);
-      if (sp.x < -20 || sp.x > w + 20 || sp.y < -20 || sp.y > hh + 20) continue;
-      const sel = selectedIntel && selectedIntel.kind === 'cctv' && selectedIntel.data === it;
-      ctx.save();
-      ctx.globalAlpha = sel ? 1 : 0.92;
-      ctx.fillStyle = sel ? '#ffffff' : '#ff66cc';
-      ctx.strokeStyle = sel ? '#ffffff' : 'rgba(0,0,0,.5)';
-      ctx.lineWidth = sel ? 1.4 : 1;
-      ctx.beginPath(); ctx.arc(sp.x, sp.y, sel ? 4.5 : 3.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      if (sel) {
-        ctx.strokeStyle = '#ff66cc'; ctx.globalAlpha = 0.5;
-        ctx.beginPath(); ctx.arc(sp.x, sp.y, 10, 0, Math.PI * 2); ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
-      ctx.restore();
-      if ((showLabels || sel) && (it.title || sel)) {
-        ctx.save();
-        ctx.font = `${sel ? 'bold ' : ''}8px JetBrains Mono, monospace`;
-        ctx.textBaseline = 'top';
-        const base = String(it.title || it.camera_id || 'ALPR').slice(0, 28);
-        const label = /ALPR|ANPR/i.test(base) ? base : `${base} [ALPR]`;
-        if (sel) { ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.lineWidth = 3; ctx.strokeText(label, sp.x + 8, sp.y + 2); }
-        ctx.fillStyle = sel ? '#fff' : '#ff9adf';
-        ctx.fillText(label, sp.x + 8, sp.y + 2);
-        ctx.restore();
-      }
-    }
-    ctx.restore();
+    let items = intelCctv || [];
+    if (visible.cctvShowAlpr === false) items = items.filter(it => !it.alpr);
+    drawSimpleIntelPoints(ctx, w, hh, items, {
+      color: '#b7ff6a', selKind: 'cctv', labelKey: 'title', labelZoom: 11,
+      getColor: (it) => it.alpr ? '#ff66cc' : '#b7ff6a',
+      getLabel: (it) => {
+        const base = String(it.title || it.camera_id || (it.alpr ? 'ALPR' : 'Camera')).slice(0, 28);
+        return it.alpr && !/ALPR|ANPR/i.test(base) ? `${base} [ALPR]` : base;
+      },
+    });
   }
 
   function solarPosition(date = new Date()) {
@@ -1403,7 +1444,7 @@ export async function render(root, params = {}) {
     if (visible.intelSats) for (const sat of (intelSats||[])) { const sp = latLonToScreen(Number(sat.lat),Number(sat.lon)); test(sp.x,sp.y,'sat',sat,null); }
     if (visible.intelMaritime) for (const m of (intelMaritime||[])) { const sp = latLonToScreen(Number(m.lat),Number(m.lon)); test(sp.x,sp.y,'maritime',m,null); }
     if (visible.intelCables) for (const c of (intelCables||[])) { const sp = latLonToScreen(Number(c.lat),Number(c.lon)); test(sp.x,sp.y,'cable',c,null); }
-    if (visible.intelCctv) for (const c of (intelCctv||[])) { const sp = latLonToScreen(Number(c.lat),Number(c.lon)); test(sp.x,sp.y,'cctv',c,null); }
+    if (visible.intelCctv) for (const c of (intelCctv||[])) { if (visible.cctvShowAlpr === false && c && c.alpr) continue; const sp = latLonToScreen(Number(c.lat),Number(c.lon)); test(sp.x,sp.y,'cctv',c,null); }
     const maxAge = Number(intelMaxAgeHours) || 0;
     for (const f of (intelFeatures||[])) {
       const g=f.geometry; if(!g||g.type!=='Point') continue;
@@ -1414,6 +1455,20 @@ export async function render(root, params = {}) {
       if (maxAge > 0 && p.age_hours != null && Number(p.age_hours) > maxAge) continue;
       const sp = latLonToScreen(Number(g.coordinates[1]), Number(g.coordinates[0]));
       test(sp.x,sp.y,'event',p,f);
+    }
+    return best;
+  }
+
+  function pickCluster(px, py) {
+    let best = null, bestD = Infinity;
+    for (const c of (_clusterHitRegions || [])) {
+      if (!c) continue;
+      if (c.kind === 'cctv' && !visible.intelCctv) continue;
+      if (c.kind === 'cable' && !visible.intelCables) continue;
+      if (c.kind === 'maritime' && !visible.intelMaritime) continue;
+      const d = (c.x - px) * (c.x - px) + (c.y - py) * (c.y - py);
+      const rr = (c.r || 12) * (c.r || 12);
+      if (d <= rr && d < bestD) { bestD = d; best = c; }
     }
     return best;
   }
@@ -1542,6 +1597,7 @@ export async function render(root, params = {}) {
   }
 
   function renderIntelDetails() {
+    if (livePreviewTimer) { clearInterval(livePreviewTimer); livePreviewTimer = null; }
     let details = side.querySelector('#intel-details');
     if (!details) { details = h('div', { id: 'intel-details', class: 'mt-8' }); intelPanel.querySelector('.panel-body .col')?.appendChild(details); }
     if (!selectedIntel) { details.replaceChildren(); hideMapPopup(); return; }
@@ -1580,16 +1636,24 @@ export async function render(root, params = {}) {
       const ll = selectedIntelLatLon(); if (ll) push('COORDINATES', `${ll.lat.toFixed(5)}, ${ll.lon.toFixed(5)}`);
     } else if (selectedIntel.kind === 'cctv') {
       push('TITLE', d.title || d.camera_id);
+      push('TYPE', d.feed_type || d.surveillance_type || d.kind);
       push('ALPR/ANPR', d.alpr ? 'YES (OSM-tagged ALPR/ANPR; locations from OSM, not live tracking)' : 'NO');
       if (d.flock_tagged) push('FLOCK TAG (OSM)', 'OSM tags mention Flock (community-mapped; verify on OpenStreetMap)');
       push('SURVEILLANCE TYPE', d.surveillance_type);
       push('CAMERA TYPE', d.camera_type);
       push('BRAND/MANUFACTURER', d.brand);
-      push('OPERATOR', d.operator_name);
-      push('DIRECTION', d.direction != null && d.direction !== '' ? `${d.direction}°` : '');
+      push('OPERATOR', d.operator_name || d.operator);
+      push('DIRECTION', d.direction != null && d.direction !== '' ? `${d.direction}°` : (d.heading_deg != null ? `${Math.round(Number(d.heading_deg))}°` : ''));
       push('ZONE', d.surveillance_zone);
-      push('CAMERA/OSM ID', d.camera_id); push('STATUS', d.status);
-      push('SOURCE', d.source); if (d.summary) push('TAGS/SUMMARY', String(d.summary).slice(0,400));
+      push('CAMERA ID', d.camera_id || d.id);
+      push('STATUS', d.status);
+      push('SOURCE', d.source || d.provider);
+      push('PROVIDER', d.provider && d.provider !== d.source ? d.provider : '');
+      push('CREDIT', d.credit);
+      push('LICENSE', d.license);
+      push('REGION', [d.city, d.region].filter(Boolean).join(', '));
+      push('IMPORT', d.import_source);
+      if (d.summary) push('TAGS/SUMMARY', String(d.summary).slice(0,400));
       push('TIME', d.time ? fmt.date(d.time) : '');
       const ll = selectedIntelLatLon(); if (ll) push('COORDINATES', `${ll.lat.toFixed(5)}, ${ll.lon.toFixed(5)}`);
     }
@@ -1600,11 +1664,122 @@ export async function render(root, params = {}) {
         btn('ZOOM', { size:'sm', tone:'ghost', onClick: ()=>{ const ll=selectedIntelLatLon(); if(ll){ view.lat=ll.lat; view.lon=ll.lon; view.zoom=Math.max(view.zoom, selectedIntel.kind==='sat'?4:7); draw(); } } }),
         btn('CLEAR', { size:'sm', tone:'ghost', onClick: ()=>{ selectedIntel=null; renderIntelDetails(); draw(); } }),
       )));
-    const kv = h('div', { class: 'kv compact' });
+    if (selectedIntel.kind === 'cctv' && d.id) {
+      const feedType = String(d.feed_type || d.feedType || '').toLowerCase();
+      const rawRefresh = Number(d.frame_refresh_ms || d.frameRefreshMs || 0);
+      const refreshSec = Math.max(10, Math.min(300, rawRefresh > 0 ? Math.round(rawRefresh / 1000) : 30));
+      const hasStream = !!(d.stream_url || feedType === 'hls' || feedType === 'mp4' || feedType === 'm3u8' || feedType === 'video');
+      const mediaWrap = h('div', { class: 'mt-6', style: { border: '1px solid var(--line)', borderRadius: '6px', overflow: 'hidden', background: 'rgba(0,0,0,.25)' } });
+      const msg = h('div', { class: 'tiny dim', style: { padding: '6px 8px' }, text: '' });
+      let live = false;
+      let videoMode = false;
+      const img = h('img', {
+        alt: d.title || 'Camera preview',
+        loading: 'eager',
+        referrerPolicy: 'no-referrer',
+        style: { display: 'block', width: '100%', maxHeight: '220px', objectFit: 'cover', background: '#08110c' },
+      });
+      const setImg = (force=false) => {
+        if (videoMode) return;
+        img.src = `/api/cctv/frame?id=${encodeURIComponent(String(d.id))}${force ? '&force=1' : ''}&t=${Date.now()}`;
+      };
+      const setLive = (on) => {
+        live = !!on;
+        if (livePreviewTimer) { clearInterval(livePreviewTimer); livePreviewTimer = null; }
+        if (live) {
+          livePreviewTimer = setInterval(() => setImg(false), refreshSec * 1000);
+          liveBtn.text = `LIVE ON (${refreshSec}s)`;
+          liveBtn.classList.add('cyan');
+          msg.text = d.credit ? `Live preview (auto-refresh ${refreshSec}s, registered proxy) · ${String(d.credit).slice(0,90)}` : `Live preview (auto-refresh ${refreshSec}s, registered proxy).`;
+        } else {
+          liveBtn.text = 'LIVE PREVIEW';
+          liveBtn.classList.remove('cyan');
+          msg.text = d.credit ? `Snapshot: ${String(d.credit).slice(0,120)}` : 'Snapshot preview (registered source).';
+        }
+      };
+      img.onerror = () => {
+        if (videoMode) return;
+        msg.text = hasStream ? `No proxied image preview. Use LOAD STREAM for registered ${feedType.toUpperCase() || 'video'} playback when supported.` : 'No snapshot preview available for this camera (or source blocked/unavailable).';
+      };
+      img.onload = () => { if (!live && !videoMode) msg.text = d.credit ? `Snapshot: ${String(d.credit).slice(0,120)}` : 'Snapshot preview (registered source).'; };
+      setImg(false);
+
+      async function loadStream() {
+        if (videoMode) return;
+        streamBtn.disabled = true; streamBtn.text = 'LOADING…';
+        try {
+          const info = await api.get(`/api/cctv/stream/info?id=${encodeURIComponent(String(d.id))}`);
+          const proxied = info && info.proxied_url;
+          const stype = String((info && info.feed_type) || feedType || '').toLowerCase();
+          if (!proxied) { toast('No registered live stream for this camera; snapshot preview is available.', 'warn'); msg.text = 'No registered live stream URL. Use snapshot/live preview or open source link.'; return; }
+          const video = h('video', { controls: true, playsInline: true, muted: true, autoplay: true, preload: 'metadata',
+            style: { display: 'block', width: '100%', maxHeight: '260px', background: '#000' } });
+          const nativeHls = video.canPlayType('application/vnd.apple.mpegurl');
+          if (stype === 'hls' || stype === 'm3u8') {
+            if (nativeHls) {
+              video.src = proxied;
+            } else {
+              let Hls = window.Hls;
+              if (!Hls || !Hls.isSupported || !Hls.isSupported()) {
+                try {
+                  if (!window.__darksecHlsLoading) {
+                    window.__darksecHlsLoading = new Promise((resolve, reject) => {
+                      const s = document.createElement('script');
+                      s.src = '/ui/vendor/hls/hls.min.js?v=1';
+                      s.async = true;
+                      s.onload = () => resolve(window.Hls);
+                      s.onerror = () => reject(new Error('Failed to load hls.js'));
+                      document.head.appendChild(s);
+                    });
+                  }
+                  Hls = await window.__darksecHlsLoading;
+                } catch { Hls = window.Hls; } finally { window.__darksecHlsLoading = null; }
+              }
+              if (Hls && Hls.isSupported && Hls.isSupported()) {
+                const hls = new Hls({ lowLatencyMode: false, backBufferLength: 30, maxBufferLength: 20 });
+                hls.loadSource(proxied);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.ERROR, (_, data) => { if (data && data.fatal) msg.text = `HLS error: ${data.type || 'fatal'}. Try snapshot preview or source link.`; });
+              } else {
+                video.src = proxied;
+                msg.text = 'HLS stream requested via registered proxy. hls.js could not be loaded; try a browser with native HLS support.';
+              }
+            }
+          } else {
+            video.src = proxied;
+          }
+          video.onerror = () => { msg.text = `Stream playback failed in this browser. ${stype === 'hls' || stype === 'm3u8' ? 'HLS may require native support or hls.js.' : ''} Use snapshot preview or open source.`; };
+          if (livePreviewTimer) { clearInterval(livePreviewTimer); livePreviewTimer = null; live = false; liveBtn.text = 'LIVE PREVIEW'; liveBtn.classList.remove('cyan'); }
+          videoMode = true;
+          img.replaceWith(video);
+          msg.text = `Live stream (registered proxy${info.credit ? ` · ${String(info.credit).slice(0,70)}` : ''}).`;
+          streamBtn.text = 'STREAM LOADED';
+        } catch (err) {
+          toast(err.message || 'Could not load stream', 'error');
+          msg.text = `Stream load failed: ${String(err.message || err).slice(0,120)}`;
+        } finally {
+          if (!videoMode) { streamBtn.disabled = false; streamBtn.text = 'LOAD STREAM'; }
+        }
+      }
+
+      const liveBtn = btn('LIVE PREVIEW', { size: 'sm', tone: 'ghost', onClick: () => setLive(!live) });
+      const streamBtn = btn('LOAD STREAM', { size: 'sm', tone: 'ghost', onClick: loadStream, disabled: !hasStream });
+      const controls = h('div', { class: 'row between items-center gap-6 wrap', style: { padding: '6px 8px', borderTop: '1px solid var(--line)' } },
+        h('div', { class: 'tiny dim', text: feedType ? `Feed: ${feedType.toUpperCase()}` : 'Feed: snapshot/image' }),
+        h('div', { class: 'row gap-4 wrap' }, liveBtn, hasStream ? streamBtn : null));
+      mediaWrap.append(img, msg, controls);
+      if (hasStream) {
+        mediaWrap.appendChild(h('div', { class: 'tiny dim', style: { padding: '0 8px 8px' }, text: `Stream URLs are proxied only when registered in catalog/feed data (same-host subresources, bounded). HLS may require native browser support or vendored hls.js.` }));
+      }
+      box.appendChild(mediaWrap);
+      if (d.license) box.appendChild(h('div', { class: 'tiny dim mt-4', text: `License/terms: ${String(d.license).slice(0,180)}` }));
+    }
+    const kv = h('div', { class: 'kv compact mt-6' });
     for (const [k,v] of rows) { kv.appendChild(h('span',{class:'k',text:k})); kv.appendChild(h('span',{class:'v',text:v})); }
     box.appendChild(kv);
     const actions = h('div', { class: 'row gap-6 mt-6 wrap' });
     if (d.url) actions.appendChild(h('a',{class:'badge cyan',href:d.url,target:'_blank',rel:'noopener noreferrer',text:'OPEN SOURCE'}));
+    if (selectedIntel.kind === 'cctv' && d.viewer_url && d.viewer_url !== d.url) actions.appendChild(h('a',{class:'badge',href:d.viewer_url,target:'_blank',rel:'noopener noreferrer',text:'VIEWER'}));
     const ll = selectedIntelLatLon();
     if (ll) actions.appendChild(btn('COPY COORDS', { size:'sm', tone:'ghost', onClick: async () => { try { await navigator.clipboard?.writeText(`${ll.lat.toFixed(6)}, ${ll.lon.toFixed(6)}`); toast('Coordinates copied'); } catch { toast(`${ll.lat.toFixed(6)}, ${ll.lon.toFixed(6)}`, 'warn'); } } }));
     if (actions.childNodes.length) box.appendChild(actions);
@@ -1671,7 +1846,7 @@ export async function render(root, params = {}) {
       const now = performance.now ? performance.now() : Date.now();
       if (now - lastHoverCheck > 50) {
         lastHoverCheck = now;
-        let hit = !!pickIntel(ipx, ipy);
+        let hit = !!pickIntel(ipx, ipy) || !!pickCluster(ipx, ipy);
         if (!hit) {
           for (const wp of waypoints) {
             const sp = latLonToScreen(wp.lat, wp.lon);
@@ -1706,16 +1881,21 @@ export async function render(root, params = {}) {
       updateReadout(ll);
       return;
     }
-    // Select nearest intel item, then waypoint
+    // Select nearest intel item, cluster (zoom), then waypoint
     const ipx = e.clientX - rect.left, ipy = e.clientY - rect.top;
     const intelHit = pickIntel(ipx, ipy);
+    const clusterHit = (!intelHit && visible.clusterDense !== false) ? pickCluster(ipx, ipy) : null;
     let best = null, bestD = 144;
     for (const wp of waypoints) {
       const sp = latLonToScreen(wp.lat, wp.lon);
       const d = (sp.x - ipx) ** 2 + (sp.y - ipy) ** 2;
       if (d < bestD) { best = wp; bestD = d; }
     }
-    if (intelHit && (!best || bestD > 100)) {
+    if (clusterHit && (!best || bestD > 100)) {
+      view.lat = clamp(clusterHit.lat, -85, 85); view.lon = wrapLon(clusterHit.lon);
+      view.zoom = Math.min(18, Math.max(view.zoom + 1.5, clusterHit.zoomTo || view.zoom + 2));
+      draw();
+    } else if (intelHit && (!best || bestD > 100)) {
       selectedIntel = intelHit;
       selected = null;
       renderIntelDetails();

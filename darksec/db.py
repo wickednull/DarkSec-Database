@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority TEXT DEFAULT 'ROUTINE',
     due TEXT,
     done INTEGER DEFAULT 0,
-    category TEXT DEFAULT 'GENERAL'
+    category TEXT DEFAULT 'GENERAL',
+    recurrence TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS patients (
@@ -80,6 +81,20 @@ CREATE TABLE IF NOT EXISTS vitals (
     hr INTEGER, rr INTEGER, sys INTEGER, dia INTEGER,
     spo2 REAL, temp_c REAL, glucose REAL, pain INTEGER,
     avpu TEXT DEFAULT 'A',
+    note TEXT DEFAULT '',
+    FOREIGN KEY(patient_id) REFERENCES patients(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS medication_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    patient_id INTEGER,
+    medication TEXT NOT NULL,
+    dose TEXT DEFAULT '',
+    route TEXT DEFAULT '',
+    administered_by TEXT DEFAULT '',
+    indication TEXT DEFAULT '',
+    reaction TEXT DEFAULT '',
     note TEXT DEFAULT '',
     FOREIGN KEY(patient_id) REFERENCES patients(id) ON DELETE SET NULL
 );
@@ -291,6 +306,22 @@ CREATE TABLE IF NOT EXISTS map_overlay_cache (
     meta TEXT
 );
 
+-- Persistent CCTV/surveillance media health (frame/stream fetch outcomes).
+-- Keeps recent operational status across restarts; bounded by upserts per camera.
+CREATE TABLE IF NOT EXISTS cctv_media_health (
+    camera_id TEXT PRIMARY KEY,
+    kind TEXT DEFAULT 'frame',
+    status TEXT DEFAULT '',
+    message TEXT DEFAULT '',
+    source_url TEXT DEFAULT '',
+    updated_at TEXT,
+    ok_at TEXT,
+    error_at TEXT,
+    ok_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+    extra TEXT DEFAULT '{}'
+);
+
 -- Query indexes are created in _ensure_indexes() so an older database with a
 -- missing column cannot stop the application from starting.
 """
@@ -306,6 +337,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_log_category ON log_entries(category)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_done_priority ON tasks(done, priority)",
     "CREATE INDEX IF NOT EXISTS idx_vitals_patient_ts ON vitals(patient_id, ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_medication_patient_ts ON medication_log(patient_id, ts DESC)",
     "CREATE INDEX IF NOT EXISTS idx_weather_ts ON weather_log(ts DESC)",
     "CREATE INDEX IF NOT EXISTS idx_water_ts ON water_log(ts DESC)",
     "CREATE INDEX IF NOT EXISTS idx_power_ts ON power_log(ts DESC)",
@@ -322,6 +354,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_library_category ON library_docs(category)",
     "CREATE INDEX IF NOT EXISTS idx_library_rel_path ON library_docs(rel_path)",
     "CREATE INDEX IF NOT EXISTS idx_feeds_kind ON feeds(kind)",
+    "CREATE INDEX IF NOT EXISTS idx_cctv_media_health_status ON cctv_media_health(status, updated_at DESC)",
 ]
 
 
@@ -339,6 +372,9 @@ FEED_SEED = [
     ("reliefweb", "ReliefWeb Updates", "https://reliefweb.int/updates/rss.xml", "rss"),
     ("opensky_states", "OpenSky Live Aircraft (public positions)", "https://opensky-network.org/api/states/all?limit=4000", "opensky"),
     ("celestrak_tle", "CelesTrak Active Satellite TLE", "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle", "celestrak"),
+    ("celestrak_stations", "CelesTrak Crewed Stations", "https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle", "celestrak"),
+    ("celestrak_weather", "CelesTrak Weather Satellites", "https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=tle", "celestrak"),
+    ("celestrak_amateur", "CelesTrak Amateur Radio", "https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=tle", "celestrak"),
     ("bbc_world", "BBC World News", "https://feeds.bbci.co.uk/news/world/rss.xml", "rss"),
     ("guardian_world", "The Guardian World", "https://www.theguardian.com/world/rss", "rss"),
     ("france24_world", "France24 World", "https://www.france24.com/en/rss", "rss"),
@@ -363,6 +399,7 @@ FEED_SEED = [
     ("maritime_ais", "Maritime / AIS Positions (scaffold)", "", "maritime"),
     ("infra_cables", "Subsea/Data/Power Cables (scaffold)", "", "cables"),
     ("public_cctv", "Public CCTV / Camera Feeds (scaffold)", "", "cctv"),
+    ("cctv_catalog", "CCTV / Camera Catalog (local/imported packs)", "", "cctv"),
 ]
 
 
@@ -465,6 +502,12 @@ class Database:
 
     # -------------------------------------------------------------- migrations
     def _migrate(self) -> None:
+        # Recurring tasks: add the column to databases created before the
+        # field existed. CREATE TABLE IF NOT EXISTS does not alter old tables.
+        task_cols = {r["name"] for r in self.query("PRAGMA table_info(tasks)")}
+        if "recurrence" not in task_cols:
+            self.execute("ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT ''")
+
         # Auto-sync used to be an inert preference (the old build only fetched
         # on explicit request). Adopt the automatic behaviour once, and add the
         # interval setting, without disturbing other operator choices.
@@ -616,6 +659,41 @@ class Database:
                 (doc_id, name, path, category, text),
             )
             self.conn.commit()
+
+    def upsert_cctv_media_health(self, camera_id: str, *, kind: str = "frame", status: str = "", message: str = "", source_url: str = "", extra: dict | None = None) -> None:
+        if not camera_id:
+            return
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        row = self.one("SELECT ok_count, error_count, ok_at, error_at FROM cctv_media_health WHERE camera_id=?", (camera_id,))
+        ok_count = int((row["ok_count"] if row else 0) or 0)
+        error_count = int((row["error_count"] if row else 0) or 0)
+        ok_at = (row["ok_at"] if row else None) or None
+        error_at = (row["error_at"] if row else None) or None
+        if status in ("ok", "cached"):
+            ok_count += 1
+            ok_at = now
+        elif status == "error":
+            error_count += 1
+            error_at = now
+        payload = json.dumps(extra or {}, ensure_ascii=False)
+        self.execute(
+            """INSERT INTO cctv_media_health(camera_id, kind, status, message, source_url, updated_at, ok_at, error_at, ok_count, error_count, extra)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(camera_id) DO UPDATE SET
+                 kind=excluded.kind, status=excluded.status, message=excluded.message, source_url=excluded.source_url,
+                 updated_at=excluded.updated_at,
+                 ok_at=COALESCE(excluded.ok_at, cctv_media_health.ok_at),
+                 error_at=COALESCE(excluded.error_at, cctv_media_health.error_at),
+                 ok_count=excluded.ok_count, error_count=excluded.error_count, extra=excluded.extra""",
+            (camera_id, kind, status, (message or "")[:500], (source_url or "")[:2000], now, ok_at, error_at, ok_count, error_count, payload),
+        )
+
+    def recent_cctv_media_errors(self, limit: int = 12) -> list[dict]:
+        try:
+            rows = self.query("SELECT camera_id, kind, status, message, updated_at, error_at, error_count FROM cctv_media_health WHERE status='error' ORDER BY updated_at DESC LIMIT ?", (max(1, min(100, int(limit))),))
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
 
     def close(self) -> None:
         try:

@@ -6,12 +6,13 @@ No cloud dependency. Errors are returned clearly so the UI can stay offline-safe
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import requests
 
 from .db import Database, utcnow
-
+from . import library as _library
 DEFAULT_BASE = "http://127.0.0.1:11434"
 UA = {"User-Agent": "DarkSecNightwatch/2.0", "Accept": "application/json", "Content-Type": "application/json"}
 
@@ -143,6 +144,82 @@ def _history_is_poisoned(m: dict) -> bool:
     return False
 
 
+def _library_context(db: Database, query: str, limit: int = 5, max_chars: int = 6000) -> str:
+    """Retrieve relevant snippets from the indexed document library (PDFs etc.).
+
+    Best-effort: returns "" on empty index, bad query or any error. Never raises.
+    """
+    q = (query or "").strip()
+    if not q:
+        return ""
+    try:
+        hits = _library.search(db, q, None, limit)
+    except Exception:
+        hits = []
+    # FTS AND-semantics often miss when the user's wording differs from the
+    # document wording. Fall back to a union of the longer query terms so the
+    # assistant still gets relevant passages.
+    if not hits:
+        seen: set = set()
+        collected: list[dict] = []
+        tokens = [t for t in re.findall(r"[\w]+", q, flags=re.UNICODE) if len(t) >= 4]
+        if not tokens:
+            tokens = [t for t in re.findall(r"[\w]+", q, flags=re.UNICODE) if len(t) >= 3]
+        for tok in tokens[:6]:
+            if len(collected) >= limit:
+                break
+            try:
+                for h in (_library.search(db, tok, None, 3) or []):
+                    if not isinstance(h, dict):
+                        continue
+                    if h.get("id") in seen:
+                        continue
+                    seen.add(h.get("id"))
+                    collected.append(h)
+                    if len(collected) >= limit:
+                        break
+            except Exception:
+                continue
+        hits = collected
+    chunks: list[str] = []
+    used = 0
+    for h in (hits or []):
+        if not isinstance(h, dict):
+            continue
+        name = str(h.get("name") or "").strip()
+        category = str(h.get("category") or "").strip()
+        snippet = str(h.get("snippet") or "").strip().replace("[[[", "").replace("]]]", "")
+        if not snippet:
+            # Fall back to a truncated stored text if FTS snippet is empty.
+            try:
+                row = db.one("SELECT text FROM library_docs WHERE id=?", (h.get("id"),))
+                text = str((row or {}).get("text") or "").strip() if row else ""
+                if text:
+                    snippet = text[:400]
+            except Exception:
+                snippet = ""
+        if not snippet:
+            continue
+        head = f"[{name}" + (f" — {category}" if category else "") + "]"
+        block = f"{head}\n{snippet}"
+        if used + len(block) > max_chars:
+            if not chunks:
+                # Allow at least one (truncated) chunk.
+                block = block[:max_chars]
+                chunks.append(block)
+                used = len(block)
+            break
+        chunks.append(block)
+        used += len(block)
+    if not chunks:
+        return ""
+    return (
+        "\nRetrieved from the indexed document library (PDFs/field manuals; "
+        "may be partial/stale — verify before relying on it):\n"
+        + "\n\n".join(chunks)
+    )
+
+
 def build_messages(db: Database, user_text: str, history: list[dict] | None = None, context: Any = None) -> list[dict]:
     cfg = _settings(db)
     msgs = []
@@ -156,6 +233,9 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
     ctx = _safe_context(context)
     if ctx:
         sys += "\nApplication context (may be partial/cached; do not treat as live sensor truth):\n" + ctx
+    lib_ctx = _library_context(db, user_text)
+    if lib_ctx:
+        sys += lib_ctx
     msgs.append({"role": "system", "content": sys})
     kept = 0
     for m in reversed((history or [])[-20:]):

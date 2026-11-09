@@ -343,6 +343,7 @@ export async function render(root) {
     { value: 30, label: "Every 30 minutes" },
     { value: 60, label: "Every 60 minutes" },
   ], settings.feed_refresh_min ?? 10);
+  const feedHealthBox = h("div", { class: "col gap-6 mt-10" });
   const feedPanel = panel({
     title: "Intelligence feeds",
     sub: "Automatic while online · cached offline",
@@ -353,9 +354,30 @@ export async function render(root) {
       h("div", { class: "callout small", text: "When online and OPSEC is off, the console refreshes public feeds in the background: space weather, earthquakes, NWS alerts, GDACS/EONET hazards, Safecast radiation reports, volcanic activity, weather, aircraft, satellites and world news. OPSEC blackout pauses all automatic fetching. Offline, the last successful cache remains readable with its age shown. Treat all feed content as unverified until confirmed with an official source." }),
       h("div", { class: "row mt-10" },
         btn("SAVE SYNC SETTINGS", { icon: "save", onClick: saveFeed }),
-        btn("SYNC NOW", { icon: "refresh", onClick: refreshFeeds }))),
+        btn("SYNC NOW", { icon: "refresh", onClick: refreshFeeds })),
+      h("div", { class: "side-label mt-14", text: "SOURCE HEALTH & EDITING" }),
+      h("div", { class: "tiny muted", text: "Refresh tests the live source. Editing a URL or parser clears that feed's cached payload so old items are not shown under the new source." }),
+      feedHealthBox),
   });
   grid.appendChild(feedPanel);
+  loadFeedHealth(feedHealthBox);
+
+  /* ------------------------------------------------------- cctv catalog */
+  const cctvCatalogBox = h("div", { class: "col gap-6 mt-10" });
+  const cctvCatalogPanel = panel({
+    title: "CCTV / camera catalog",
+    sub: "Local/imported packs · cached global layer",
+    icon: "camera",
+    body: h("div", { class: "col" },
+      h("div", { class: "callout small", text: "Merges cached CCTV layers on the map: OSM surveillance locations (Overpass, operator-triggered) and local/imported camera catalogs. Imported items preserve provider credit/license metadata when available. Verify source terms before redistributing data or fetching snapshots. See docs/DATA_SOURCES.md." }),
+      h("div", { class: "row wrap mt-10 gap-6" },
+        btn("IMPORT/REFRESH CATALOG", { icon: "download", tone: "primary", onClick: () => importCctvCatalog(cctvCatalogBox) }),
+        btn("REFRESH OSM CCTV", { icon: "refresh", onClick: () => refreshOsmCctv(cctvCatalogBox) }),
+        btn("STATUS", { icon: "info", onClick: () => loadCctvCatalog(cctvCatalogBox) })),
+      cctvCatalogBox),
+  });
+  grid.appendChild(cctvCatalogPanel);
+  loadCctvCatalog(cctvCatalogBox);
 
   /* ------------------------------------------------------------ security */
   const vaultTimeout = input({ type: "number", min: 0, max: 240, value: settings.vault_timeout_min ?? 15 });
@@ -911,6 +933,86 @@ export async function render(root) {
     } catch (err) { toast(err.message || "Backup failed", "error"); }
   }
 
+  async function loadFeedHealth(box) {
+    box.replaceChildren(loading("READING FEED STATUS"));
+    let out;
+    try {
+      out = await api.get("/api/feeds");
+    } catch (err) {
+      box.replaceChildren(h("div", { class: "callout danger small", text: err.message || "Could not read feed status" }));
+      return;
+    }
+    const feeds = (out.feeds || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    if (!feeds.length) {
+      box.replaceChildren(emptyState("No feeds registered", "The built-in feed registry could not be read.", "globe"));
+      return;
+    }
+    const list = h("div", { class: "list" });
+    for (const f of feeds) {
+      const tone = f.status === "OK" ? "green" : f.status === "STALE" ? "amber" : f.status === "ERROR" ? "red" : "muted";
+      const row = h("div", { class: "list-item" });
+      const main = h("div", { class: "li-main" });
+      main.appendChild(h("div", { class: "row between items-center gap-8" },
+        h("div", { class: "li-title", text: f.name }),
+        badge(f.status || "NEVER", tone)));
+      const bits = [String(f.kind || "").toUpperCase(), `${f.count ?? 0} item(s)`, `fetched ${fmt.ago(f.fetched_at)}`];
+      if (f.stale_reason) bits.push(`stale: ${f.stale_reason}`);
+      main.appendChild(h("div", { class: "li-sub", text: bits.filter(Boolean).join(" · ") }));
+      if (f.error) main.appendChild(h("div", { class: "li-sub", style: { color: "var(--red)" }, text: String(f.error).slice(0, 200) }));
+      row.appendChild(main);
+      const tools = h("div", { class: "row gap-6 wrap" });
+      tools.append(
+        btn("TEST", { size: "sm", tone: "ghost", icon: "refresh", onClick: () => testFeed(f, box) }),
+        btn("EDIT", { size: "sm", tone: "ghost", icon: "edit", onClick: () => editFeed(f, box) }));
+      row.appendChild(tools);
+      list.appendChild(row);
+    }
+    box.replaceChildren(list);
+  }
+
+  async function testFeed(feed, box) {
+    toast(`${feed.name}: testing source`, "warn");
+    try {
+      const out = await api.post("/api/feeds/refresh", { id: feed.id });
+      const result = (out.results || [])[0] || {};
+      if (result.status === "OK") toast(`${feed.name}: ${result.count ?? 0} items`);
+      else toast(`${feed.name}: ${result.error || result.status || "failed"}`, "error");
+    } catch (err) {
+      toast(err.message || "Feed test failed", "error");
+    }
+    loadFeedHealth(box);
+  }
+
+  function editFeed(feed, box) {
+    const name = input({ value: feed.name || "" });
+    const url = input({ value: feed.url || "" });
+    const kind = input({ value: feed.kind || "" });
+    const m = modal({
+      title: `Edit feed · ${feed.id}`,
+      sub: "Local source configuration",
+      body: h("div", { class: "col gap-10" },
+        field("Display name", name),
+        field("Source URL", url, "Changing the URL clears this feed's cached payload so old items are not presented under the new source."),
+        field("Parser kind", kind, "Must match an implemented parser: rss, gdacs, eonet, usgs, celestrak, opensky, swpc_kp, weather, air_quality…"),
+        h("div", { class: "callout small", text: `Feed ID ${feed.id} is fixed. Position-dependent feeds override the URL with the configured latitude/longitude at refresh time.` })),
+      actions: [
+        btn("CANCEL", { tone: "ghost", onClick: () => m.close() }),
+        btn("SAVE", { tone: "primary", icon: "save", onClick: async () => {
+          try {
+            await api.put(`/api/feeds/${encodeURIComponent(feed.id)}`, {
+              name: name.value.trim(), url: url.value.trim(), kind: kind.value.trim(),
+            });
+            toast("Feed updated");
+            m.close();
+            loadFeedHealth(box);
+          } catch (err) {
+            toast(err.message || "Could not update feed", "error");
+          }
+        } }),
+      ],
+    });
+  }
+
   async function refreshFeeds() {
     toast("Refreshing public feeds — network required", "warn");
     try {
@@ -918,6 +1020,102 @@ export async function render(root) {
       const ok = (out.results || []).filter((r) => r.status === "OK").length;
       toast(`Feeds refreshed: ${ok}/${(out.results || []).length} OK`);
     } catch (err) { toast(err.message || "Feed refresh failed", "error"); }
+  }
+
+  async function loadCctvCatalog(box) {
+    box.replaceChildren(loading("READING CCTV CATALOG STATUS"));
+    try {
+      const [out, packsOut] = await Promise.all([
+        api.get("/api/cctv/catalog/status").catch(() => ({})),
+        api.get("/api/cctv/catalog/packs").catch(() => ({})),
+      ]);
+      const feed = out.feed || {};
+      const tone = feed.status === "OK" ? "green" : feed.status === "ERROR" ? "red" : "muted";
+      const rows = h("div", { class: "col gap-6" });
+      rows.appendChild(h("div", { class: "row between items-center gap-8" },
+        h("div", { class: "li-title", text: feed.name || "CCTV catalog" }),
+        badge(feed.status || "NEVER", tone)));
+      rows.appendChild(kv([
+        ["Cached items", String(out.item_count ?? 0)],
+        ["Fetched", fmt.ago(feed.fetched_at)],
+      ]));
+      const fc = out.frame_cache || {};
+      if (fc.entries != null) rows.appendChild(kv([["Frame cache", `${fc.entries} entries · ${Object.entries(fc.status_counts || {}).map(([k,v])=>`${k}:${v}`).join(" · ") || "no fetches"}`]]));
+      if (out.catalog_refresh_hours) rows.appendChild(kv([["Refresh policy", `controlled cadence hint: ${out.catalog_refresh_hours}h (operator-managed)`]]));
+      if (Array.isArray(fc.recent_errors) && fc.recent_errors.length) {
+        const errBox = h("div", { class: "callout warn small mt-4" });
+        errBox.appendChild(h("div", { class: "tiny mono", text: `RECENT FRAME/STREAM ERRORS (${fc.recent_errors.length})` }));
+        for (const e of fc.recent_errors.slice(0, 5)) errBox.appendChild(h("div", { class: "tiny dim mt-2", style: { overflowWrap: "anywhere" }, text: `${String(e.id || '').slice(0, 48)} · ${String(e.at || '').slice(0, 19)} · ${String(e.message || '').slice(0, 120)}` }));
+        rows.appendChild(errBox);
+      }
+      if (out.source_note) rows.appendChild(h("div", { class: "tiny muted", text: String(out.source_note).slice(0, 240) }));
+      if (feed.error) rows.appendChild(h("div", { class: "callout danger small", text: String(feed.error).slice(0, 240) }));
+
+      const packs = Array.isArray(packsOut.packs) ? packsOut.packs : (Array.isArray(out.pack_stats) ? out.pack_stats : []);
+      rows.appendChild(h("div", { class: "side-label mt-8", text: `CATALOG PACKS (${packs.length})` }));
+      rows.appendChild(h("div", { class: "tiny dim", text: "Enable/disable import sources (by file). Save changes, then Import/Refresh Catalog. Frame snapshots use registered URLs only with throttled transient caching." }));
+      if (packs.length) {
+        const list = h("div", { class: "col gap-4 mt-4" });
+        const inputs = [];
+        for (const p of packs.slice(0, 30)) {
+          const name = String(p.source || p.path || "pack");
+          const enabled = p.enabled !== false;
+          const inp = h("input", { type: "checkbox", checked: enabled });
+          inputs.push({ inp, name, path: String(p.path || "") });
+          const meta = [];
+          if (p.count != null) meta.push(`${p.count} items`);
+          if (p.error) meta.push(`error: ${String(p.error).slice(0, 80)}`);
+          list.appendChild(h("label", { class: "row items-start gap-8", style: { cursor: "pointer" } },
+            inp,
+            h("div", { class: "col", style: { minWidth: 0 } },
+              h("div", { class: "tiny mono", style: { overflowWrap: "anywhere" }, text: name }),
+              meta.length ? h("div", { class: "tiny dim", text: meta.join(" · ") }) : null)));
+        }
+        if (packs.length > 30) list.appendChild(h("div", { class: "tiny dim", text: `…and ${packs.length - 30} more packs` }));
+        rows.appendChild(list);
+        rows.appendChild(h("div", { class: "row mt-8" }, btn("SAVE PACK SELECTION", { size: "sm", icon: "save", onClick: async () => {
+          const disabled = inputs.filter(x => !x.inp.checked).map(x => x.name);
+          try {
+            await api.put("/api/cctv/catalog/packs", { disabled });
+            toast(`Saved ${disabled.length} disabled pack(s). Run Import/Refresh Catalog to apply.`);
+          } catch (err) { toast(err.message || "Could not save pack selection", "error"); }
+          loadCctvCatalog(box);
+        }})));
+      } else {
+        rows.appendChild(h("div", { class: "tiny dim mt-4", text: "No catalog packs detected yet. Add JSON catalogs under fielddata/maps/cctv_catalogs/ or place a local gods-eye-view checkout, then Import/Refresh Catalog." }));
+      }
+      box.replaceChildren(rows);
+    } catch (err) {
+      box.replaceChildren(h("div", { class: "callout danger small", text: err.message || "Could not read CCTV catalog status" }));
+    }
+  }
+
+  async function importCctvCatalog(box) {
+    toast("Importing local CCTV catalogs…", "warn");
+    try {
+      const out = await api.post("/api/cctv/catalog/import", {});
+      const result = (out.results || [])[0] || {};
+      if (result.status === "OK") toast(`CCTV catalog imported: ${result.count ?? 0} items`);
+      else toast(`CCTV catalog: ${result.error || result.status || "failed"}`, "error");
+    } catch (err) {
+      toast(err.message || "CCTV catalog import failed", "error");
+    }
+    loadCctvCatalog(box);
+    loadFeedHealth(feedHealthBox);
+  }
+
+  async function refreshOsmCctv(box) {
+    toast("Refreshing OSM CCTV (Overpass, network required)…", "warn");
+    try {
+      const out = await api.post("/api/feeds/refresh", { id: "public_cctv" });
+      const result = (out.results || [])[0] || {};
+      if (result.status === "OK") toast(`OSM CCTV refreshed: ${result.count ?? 0} items`);
+      else toast(`OSM CCTV: ${result.error || result.status || "failed"}`, "error");
+    } catch (err) {
+      toast(err.message || "OSM CCTV refresh failed", "error");
+    }
+    loadCctvCatalog(box);
+    loadFeedHealth(feedHealthBox);
   }
 
   async function updateCoordPreview() {

@@ -111,8 +111,8 @@ export async function render(root) {
   let maplibregl;
   try { maplibregl = await loadMapLibre(); } catch (err) { root.replaceChildren(h("div", { class: "callout danger", text: err.message })); return; }
 
-  const state = { maxAgeHours: 0, show: { hazards:true, conflict:true, aircraft:true, sats:true, maritime:true, cables:true, cctv:true, wind:false, rain:false, cloud:false, terrain: !!demStatus?.available, waypoints:true, tracks:true, daynight:true, home:true } };
-  let map = null, popup = null, daynightTimer = null, inspector = null;
+  const state = { maxAgeHours: 0, show: { hazards:true, conflict:true, aircraft:true, sats:true, maritime:true, cables:true, cctv:true, cctvAlpr:true, wind:false, rain:false, cloud:false, terrain: !!demStatus?.available, waypoints:true, tracks:true, daynight:true, home:true } };
+  let map = null, popup = null, daynightTimer = null, glLiveTimer = null, inspector = null;
 
   root.replaceChildren();
   root.appendChild(pageHead({
@@ -165,8 +165,15 @@ export async function render(root) {
     ["terrain","DEM terrain/hillshade (if available)"],
     ["waypoints","Waypoints"],["tracks","Tracks"],["daynight","Day/night terminator"],["home","Home/position"],
   ]) {
-    layerBox.appendChild(checkbox(label, !!state.show[key], (on)=>{ state.show[key]=on; setVis(key,on); }));
+    layerBox.appendChild(checkbox(label, !!state.show[key], (on)=>{
+      state.show[key]=on;
+      if (["wind","rain","cloud"].includes(key)) refreshOverlaySources();
+      if (["hazards","conflict","cctv"].includes(key)) refreshIntelSources();
+      setVis(key,on);
+    }));
   }
+  layerBox.appendChild(h("div", { class:"tiny muted mt-6", text:"CCTV filters" }));
+  layerBox.appendChild(checkbox("Show ALPR-tagged CCTV (OSM audited tags)", !!state.show.cctvAlpr, (on)=>{ state.show.cctvAlpr=on; refreshIntelSources(); }));
   const statsBox = h("div", { class: "tiny muted", text: "Loading..." });
   side.appendChild(panel({ title:"GL Layers", icon:"layers", body: h("div",{class:"col gap-8"},
     field("INTEL AGE", ageSel), layerBox,
@@ -196,7 +203,7 @@ export async function render(root) {
   function setVis(key,on){
     const ids = {
       hazards:['hazards'], conflict:['conflict'], aircraft:['aircraft','aircraft-hdg'], sats:['sats'],
-      maritime:['maritime-pt'], cables:['cables-pt'], cctv:['cctv-pt'],
+      maritime:['maritime-cluster','maritime-pt'], cables:['cables-cluster','cables-pt'], cctv:['cctv-cluster','cctv-pt'],
       wind:['wind-pt','wind-dir'], rain:['rain-pt'], cloud:['cloud-pt'],
       terrain:['hillshade'],
       waypoints:['waypoints'], tracks:['tracks'], daynight:['night-fill','term-line','sun-pt'], home:['home-halo','home-dot'],
@@ -246,14 +253,15 @@ export async function render(root) {
     return fc((intel?.cables||[]).map(c=>pt(c.lon,c.lat,{ kind:'cable', title:c.title||c.cable_id||'Cable point', cable_id:c.cable_id, operator:c.operator, capacity:c.capacity, source:c.source, time:c.time, url:c.url })).filter(Boolean));
   }
   function cctvGeo(){
-    return fc((intel?.cctv||[]).map(c=>pt(c.lon,c.lat,{
+    const items = (intel?.cctv||[]).filter(c => state.show.cctvAlpr !== false || !c.alpr);
+    return fc(items.map(c=>pt(c.lon,c.lat,{
       kind: c.alpr ? 'alpr_camera' : 'cctv',
       title: c.title || c.camera_id || 'Camera',
       camera_id: c.camera_id, status: c.status, feed_url: c.feed_url || c.url, source: c.source, time: c.time, url: c.url,
       alpr: !!c.alpr, flock_tagged: !!c.flock_tagged,
       surveillance_type: c.surveillance_type, camera_type: c.camera_type, brand: c.brand,
       operator_name: c.operator_name, direction: c.direction, surveillance_zone: c.surveillance_zone,
-      summary: c.summary,
+      summary: c.summary, stream_url: c.stream_url || '', feed_type: c.feed_type || c.feedType || '', frame_refresh_ms: c.frame_refresh_ms || c.frameRefreshMs || 0, credit: c.credit || '', license: c.license || '', id: c.id || c.camera_id || '',
     })).filter(Boolean));
   }
   function overlayGeo(kind){
@@ -361,11 +369,13 @@ export async function render(root) {
     const parts = [];
     const push = (v) => { if (v!=null && v!=='') parts.push(String(v)); };
     if (p.source) push(p.source);
+    if (p.provider && p.provider !== p.source) push(p.provider);
     if (p.severity) push(p.severity);
     if (p.verified === true || p.verified === 'true') push('VERIFIED');
     if (p.alpr === true || p.alpr === 'true') push('ALPR/ANPR');
     if (p.flock_tagged === true || p.flock_tagged === 'true') push('Flock-tagged (OSM)');
     if (p.surveillance_type && p.surveillance_type !== p.kind) push(p.surveillance_type);
+    if (p.feed_type && p.feed_type !== p.surveillance_type) push(p.feed_type);
     if (p.brand) push(p.brand);
     if (p.operator_name) push(p.operator_name);
     if (p.direction != null && p.direction !== '') push(`${fmtProp('direction', p.direction)} dir`);
@@ -373,6 +383,7 @@ export async function render(root) {
     if (p.fatalities != null && p.fatalities !== '') push(`${p.fatalities} killed`);
     if (p.depth_km != null && p.depth_km !== '') push(`${p.depth_km} km depth`);
     if (p.place) push(p.place);
+    if (p.region || p.city) push([p.city, p.region].filter(Boolean).join(', '));
     if (p.callsign && p.callsign !== p.title) push(p.callsign);
     if (p.alt_m != null) push(U.altM(p.alt_m));
     if (p.alt_km != null) push(U.altKm(p.alt_km));
@@ -380,16 +391,110 @@ export async function render(root) {
     if (p.speed_kn != null) push(`${Math.round(Number(p.speed_kn))} kn`);
     if (p.heading_deg != null) push(`${Math.round(Number(p.heading_deg))}° hdg`);
     if (p.age_hours != null) push(fmtProp('age_hours', p.age_hours));
-    return parts.filter(Boolean).slice(0, 8);
+    if (p.credit) push(String(p.credit).slice(0, 48));
+    return parts.filter(Boolean).slice(0, 9);
   }
 
   function showInspector(p, lngLat){
+    if (glLiveTimer) { clearInterval(glLiveTimer); glLiveTimer = null; }
     p = p || {};
     const rows = Object.entries(p).filter(([k,v]) => v != null && v !== '' && !['geometry'].includes(k)).slice(0, 18);
+    const isCamera = ['cctv', 'alpr_camera', 'camera'].includes(String(p.kind || '').toLowerCase()) || p.camera_id;
     const children = [
       h('div', { class: 'side-label', text: String(p.kind || 'FEATURE').toUpperCase() }),
       h('div', { class: 'dev-name', text: p.title || p.name || p.callsign || 'Selected feature' }),
     ];
+    if (isCamera && p.id) {
+      const feedType = String(p.feed_type || p.feedType || '').toLowerCase();
+      const rawRefresh = Number(p.frame_refresh_ms || p.frameRefreshMs || 0);
+      const refreshSec = Math.max(10, Math.min(300, rawRefresh > 0 ? Math.round(rawRefresh / 1000) : 30));
+      const hasStream = !!(p.stream_url || feedType === 'hls' || feedType === 'mp4' || feedType === 'm3u8' || feedType === 'video');
+      let videoMode = false;
+      const wrap = h('div', { style: { border: '1px solid var(--line)', borderRadius: '6px', overflow: 'hidden', background: 'rgba(0,0,0,.25)' } });
+      const img = h('img', {
+        alt: p.title || 'Camera preview',
+        loading: 'eager',
+        referrerPolicy: 'no-referrer',
+        style: { display: 'block', width: '100%', maxHeight: '220px', objectFit: 'cover' },
+      });
+      const cap = h('div', { class: 'tiny dim', style: { padding: '6px 8px' }, text: '' });
+      let live = false;
+      const setImg = (force=false) => { if (videoMode) return; img.src = `/api/cctv/frame?id=${encodeURIComponent(String(p.id))}${force ? '&force=1' : ''}&t=${Date.now()}`; };
+      const liveBtn = btn('LIVE PREVIEW', { size: 'sm', tone: 'ghost', onClick: () => {
+        live = !live;
+        if (glLiveTimer) { clearInterval(glLiveTimer); glLiveTimer = null; }
+        if (live) {
+          glLiveTimer = setInterval(() => setImg(false), refreshSec * 1000);
+          liveBtn.text = `LIVE ON (${refreshSec}s)`;
+          cap.text = `Live preview (auto-refresh ${refreshSec}s, registered proxy).`;
+        } else {
+          liveBtn.text = 'LIVE PREVIEW';
+          cap.text = p.credit ? `Snapshot: ${String(p.credit).slice(0,120)}` : 'Snapshot preview (registered source).';
+        }
+      }});
+      const streamBtn = btn('LOAD STREAM', { size: 'sm', tone: 'ghost', disabled: !hasStream, onClick: async () => {
+        if (videoMode) return;
+        streamBtn.disabled = true; streamBtn.text = 'LOADING…';
+        try {
+          const info = await api.get(`/api/cctv/stream/info?id=${encodeURIComponent(String(p.id))}`);
+          const proxied = info && info.proxied_url;
+          const stype = String((info && info.feed_type) || feedType || '').toLowerCase();
+          if (!proxied) { toast('No registered live stream for this camera; snapshot preview available.', 'warn'); cap.text = 'No registered live stream URL.'; return; }
+          const video = h('video', { controls: true, playsInline: true, muted: true, autoplay: true, preload: 'metadata',
+            style: { display: 'block', width: '100%', maxHeight: '260px', background: '#000' } });
+          const nativeHls = video.canPlayType('application/vnd.apple.mpegurl');
+          if (stype === 'hls' || stype === 'm3u8') {
+            if (nativeHls) {
+              video.src = proxied;
+            } else {
+              let Hls = window.Hls;
+              if (!Hls || !Hls.isSupported || !Hls.isSupported()) {
+                try {
+                  if (!window.__darksecHlsLoading) {
+                    window.__darksecHlsLoading = new Promise((resolve, reject) => {
+                      const s = document.createElement('script');
+                      s.src = '/ui/vendor/hls/hls.min.js?v=1';
+                      s.async = true;
+                      s.onload = () => resolve(window.Hls);
+                      s.onerror = () => reject(new Error('Failed to load hls.js'));
+                      document.head.appendChild(s);
+                    });
+                  }
+                  Hls = await window.__darksecHlsLoading;
+                } catch { Hls = window.Hls; } finally { window.__darksecHlsLoading = null; }
+              }
+              if (Hls && Hls.isSupported && Hls.isSupported()) {
+                const hls = new Hls({ lowLatencyMode: false, backBufferLength: 30, maxBufferLength: 20 });
+                hls.loadSource(proxied); hls.attachMedia(video);
+                hls.on(Hls.Events.ERROR, (_, data) => { if (data && data.fatal) cap.text = `HLS error: ${data.type || 'fatal'}. Try snapshot preview or source link.`; });
+              } else {
+                video.src = proxied;
+                cap.text = 'HLS stream requested via registered proxy. hls.js could not be loaded; try native HLS support.';
+              }
+            }
+          } else {
+            video.src = proxied;
+          }
+          video.onerror = () => { cap.text = 'Stream playback failed. Use snapshot preview or open source link.'; };
+          if (glLiveTimer) { clearInterval(glLiveTimer); glLiveTimer = null; live = false; liveBtn.text = 'LIVE PREVIEW'; }
+          videoMode = true; img.replaceWith(video);
+          cap.text = `Live stream (registered proxy${info.credit ? ` · ${String(info.credit).slice(0,70)}` : ''}).`;
+          streamBtn.text = 'STREAM LOADED';
+        } catch (err) {
+          toast(err.message || 'Could not load stream', 'error');
+          cap.text = `Stream load failed: ${String(err.message || err).slice(0,120)}`;
+        } finally { if (!videoMode) { streamBtn.disabled = false; streamBtn.text = 'LOAD STREAM'; } }
+      }});
+      img.onerror = () => { if (!videoMode) cap.text = hasStream ? `No proxied image preview. Use LOAD STREAM for registered ${String(feedType||'video').toUpperCase()} playback when supported.` : 'No snapshot preview available from registered source.'; };
+      img.onload = () => { if (!live && !videoMode) cap.text = p.credit ? `Snapshot: ${String(p.credit).slice(0,120)}` : 'Snapshot preview (registered source).'; };
+      setImg(false);
+      wrap.append(img, cap, h('div', { class: 'row between items-center gap-6 wrap', style: { padding: '6px 8px', borderTop: '1px solid var(--line)' } },
+        h('div', { class: 'tiny dim', text: feedType ? `Feed: ${feedType.toUpperCase()}` : 'Feed: snapshot/image' }),
+        h('div', { class: 'row gap-4 wrap' }, liveBtn, hasStream ? streamBtn : null)));
+      if (hasStream) wrap.appendChild(h('div', { class: 'tiny dim', style: { padding: '0 8px 8px' }, text: 'Registered stream proxy (same-host subresources, bounded). HLS may require native browser support or vendored hls.js.' }));
+      children.push(wrap);
+      if (p.license) children.push(h('div', { class: 'tiny dim', text: `License/terms: ${String(p.license).slice(0, 180)}` }));
+    }
     for (const [k, v] of rows) {
       children.push(h('div', { class: 'row between gap-8' },
         h('span', { class: 'tiny muted', text: k }),
@@ -413,10 +518,11 @@ export async function render(root) {
         const kicker = escapeHtml(String(p.kind || 'feature').toUpperCase());
         const metaHtml = meta.length ? `<div style="opacity:.78;margin-top:5px;line-height:1.45">${meta.map(escapeHtml).join(' · ')}</div>` : '';
         const summary = p.summary ? `<div style="opacity:.72;margin-top:6px;line-height:1.4">${escapeHtml(String(p.summary).slice(0, 180))}</div>` : '';
+        const credit = p.credit ? `<div style="opacity:.62;margin-top:4px">Credit: ${escapeHtml(String(p.credit).slice(0, 120))}</div>` : '';
         const time = p.time && !meta.some(m=>String(m).includes(String(p.time).slice(0,10))) ? `<div style="opacity:.6;margin-top:4px">${escapeHtml(fmtProp('time', p.time))}</div>` : '';
         popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '320px', className: 'ds-gl-popup' })
           .setLngLat(lngLat)
-          .setHTML(`<div style="font-size:11px;line-height:1.35"><div style="opacity:.65;text-transform:uppercase;letter-spacing:.05em;font-size:9px">${kicker}</div><div style="font-weight:600;margin-top:2px;color:#eafff2;word-break:break-word">${title}</div>${metaHtml}${summary}${time}</div>`)
+          .setHTML(`<div style="font-size:11px;line-height:1.35"><div style="opacity:.65;text-transform:uppercase;letter-spacing:.05em;font-size:9px">${kicker}</div><div style="font-weight:600;margin-top:2px;color:#eafff2;word-break:break-word">${title}</div>${metaHtml}${summary}${credit}${time}</div>`)
           .addTo(map);
       }
     } catch {}
@@ -487,18 +593,34 @@ export async function render(root) {
     map.addSource('sats', { type:'geojson', data: satsGeo() });
     map.addLayer({ id:'sats', type:'circle', source:'sats', paint:{ 'circle-radius':3.2,'circle-color':'#c78bff','circle-stroke-color':'#1b1024','circle-stroke-width':1 } });
 
-    map.addSource('maritime', { type:'geojson', data: maritimeGeo() });
-    map.addLayer({ id:'maritime-pt', type:'circle', source:'maritime', paint:{ 'circle-radius':3.3,'circle-color':'#35c9ff','circle-stroke-color':'#06222b','circle-stroke-width':1,'circle-opacity':0.9 } });
-    map.addSource('cables', { type:'geojson', data: cablesGeo() });
-    map.addLayer({ id:'cables-pt', type:'circle', source:'cables', paint:{ 'circle-radius':3.0,'circle-color':'#ffd166','circle-stroke-color':'#2b1f00','circle-stroke-width':1,'circle-opacity':0.85 } });
-    map.addSource('cctv', { type:'geojson', data: cctvGeo() });
-    map.addLayer({ id:'cctv-pt', type:'circle', source:'cctv', paint:{
-      'circle-radius': ['case', ['==', ['get','alpr'], true], 3.8, 3.0],
-      'circle-color': ['case', ['==', ['get','alpr'], true], '#ff66cc', '#b7ff6a'],
-      'circle-stroke-color': ['case', ['==', ['get','alpr'], true], '#33001f', '#102100'],
-      'circle-stroke-width': 1,
-      'circle-opacity': 0.9
-    }});
+    function addClustered(name, data, opts) {
+      const { color, stroke, clusterMaxZoom = 13, clusterRadius = 45, pointPaint = {} } = opts;
+      map.addSource(name, { type: 'geojson', data, cluster: true, clusterMaxZoom, clusterRadius });
+      map.addLayer({ id: `${name}-cluster`, type: 'circle', source: name, filter: ['has', 'point_count'], paint: {
+        'circle-color': color,
+        'circle-radius': ['step', ['get', 'point_count'], 10, 20, 14, 100, 18, 500, 24],
+        'circle-stroke-color': stroke || 'rgba(0,0,0,.45)',
+        'circle-stroke-width': 1.5,
+        'circle-opacity': 0.78,
+      }});
+      map.addLayer({ id: `${name}-pt`, type: 'circle', source: name, filter: ['!', ['has', 'point_count']], paint: Object.assign({
+        'circle-radius': ['interpolate',['linear'],['zoom'],1,3.8,6,3.4,10,4.4,14,5.2],
+        'circle-color': color,
+        'circle-stroke-color': stroke || 'rgba(0,0,0,.45)',
+        'circle-stroke-width': 1,
+        'circle-opacity': 0.95,
+      }, pointPaint) });
+    }
+    addClustered('maritime', maritimeGeo(), { color: '#35c9ff', stroke: '#06222b' });
+    addClustered('cables', cablesGeo(), { color: '#ffd166', stroke: '#2b1f00' });
+    addClustered('cctv', cctvGeo(), {
+      color: '#b7ff6a', stroke: '#173000',
+      pointPaint: {
+        'circle-color': ['case', ['==', ['get','alpr'], true], '#ff66cc', '#b7ff6a'],
+        'circle-stroke-color': ['case', ['==', ['get','alpr'], true], '#33001f', '#102100'],
+        'circle-radius':['interpolate',['linear'],['zoom'],1,3.8,4,3.2,8,['case',['==',['get','alpr'],true],4.8,4.0],12,['case',['==',['get','alpr'],true],5.6,4.8],14,5.8],
+      }
+    });
 
     map.addSource('rain', { type:'geojson', data: overlayGeo('rain') });
     map.addLayer({ id:'rain-pt', type:'circle', source:'rain', paint:{
@@ -525,9 +647,25 @@ export async function render(root) {
       map.on('mouseleave', lid, ()=>{ map.getCanvas().style.cursor=''; });
       map.on('click', lid, (e)=>{ const f=e.features?.[0]; if(!f) return; showInspector(f.properties||{}, e.lngLat); });
     }
+    for (const cid of ['maritime-cluster','cables-cluster','cctv-cluster']) {
+      map.on('mouseenter', cid, ()=>{ map.getCanvas().style.cursor='pointer'; });
+      map.on('mouseleave', cid, ()=>{ map.getCanvas().style.cursor=''; });
+      map.on('click', cid, (e) => {
+        const features = map.queryRenderedFeatures(e.point, { layers: [cid] });
+        const clusterId = features[0]?.properties?.cluster_id;
+        const src = features[0]?.source;
+        if (clusterId == null || !src) return;
+        const source = map.getSource(src);
+        const go = (err, zoom) => { if (!err && zoom != null) map.easeTo({ center: features[0].geometry.coordinates, zoom: Math.min(zoom + 0.5, 18) }); };
+        try {
+          const p = source.getClusterExpansionZoom(clusterId, go);
+          if (p && typeof p.then === 'function') p.then(z => go(null, z)).catch(() => {});
+        } catch {}
+      });
+    }
 
     daynightTimer = setInterval(()=>{ try { const dn=dayNightGeoJSON(); map.getSource('night')?.setData(dn.night); map.getSource('term')?.setData(dn.term); map.getSource('sunpt')?.setData(dn.sun); } catch {} }, 60000);
   });
 
-  return () => { try { clearInterval(daynightTimer); popup?.remove(); map?.remove(); } catch {} };
+  return () => { try { clearInterval(daynightTimer); clearInterval(glLiveTimer); popup?.remove(); map?.remove(); } catch {} };
 }

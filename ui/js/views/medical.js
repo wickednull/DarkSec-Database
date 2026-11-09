@@ -25,11 +25,12 @@ function triageTone(value) {
 
 export async function render(root) {
   root.replaceChildren(loading("LOADING MEDICAL REGISTRY"));
-  let patients, summary;
+  let patients, summary, medLog;
   try {
-    [patients, summary] = await Promise.all([
+    [patients, summary, medLog] = await Promise.all([
       api.get("/api/records/patients?limit=500"),
       api.get("/api/medical/summary").catch(() => ({ patients: 0, triage: {}, recent_vitals: [] })),
+      api.get("/api/records/medication_log?limit=200").catch(() => ({ items: [] })),
     ]);
   } catch (err) {
     root.replaceChildren(h("div", { class: "callout danger", text: err.message }));
@@ -161,6 +162,7 @@ export async function render(root) {
     }
     const actionRow = h("div", { class: "row wrap mt-10" },
       btn("ADD VITALS", { icon: "plus", tone: "primary", size: "sm", onClick: () => addVitals(selected, root) }),
+      btn("LOG MEDICATION", { icon: "medical", tone: "amber", size: "sm", onClick: () => addMedication(selected, root) }),
       btn("NEW NOTE", { icon: "note", size: "sm", onClick: () => { location.hash = "#/security?tab=vault"; } }),
       btn("TRIAGE CARD", { icon: "book", size: "sm", tone: "ghost", onClick: () => { location.hash = "#/manual?card=start-triage"; } }),
     );
@@ -196,6 +198,33 @@ export async function render(root) {
     ], { empty: "No vitals recorded", emptyIcon: "pulse" }),
   });
   root.appendChild(recentPanel);
+
+  /* -------------------------------------------------- medication administration */
+  const meds = medLog.items || [];
+  const medPanel = panel({
+    title: "Medication administration log",
+    sub: `${meds.length} recorded administration(s) · dose, route, who and reaction`,
+    icon: "medical",
+    cls: "mt-14",
+    tools: [btn("LOG MEDICATION", { size: "sm", icon: "plus", onClick: () => addMedication(
+      items.find((p) => p.id === lastSelected) || items[0] || null, root,
+    ) })],
+    body: recordTable(meds, [
+      { label: "TIME", key: "ts", render: (r) => fmt.date(r.ts) },
+      { label: "PATIENT", key: "patient_id", render: (r) => pname.get(r.patient_id) || (r.patient_id ? `#${r.patient_id}` : "—") },
+      { label: "MEDICATION", key: "medication" },
+      { label: "DOSE", key: "dose" },
+      { label: "ROUTE", key: "route" },
+      { label: "GIVEN BY", key: "administered_by", render: (r) => r.administered_by || "—" },
+      { label: "INDICATION", key: "indication", render: (r) => r.indication || "—" },
+      { label: "REACTION", key: "reaction", render: (r) => r.reaction || "—" },
+      { label: "", key: "act", render: (r) => rowActions({
+        onEdit: () => openRecordForm({ table: "medication_log", item: r, onSaved: () => render(root) }),
+        onDelete: () => deleteRecord("medication_log", r.id, "medication entry", () => render(root)),
+      }) },
+    ], { empty: "No medication administrations recorded", emptyIcon: "medical" }),
+  });
+  root.appendChild(medPanel);
 
   /* ----------------------------------------------------------- calculations */
   const calc = panel({
@@ -333,6 +362,22 @@ function addVitals(patient, root) {
     table: "vitals",
     defaults: { patient_id: patient.id },
     title: `Vitals — ${patient.callsign || `Patient #${patient.id}`}`,
+    onSaved: () => {
+      lastSelected = patient.id;
+      render(root);
+    },
+  });
+}
+
+function addMedication(patient, root) {
+  if (!patient) { toast("Create a patient record first", "warn"); return; }
+  openRecordForm({
+    table: "medication_log",
+    defaults: { patient_id: patient.id },
+    title: `Medication — ${patient.callsign || `Patient #${patient.id}`}`,
+    intro: patient.allergies
+      ? `Recorded allergies: ${patient.allergies}. Confirm indication, dose, route and expiry before administering.`
+      : "No allergies recorded for this patient. Confirm before administering any medication.",
     onSaved: () => {
       lastSelected = patient.id;
       render(root);

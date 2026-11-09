@@ -9,7 +9,11 @@ only when the operator explicitly asks for them.
 """
 from __future__ import annotations
 
+import asyncio
+import base64
+import calendar
 import csv
+import hashlib
 import io
 import json
 import mimetypes
@@ -19,14 +23,15 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 
 import requests
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
@@ -47,6 +52,15 @@ APP_CODENAME = "NIGHTWATCH"
 COOKIE = "darksec_session"
 CSRF_COOKIE = "darksec_csrf"
 TX_ACK = "I AM RESPONSIBLE"
+
+# Transient CCTV frame cache (registered URLs only, no disk persistence).
+_CCTV_FRAME_LOCK = threading.Lock()
+_CCTV_FRAME_CACHE: dict[str, dict] = {}
+_CCTV_FRAME_INFLIGHT: set[str] = set()
+_CCTV_FRAME_STATUS: dict[str, dict] = {}
+_CCTV_FRAME_MAX_ENTRIES = 512
+_CCTV_FRAME_MAX_BYTES = 48 * 1024 * 1024
+_CCTV_FRAME_MAX_ITEM_BYTES = 3 * 1024 * 1024
 
 
 # --------------------------------------------------------------------------
@@ -90,7 +104,7 @@ RECORD_TABLES: dict[str, dict] = {
         "search": ["title", "body", "tags", "category"],
     },
     "tasks": {
-        "fields": ["ts", "title", "detail", "priority", "due", "done", "category"],
+        "fields": ["ts", "title", "detail", "priority", "due", "done", "category", "recurrence"],
         "required": ["title"], "order": "done ASC, CASE priority WHEN 'IMMEDIATE' THEN 0 "
         "WHEN 'PRIORITY' THEN 1 WHEN 'ROUTINE' THEN 2 ELSE 3 END, ts DESC",
         "stamp": "ts", "search": ["title", "detail", "category"],
@@ -106,6 +120,12 @@ RECORD_TABLES: dict[str, dict] = {
                    "pain", "avpu", "note"],
         "required": [], "order": "ts DESC, id DESC", "stamp": "ts",
         "search": ["note", "avpu"],
+    },
+    "medication_log": {
+        "fields": ["ts", "patient_id", "medication", "dose", "route", "administered_by",
+                   "indication", "reaction", "note"],
+        "required": ["medication"], "order": "ts DESC, id DESC", "stamp": "ts",
+        "search": ["medication", "indication", "reaction", "note", "administered_by"],
     },
     "weather_log": {
         "fields": ["ts", "temp_c", "pressure_hpa", "humidity", "wind_dir", "wind_kmh",
@@ -204,6 +224,72 @@ def _clean_value(field: str, value: Any) -> Any:
     return text[:200_000]
 
 
+RECURRENCE_VALUES = {"", "DAILY", "WEEKLY", "MONTHLY", "QUARTERLY", "YEARLY"}
+
+
+def _parse_due(value: Any) -> datetime | None:
+    """Parse the loose due strings the UI accepts (date, date+time, ISO)."""
+    if value in (None, ""):
+        return None
+    text = str(value).strip().replace("Z", "")
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19], fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _parse_expiry(value: Any) -> datetime | None:
+    """Parse inventory expiry text. Accepts YYYY-MM, dates, and ISO stamps.
+
+    A month-only value expires at the end of that month, which matches how
+    consumables are normally labelled.
+    """
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    m = re.fullmatch(r"(\d{4})-(\d{2})", text)
+    if m:
+        year, month = int(m.group(1)), int(m.group(2))
+        if 1 <= month <= 12:
+            last = calendar.monthrange(year, month)[1]
+            return datetime(year, month, last, 23, 59)
+    return _parse_due(text)
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    month = dt.month - 1 + months
+    year = dt.year + month // 12
+    month = month % 12 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def _next_due(value: Any, recurrence: str) -> str | None:
+    """Return the next occurrence date for a recurring task, or None."""
+    rec = str(recurrence or "").strip().upper()
+    if rec not in RECURRENCE_VALUES or not rec:
+        return None
+    base = _parse_due(value) or datetime.now(timezone.utc).replace(tzinfo=None)
+    if rec == "DAILY":
+        nxt = base + timedelta(days=1)
+    elif rec == "WEEKLY":
+        nxt = base + timedelta(days=7)
+    elif rec == "YEARLY":
+        nxt = _add_months(base, 12)
+    elif rec == "QUARTERLY":
+        nxt = _add_months(base, 3)
+    else:
+        nxt = _add_months(base, 1)
+    if base.hour or base.minute:
+        return nxt.strftime("%Y-%m-%d %H:%M")
+    return nxt.strftime("%Y-%m-%d")
+
+
 def _record_row(row: sqlite3.Row) -> dict:
     return dict(row)
 
@@ -218,6 +304,41 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                secure_cookies: bool = False) -> FastAPI:
     token = token or secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(18)
+
+    async def _catalog_auto_refresh_loop(app: FastAPI):
+        # Controlled, operator-configurable: only runs when cctv_catalog_refresh_hours > 0.
+        while True:
+            try:
+                await asyncio.sleep(900)  # check every 15 min
+                d = getattr(app.state, "db", None)
+                if d is None:
+                    continue
+                try:
+                    hours = float(d.all_settings().get("cctv_catalog_refresh_hours") or 0)
+                except Exception:
+                    hours = 0
+                if hours <= 0:
+                    continue
+                row = d.one("SELECT fetched_at, status FROM feeds WHERE id='cctv_catalog'")
+                if not row:
+                    continue
+                fetched = row["fetched_at"]
+                due = True
+                if fetched:
+                    try:
+                        # utcnow() format in this codebase is ISO-like text; be permissive
+                        ft = datetime.fromisoformat(str(fetched).replace("Z", "+00:00"))
+                        age_h = (datetime.now(timezone.utc) - (ft if ft.tzinfo else ft.replace(tzinfo=timezone.utc))).total_seconds() / 3600.0
+                        due = age_h >= max(1.0, min(168.0, hours))
+                    except Exception:
+                        due = True
+                if due:
+                    await run_in_threadpool(feeds.refresh, d, "cctv_catalog")
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                # never crash the app due to background refresh
+                await asyncio.sleep(60)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -253,8 +374,17 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         if open_browser:
             import webbrowser
             webbrowser.open(f"http://127.0.0.1:{port}/?token={token}")
+        catalog_task = None
+        if not os.environ.get("DARKSEC_NO_CATALOG_AUTOSYNC"):
+            catalog_task = asyncio.create_task(_catalog_auto_refresh_loop(app))
         yield
         try:
+            if catalog_task:
+                catalog_task.cancel()
+                try:
+                    await catalog_task
+                except Exception:
+                    pass
             phonegps.pairing.stop()
             if getattr(app.state, "lan_manager", None):
                 app.state.lan_manager.stop()
@@ -784,6 +914,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             clean.setdefault("party_size", 1)
             clean["updated"] = utcnow()
             _validate_trip(db(request), clean)
+        if table == "tasks":
+            rec = str(clean.get("recurrence") or "").strip().upper()
+            clean["recurrence"] = rec if rec in RECURRENCE_VALUES else ""
         new_id = db(request).insert(table, clean)
         db(request).audit("RECORD_NEW", f"{table} #{new_id}")
         return {"id": new_id, "item": dict(db(request).one(f"SELECT * FROM {table} WHERE id=?", (new_id,)))}
@@ -803,6 +936,32 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             clean["updated"] = utcnow()
         if table == "trip_plans":
             _validate_trip(d, clean, dict(current))
+        if table == "tasks":
+            rec = str(clean.get("recurrence", current["recurrence"]) or "").strip().upper()
+            rec = rec if rec in RECURRENCE_VALUES else ""
+            if "recurrence" in clean:
+                clean["recurrence"] = rec
+            next_task_id = None
+            was_done = bool(current["done"])
+            now_done = bool(clean.get("done", was_done))
+            if now_done and not was_done and rec:
+                # Completing a recurring task schedules the next occurrence and
+                # keeps the completed row as an immutable history entry.
+                base_due = clean["due"] if "due" in clean else current["due"]
+                following = {field: current[field] for field in spec["fields"]
+                             if field in current.keys()}
+                following.update({k: v for k, v in clean.items() if k != "done"})
+                following["due"] = _next_due(base_due, rec)
+                following["done"] = 0
+                following["recurrence"] = rec
+                following["ts"] = utcnow()
+                following.pop("id", None)
+                next_task_id = d.insert("tasks", following)
+                d.audit("TASK_RECURRENCE", f"tasks #{row_id} -> next #{next_task_id} ({rec})")
+            d.update(table, row_id, clean)
+            d.audit("RECORD_UPDATE", f"{table} #{row_id}")
+            return {"ok": True, "item": dict(d.one(f"SELECT * FROM {table} WHERE id=?", (row_id,))),
+                    "next_task_id": next_task_id}
         d.update(table, row_id, clean)
         d.audit("RECORD_UPDATE", f"{table} #{row_id}")
         return {"ok": True, "item": dict(d.one(f"SELECT * FROM {table} WHERE id=?", (row_id,)))}
@@ -818,6 +977,44 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         d.delete(table, row_id)
         d.audit("RECORD_DELETE", f"{table} #{row_id}")
         return {"deleted": row_id}
+
+    # ------------------------------------------------- maintenance / expiry
+    @app.get("/api/maintenance/due")
+    def maintenance_due(request: Request, days: int = Query(30, ge=0, le=365)):
+        """Open tasks and inventory lines that are due or expiring soon."""
+        d = db(request)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        horizon = now + timedelta(days=days)
+        due_tasks = []
+        for row in d.query("SELECT * FROM tasks WHERE done=0 AND due IS NOT NULL AND due<>''"):
+            parsed = _parse_due(row["due"])
+            if parsed is None or parsed > horizon:
+                continue
+            item = dict(row)
+            item["due_in_days"] = round((parsed - now).total_seconds() / 86400, 1)
+            item["overdue"] = parsed < now
+            due_tasks.append(item)
+        due_tasks.sort(key=lambda r: r["due"] or "")
+        expiring = []
+        for row in d.query("SELECT * FROM inventory WHERE expires IS NOT NULL AND expires<>''"):
+            parsed = _parse_expiry(row["expires"])
+            if parsed is None or parsed > horizon:
+                continue
+            item = dict(row)
+            item["expires_in_days"] = round((parsed - now).total_seconds() / 86400, 1)
+            item["expired"] = parsed < now
+            expiring.append(item)
+        expiring.sort(key=lambda r: (r["expires_in_days"], r.get("name") or ""))
+        recurring = d.query("SELECT * FROM tasks WHERE done=0 AND recurrence IS NOT NULL "
+                            "AND recurrence<>'' ORDER BY due ASC")
+        return {
+            "tasks": due_tasks,
+            "inventory": expiring,
+            "recurring": [dict(r) for r in recurring],
+            "overdue_tasks": sum(1 for r in due_tasks if r["overdue"]),
+            "expired_inventory": sum(1 for r in expiring if r["expired"]),
+            "window_days": days,
+        }
 
     # --------------------------------------------------------- field trips
     @app.get("/api/trips")
@@ -914,6 +1111,557 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         db(request).audit("FEED_REFRESH", json.dumps(result)[:2000])
         return {"results": result, "feeds": feeds.list_feeds(db(request))}
 
+    @app.put("/api/feeds/{feed_id}")
+    def feed_update(request: Request, feed_id: str, payload: dict = Body(...)):
+        d = db(request)
+        row = d.one("SELECT * FROM feeds WHERE id=?", (feed_id,))
+        require(bool(row), "Feed not found", 404)
+        name = str(payload.get("name", row["name"]) or "").strip()[:200]
+        url = str(payload.get("url", row["url"]) or "").strip()[:4000]
+        kind = str(payload.get("kind", row["kind"]) or "").strip()[:64]
+        require(bool(name), "Feed name is required")
+        require(bool(kind), "Feed kind is required")
+        source_changed = url != (row["url"] or "") or kind != (row["kind"] or "")
+        if source_changed:
+            # Changing where a feed points invalidates its cache. Retaining the
+            # old payload would present stale items as if they came from the new
+            # source, so clear it and require an explicit refresh.
+            d.execute("UPDATE feeds SET name=?, url=?, kind=?, status='NEVER', "
+                      "fetched_at=NULL, payload=NULL, error=NULL WHERE id=?",
+                      (name, url, kind, feed_id))
+        else:
+            d.execute("UPDATE feeds SET name=? WHERE id=?", (name, feed_id))
+        d.audit("FEED_UPDATE", f"{feed_id}: {name} <{url}> ({kind})")
+        return {"ok": True, "source_changed": source_changed,
+                "feed": dict(d.one("SELECT id,name,url,kind,status,error FROM feeds WHERE id=?",
+                                   (feed_id,)))}
+
+    # ---------------------------------------------------------------- cctv
+    def _cctv_frame_cache_key(camera_id: str, url: str) -> str:
+        return hashlib.sha256(f"{camera_id}\n{url}".encode("utf-8", errors="ignore")).hexdigest()[:32]
+
+    def _cctv_frame_set_status(camera_id: str, *, db: Database | None = None, kind: str = "frame", **fields):
+        with _CCTV_FRAME_LOCK:
+            cur = dict(_CCTV_FRAME_STATUS.get(camera_id) or {"id": camera_id})
+            cur.update(fields)
+            now = utcnow()
+            cur["updated_at"] = now
+            cur["at"] = now
+            cur["camera_id"] = camera_id
+            cur.setdefault("kind", kind)
+            _CCTV_FRAME_STATUS[camera_id] = cur
+            if len(_CCTV_FRAME_STATUS) > 4000:
+                for k in list(_CCTV_FRAME_STATUS.keys())[:500]:
+                    _CCTV_FRAME_STATUS.pop(k, None)
+        if db is not None:
+            try:
+                db.upsert_cctv_media_health(
+                    camera_id, kind=kind,
+                    status=str(cur.get("status") or ""),
+                    message=str(cur.get("message") or ""),
+                    source_url=str(cur.get("source_url") or cur.get("url") or ""),
+                    extra={k: v for k, v in cur.items() if k not in ("camera_id", "id") and not isinstance(v, (bytes, bytearray))},
+                )
+            except Exception:
+                pass
+
+    def _cctv_frame_store(camera_id: str, url: str, body: bytes, ctype: str, refresh_ms: int):
+        now = time.time()
+        entry = {
+            "id": camera_id, "url": url, "body": body, "ctype": ctype,
+            "fetched_at": now, "refresh_ms": refresh_ms,
+            "next_allowed_at": now + max(5.0, refresh_ms / 1000.0),
+            "bytes": len(body),
+        }
+        key = _cctv_frame_cache_key(camera_id, url)
+        with _CCTV_FRAME_LOCK:
+            old = _CCTV_FRAME_CACHE.pop(key, None)
+            total = sum(v.get("bytes", 0) for v in _CCTV_FRAME_CACHE.values()) + len(body)
+            while _CCTV_FRAME_CACHE and (len(_CCTV_FRAME_CACHE) >= _CCTV_FRAME_MAX_ENTRIES or total > _CCTV_FRAME_MAX_BYTES):
+                k0, v0 = next(iter(_CCTV_FRAME_CACHE.items()))
+                _CCTV_FRAME_CACHE.pop(k0, None)
+                total -= int(v0.get("bytes", 0) or 0)
+            _CCTV_FRAME_CACHE[key] = entry
+        _cctv_frame_set_status(camera_id, status="ok", source_kind="registered_snapshot", message="", content_type=ctype, bytes=len(body), refresh_ms=refresh_ms, source_url=url)
+
+    def _cctv_frame_get(camera_id: str, url: str):
+        key = _cctv_frame_cache_key(camera_id, url)
+        with _CCTV_FRAME_LOCK:
+            ent = _CCTV_FRAME_CACHE.get(key)
+            if not ent:
+                return None
+            # move to end (LRU-ish)
+            _CCTV_FRAME_CACHE.pop(key, None)
+            _CCTV_FRAME_CACHE[key] = ent
+            return ent
+
+    def _find_registered_cctv_media(d: Database, camera_id: str) -> dict | None:
+        cid = str(camera_id or "")
+        if not cid:
+            return None
+        rows = d.query("SELECT id, payload FROM feeds WHERE kind='cctv'")
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except Exception:
+                continue
+            items = payload.get("items") if isinstance(payload, dict) else payload
+            if not isinstance(items, list):
+                continue
+            fid = row["id"]
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                composite = f"{fid}:{it.get('id') or it.get('camera_id') or it.get('title')}"
+                candidates = {composite, str(it.get("id") or ""), str(it.get("camera_id") or "")}
+                if cid not in candidates:
+                    continue
+                url = None
+                for key in ("snapshot_url", "snapshotUrl", "image_url", "imageUrl", "url", "feed_url"):
+                    val = it.get(key)
+                    if isinstance(val, str) and val.strip().startswith(("http://", "https://")):
+                        url = val.strip(); break
+                if not url:
+                    continue
+                refresh_ms = it.get("frame_refresh_ms", it.get("frameRefreshMs"))
+                try:
+                    refresh_ms = int(float(refresh_ms)) if refresh_ms not in (None, "") else None
+                except Exception:
+                    refresh_ms = None
+                if not refresh_ms or refresh_ms < 5000:
+                    refresh_ms = 300000
+                refresh_ms = min(refresh_ms, 3600000)
+                return {
+                    "url": url, "refresh_ms": refresh_ms,
+                    "title": it.get("title") or it.get("name"),
+                    "credit": it.get("credit"), "license": it.get("license"),
+                    "feed_type": it.get("feed_type") or it.get("feedType"),
+                    "composite_id": composite,
+                }
+        return None
+
+    def _fetch_cctv_frame(media: dict, force: bool = False) -> tuple[bytes, str, bool]:
+        camera_id = str(media.get("composite_id") or media.get("id") or "")
+        url = str(media.get("url") or "")
+        refresh_ms = int(media.get("refresh_ms") or 300000)
+        cached = _cctv_frame_get(camera_id, url)
+        now = time.time()
+        if cached and not force:
+            if now - float(cached.get("fetched_at") or 0) < max(5.0, refresh_ms / 1000.0):
+                _cctv_frame_set_status(camera_id, status="cached", source_kind="registered_snapshot", message="", source_url=url)
+                return cached["body"], cached["ctype"], True
+        lock_key = _cctv_frame_cache_key(camera_id, url)
+        with _CCTV_FRAME_LOCK:
+            if lock_key in _CCTV_FRAME_INFLIGHT and cached:
+                return cached["body"], cached["ctype"], True
+            if lock_key not in _CCTV_FRAME_INFLIGHT:
+                _CCTV_FRAME_INFLIGHT.add(lock_key)
+        try:
+            parts = urlsplit(url)
+            if parts.scheme not in ("http", "https") or parts.username or parts.password:
+                raise ValueError("Invalid snapshot URL")
+            host = (parts.hostname or "").lower()
+            if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "169.254.169.254", "metadata.google.internal"):
+                raise ValueError("Snapshot host not allowed")
+            r = requests.get(
+                url,
+                headers={"User-Agent": "DarkSecNightwatch/2.0", "Accept": "image/*,*/*;q=0.8"},
+                timeout=12,
+                stream=True,
+                allow_redirects=True,
+            )
+            r.raise_for_status()
+            ctype = (r.headers.get("content-type") or "application/octet-stream").split(";")[0].strip().lower()
+            if not (ctype.startswith("image/") or ctype in ("application/octet-stream", "binary/octet-stream")):
+                raise ValueError(f"Unsupported snapshot content type: {ctype}")
+            data = r.raw.read(_CCTV_FRAME_MAX_ITEM_BYTES + 1, decode_content=True)
+            if len(data) > _CCTV_FRAME_MAX_ITEM_BYTES:
+                raise ValueError("Snapshot too large")
+            _cctv_frame_store(camera_id, url, data, ctype, refresh_ms)
+            return data, ctype, False
+        except Exception as exc:
+            _cctv_frame_set_status(camera_id, status="error", source_kind="registered_snapshot", message=str(exc)[:220], source_url=url)
+            if cached:
+                return cached["body"], cached["ctype"], True
+            raise
+        finally:
+            with _CCTV_FRAME_LOCK:
+                _CCTV_FRAME_INFLIGHT.discard(lock_key)
+
+    @app.get("/api/cctv/catalog/status")
+    def cctv_catalog_status(request: Request):
+        d = db(request)
+        row = d.one("SELECT id,name,kind,status,error,fetched_at,payload FROM feeds WHERE id='cctv_catalog'")
+        count = 0
+        source_note = ""
+        pack_stats = []
+        disabled_sources = []
+        if row:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+                items = payload.get("items") if isinstance(payload, dict) else payload
+                if isinstance(items, list):
+                    count = len(items)
+                if isinstance(payload, dict):
+                    source_note = payload.get("source_note") or ""
+                    pack_stats = payload.get("pack_stats") or []
+                    disabled_sources = payload.get("disabled_sources") or []
+            except Exception:
+                pass
+        try:
+            files = [str(p) for p in feeds._cctv_catalog_candidates(d)]
+        except Exception:
+            files = []
+        # attach last frame status summary counts + recent errors (operational visibility)
+        with _CCTV_FRAME_LOCK:
+            frame_status = {"cached": 0, "ok": 0, "error": 0}
+            recent_errors = []
+            for v in _CCTV_FRAME_STATUS.values():
+                s = str((v or {}).get("status") or "")
+                if s in frame_status: frame_status[s] += 1
+                elif s: frame_status["ok"] += 1
+                if s == "error":
+                    recent_errors.append({"id": v.get("id") or v.get("camera_id"), "at": v.get("at") or v.get("updated_at"), "message": (v.get("message") or "")[:180]})
+            recent_errors.sort(key=lambda x: x.get("at") or "", reverse=True)
+            recent_errors = recent_errors[:12]
+        try:
+            db_errors = d.recent_cctv_media_errors(limit=12)
+            seen = {str(e.get("id") or "") for e in recent_errors}
+            for e in db_errors:
+                eid = str(e.get("camera_id") or e.get("id") or "")
+                if eid and eid in seen: continue
+                recent_errors.append({"id": eid, "at": e.get("updated_at") or e.get("error_at"), "message": (e.get("message") or "")[:180], "kind": e.get("kind")})
+            recent_errors.sort(key=lambda x: x.get("at") or "", reverse=True)
+            recent_errors = recent_errors[:12]
+        except Exception:
+            pass
+        catalog_refresh_hours = d.all_settings().get("cctv_catalog_refresh_hours") or ""
+        return {"feed": dict(row) if row else None, "item_count": count, "source_note": source_note,
+                "candidate_files": files, "pack_stats": pack_stats, "disabled_sources": disabled_sources,
+                "frame_cache": {"entries": len(_CCTV_FRAME_CACHE), "status_counts": frame_status, "recent_errors": recent_errors},
+                "catalog_refresh_hours": catalog_refresh_hours}
+
+    @app.get("/api/cctv/catalog/packs")
+    def cctv_catalog_packs(request: Request):
+        d = db(request)
+        row = d.one("SELECT payload FROM feeds WHERE ctid='cctv_catalog'".replace("ctid", "id"))
+        payload = {}
+        try:
+            if row:
+                payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            payload = {}
+        pack_stats = payload.get("pack_stats") if isinstance(payload, dict) else []
+        disabled = []
+        try:
+            raw = d.all_settings().get("cctv_catalog_disabled_sources") or "[]"
+            disabled = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            disabled = payload.get("disabled_sources") if isinstance(payload, dict) else []
+        # if no pack_stats yet, derive from candidates
+        if not pack_stats:
+            try:
+                disabled_set = {str(x) for x in (disabled or [])}
+                for p in feeds._cctv_catalog_candidates(d):
+                    pack_stats.append({"source": p.name, "path": str(p), "enabled": p.name not in disabled_set and str(p) not in disabled_set, "count": None, "error": None})
+            except Exception:
+                pass
+        return {"packs": pack_stats, "disabled": disabled}
+
+    @app.put("/api/cctv/catalog/packs")
+    async def cctv_catalog_packs_update(request: Request, body: dict = Body(...)):
+        d = db(request)
+        disabled = body.get("disabled")
+        if not isinstance(disabled, list):
+            raise HTTPException(status_code=400, detail="disabled must be a list of source names/paths")
+        disabled = [str(x) for x in disabled if x is not None and str(x).strip()][:500]
+        d.set_setting("cctv_catalog_disabled_sources", json.dumps(disabled))
+        d.audit("CCTV_CATALOG_PACKS", json.dumps({"disabled_count": len(disabled)}), request.client.host if request.client else "")
+        return {"disabled": disabled}
+
+    @app.post("/api/cctv/catalog/import")
+    async def cctv_catalog_import(request: Request):
+        result = await run_in_threadpool(feeds.refresh, db(request), "cctv_catalog")
+        return {"results": result}
+
+    @app.get("/api/cctv/frame/status")
+    def cctv_frame_status(request: Request, id: str = Query(..., min_length=1, max_length=500)):
+        with _CCTV_FRAME_LOCK:
+            st = dict(_CCTV_FRAME_STATUS.get(id) or {})
+        if not st:
+            st = {"id": id, "status": "unknown"}
+        return st
+
+    @app.get("/api/cctv/frame")
+    async def cctv_frame(request: Request, id: str = Query(..., min_length=1, max_length=500), force: int = Query(0)):
+        d = db(request)
+        media = await run_in_threadpool(_find_registered_cctv_media, d, id)
+        if not media:
+            raise HTTPException(status_code=404, detail="Frame URL not registered for this camera")
+        cam_id = str(media.get("composite_id") or id)
+        try:
+            data, ctype, cached = await run_in_threadpool(_fetch_cctv_frame, media, bool(force))
+        except Exception as exc:
+            _cctv_frame_set_status(cam_id, db=d, status="error", kind="frame", source_kind="registered_snapshot", message=str(exc)[:220], source_url=str(media.get("url") or ""))
+            raise HTTPException(status_code=502, detail=f"Frame fetch failed: {exc}")
+        _cctv_frame_set_status(cam_id, db=d, status="cached" if cached else "ok", kind="frame", source_kind="registered_snapshot", message="", content_type=ctype, bytes=len(data), source_url=str(media.get("url") or ""), refresh_ms=int(media.get("refresh_ms") or 300000))
+        headers = {
+            "Cache-Control": "private, max-age=60",
+            "X-CCTV-Frame": "cached" if cached else "fresh",
+            "X-CCTV-Refresh-Ms": str(media.get("refresh_ms") or 300000),
+        }
+        return Response(content=data, media_type=ctype, headers=headers)
+
+    @app.get("/api/cctv/snapshot")
+    async def cctv_snapshot(request: Request, id: str = Query(..., min_length=1, max_length=500)):
+        # Backward-compatible alias; uses cached/throttled frame logic.
+        return await cctv_frame(request, id=id, force=0)
+
+    def _find_registered_cctv_stream(d: Database, camera_id: str) -> dict | None:
+        cid = str(camera_id or "")
+        if not cid:
+            return None
+        rows = d.query("SELECT id, payload FROM feeds WHERE kind='cctv'")
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except Exception:
+                continue
+            items = payload.get("items") if isinstance(payload, dict) else payload
+            if not isinstance(items, list):
+                continue
+            fid = row["id"]
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                composite = f"{fid}:{it.get('id') or it.get('camera_id') or it.get('title')}"
+                candidates = {composite, str(it.get("id") or ""), str(it.get("camera_id") or "")}
+                if cid not in candidates:
+                    continue
+                feed_type = str(it.get("feed_type") or it.get("feedType") or "").lower()
+                stream = it.get("stream_url") or it.get("streamUrl")
+                url = it.get("url")
+                # Accept explicit stream_url, or url when feed type/extension indicates stream.
+                cand = stream or (url if (feed_type in ("hls", "m3u8", "mp4", "video") or (isinstance(url, str) and re.search(r"\.(m3u8|mp4|m4v|webm)(\?|$)", url, re.I))) else None)
+                if not (isinstance(cand, str) and cand.strip().startswith(("http://", "https://"))):
+                    # still return snapshot metadata for image feeds
+                    return {"composite_id": composite, "feed_type": feed_type or "image", "stream_url": None,
+                            "snapshot_url": it.get("snapshot_url") or it.get("snapshotUrl"), "title": it.get("title"), "credit": it.get("credit"), "license": it.get("license")}
+                stype = feed_type or ("hls" if ".m3u8" in cand.lower() else "mp4")
+                return {"composite_id": composite, "feed_type": stype, "stream_url": cand.strip(),
+                        "snapshot_url": it.get("snapshot_url") or it.get("snapshotUrl"), "title": it.get("title"),
+                        "credit": it.get("credit"), "license": it.get("license")}
+        return None
+
+    def _cctv_stream_allow_hosts(d: Database | None) -> set[str]:
+        if d is None:
+            return set()
+        try:
+            raw = d.all_settings().get("cctv_stream_host_allowlist") or "[]"
+            vals = json.loads(raw) if isinstance(raw, str) else (raw or [])
+            out = set()
+            for v in vals or []:
+                s = str(v or "").strip().lower()
+                if s:
+                    out.add(s)
+            return out
+        except Exception:
+            return set()
+
+    def _cctv_stream_allowed(registered_url: str, candidate_url: str, allow_hosts: set[str] | None = None) -> bool:
+        try:
+            rp = urlsplit(registered_url)
+            cp = urlsplit(candidate_url)
+        except Exception:
+            return False
+        if cp.scheme not in ("http", "https") or cp.username or cp.password:
+            return False
+        rh = (rp.hostname or "").lower()
+        ch = (cp.hostname or "").lower()
+        if not rh or not ch:
+            return False
+        # Primary safety control: same host as the registered stream/manifest source.
+        if ch == rh:
+            return True
+        # Optional operator-configured allowlist for known CDNs/subresources (conservative).
+        for ah in (allow_hosts or set()):
+            if not ah:
+                continue
+            if ah.startswith("."):
+                if ch == ah[1:] or ch.endswith(ah):
+                    return True
+            elif ch == ah or ch.endswith("." + ah):
+                return True
+        return False
+
+    def _cctv_proxy_stream_resource(target_url: str, registered_url: str, request: Request, allow_hosts: set[str] | None = None):
+        if not _cctv_stream_allowed(registered_url, target_url, allow_hosts):
+            raise HTTPException(status_code=400, detail="Stream subresource host not allowed for this registered source")
+        headers = {"User-Agent": "DarkSecNightwatch/2.0", "Accept": "*/*"}
+        rng = request.headers.get("range")
+        if rng:
+            headers["Range"] = rng
+        r = requests.get(target_url, headers=headers, timeout=20, stream=True, allow_redirects=False)
+        # Do not follow redirects to arbitrary hosts.
+        if r.is_redirect or r.is_permanent_redirect:
+            loc = r.headers.get("location") or ""
+            if loc:
+                abs_loc = urljoin(target_url, loc)
+                if not _cctv_stream_allowed(registered_url, abs_loc, allow_hosts):
+                    r.close()
+                    raise HTTPException(status_code=400, detail="Stream redirect target not allowed")
+            r.close()
+            r = requests.get(abs_loc, headers=headers, timeout=20, stream=True, allow_redirects=False)
+        if r.status_code >= 400:
+            detail = f"Upstream stream error {r.status_code}"
+            r.close()
+            raise HTTPException(status_code=502, detail=detail)
+        ctype = (r.headers.get("content-type") or "application/octet-stream").split(";")[0].strip()
+        lower = target_url.lower()
+        if ".m3u8" in lower and "mpegurl" not in ctype.lower() and "text" not in ctype.lower():
+            ctype = "application/vnd.apple.mpegurl"
+        if lower.endswith(".ts") or ".ts?" in lower:
+            ctype = "video/mp2t"
+        if lower.endswith(".mp4") or ".mp4?" in lower:
+            ctype = "video/mp4"
+        out_headers = {"Cache-Control": "no-store", "X-Registered-Stream": "1"}
+        for h in ("content-range", "accept-ranges", "content-length"):
+            v = r.headers.get(h)
+            if v: out_headers[h.title() if h != "content-range" else "Content-Range"] = v
+        if "accept-ranges" not in {k.lower() for k in out_headers}:
+            out_headers["Accept-Ranges"] = "bytes"
+
+        def iter_bytes():
+            try:
+                for chunk in r.iter_content(chunk_size=64 * 1024):
+                    if chunk:
+                        yield chunk
+            finally:
+                r.close()
+        return StreamingResponse(iter_bytes(), status_code=r.status_code, media_type=ctype, headers=out_headers)
+
+    def _rewrite_hls_manifest(text: str, manifest_url: str, camera_id: str, registered_url: str, allow_hosts: set[str] | None = None) -> str:
+        lines = []
+        for raw in text.splitlines():
+            line = raw.strip("\r")
+            if not line:
+                lines.append(line); continue
+            if line.startswith("#"):
+                def repl(m):
+                    uri = m.group(2)
+                    absu = urljoin(manifest_url, uri)
+                    if not _cctv_stream_allowed(registered_url, absu, allow_hosts):
+                        return m.group(0)
+                    enc = base64.urlsafe_b64encode(absu.encode()).decode().rstrip("=")
+                    return f'{m.group(1)}/api/cctv/stream/resource?id={quote(camera_id)}&u={enc}&m={base64.urlsafe_b64encode(manifest_url.encode()).decode().rstrip("=")}{m.group(3)}'
+                line = re.sub(r'(URI=")([^"]+)(")', repl, line)
+                lines.append(line)
+                continue
+            absu = urljoin(manifest_url, line)
+            if _cctv_stream_allowed(registered_url, absu, allow_hosts):
+                enc = base64.urlsafe_b64encode(absu.encode()).decode().rstrip("=")
+                menc = base64.urlsafe_b64encode(manifest_url.encode()).decode().rstrip("=")
+                lines.append(f"/api/cctv/stream/resource?id={quote(camera_id)}&u={enc}&m={menc}")
+            else:
+                lines.append(line)
+        return "\n".join(lines) + "\n"
+
+    @app.get("/api/cctv/stream/info")
+    async def cctv_stream_info(request: Request, id: str = Query(..., min_length=1, max_length=500)):
+        d = db(request)
+        info = await run_in_threadpool(_find_registered_cctv_stream, d, id)
+        if not info:
+            raise HTTPException(status_code=404, detail="Camera not registered")
+        if not info.get("stream_url"):
+            return {"ok": True, "id": info.get("composite_id"), "feed_type": info.get("feed_type") or "image", "stream_url": None,
+                    "snapshot_url": info.get("snapshot_url"), "proxied_url": None, "title": info.get("title"), "credit": info.get("credit"), "license": info.get("license")}
+        stype = info.get("feed_type") or ("hls" if ".m3u8" in str(info["stream_url"]).lower() else "mp4")
+        proxied = f"/api/cctv/stream/manifest?id={quote(str(info.get('composite_id') or id))}" if stype in ("hls", "m3u8") else f"/api/cctv/stream/media?id={quote(str(info.get('composite_id') or id))}"
+        return {"ok": True, "id": info.get("composite_id"), "feed_type": stype, "stream_url": info.get("stream_url"),
+                "snapshot_url": info.get("snapshot_url"), "proxied_url": proxied, "title": info.get("title"), "credit": info.get("credit"), "license": info.get("license")}
+
+    @app.get("/api/cctv/stream/manifest")
+    async def cctv_stream_manifest(request: Request, id: str = Query(..., min_length=1, max_length=500)):
+        d = db(request)
+        info = await run_in_threadpool(_find_registered_cctv_stream, d, id)
+        if not info or not info.get("stream_url"):
+            raise HTTPException(status_code=404, detail="Registered stream not found")
+        target = str(info["stream_url"])
+        cam_id = str(info.get("composite_id") or id)
+        parts = urlsplit(target)
+        if parts.scheme not in ("http", "https"):
+            raise HTTPException(status_code=400, detail="Unsupported stream scheme")
+        allow_hosts = await run_in_threadpool(_cctv_stream_allow_hosts, d)
+        def fetch_text():
+            r = requests.get(target, headers={"User-Agent": "DarkSecNightwatch/2.0", "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*"}, timeout=15)
+            r.raise_for_status()
+            body = r.text
+            if len(body) > 2 * 1024 * 1024:
+                raise ValueError("Manifest too large")
+            return body
+        try:
+            text = await run_in_threadpool(fetch_text)
+        except Exception as exc:
+            _cctv_frame_set_status(cam_id, db=d, status="error", kind="stream", source_kind="registered_stream", message=str(exc)[:220], source_url=target)
+            raise HTTPException(status_code=502, detail=f"Manifest fetch failed: {exc}")
+        _cctv_frame_set_status(cam_id, db=d, status="ok", kind="stream", source_kind="registered_stream", message="", source_url=target)
+        rewritten = _rewrite_hls_manifest(text, target, cam_id, target, allow_hosts)
+        return Response(content=rewritten, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-store", "X-Registered-Stream": "1"})
+
+    @app.get("/api/cctv/stream/resource")
+    async def cctv_stream_resource(request: Request, id: str = Query(..., min_length=1, max_length=500), u: str = Query(..., min_length=1), m: str = Query("", max_length=4000)):
+        d = db(request)
+        info = await run_in_threadpool(_find_registered_cctv_stream, d, id)
+        if not info or not info.get("stream_url"):
+            raise HTTPException(status_code=404, detail="Registered stream not found")
+        try:
+            pad = "=" * (-len(u) % 4)
+            target = base64.urlsafe_b64decode((u + pad).encode()).decode("utf-8", errors="ignore")
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid stream resource reference")
+        registered = str(info["stream_url"])
+        cam_id = str(info.get("composite_id") or id)
+        allow_hosts = await run_in_threadpool(_cctv_stream_allow_hosts, d)
+        # If this is a nested playlist, rewrite it too.
+        if ".m3u8" in target.lower().split("?")[0]:
+            if not _cctv_stream_allowed(registered, target, allow_hosts):
+                raise HTTPException(status_code=400, detail="Stream subresource host not allowed")
+            def fetch_text():
+                r = requests.get(target, headers={"User-Agent": "DarkSecNightwatch/2.0", "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*"}, timeout=15)
+                r.raise_for_status()
+                body = r.text
+                if len(body) > 2 * 1024 * 1024:
+                    raise ValueError("Manifest too large")
+                return body
+            try:
+                text = await run_in_threadpool(fetch_text)
+            except Exception as exc:
+                _cctv_frame_set_status(cam_id, db=d, status="error", kind="stream", source_kind="registered_stream", message=str(exc)[:220], source_url=target)
+                raise HTTPException(status_code=502, detail=f"Manifest fetch failed: {exc}")
+            rewritten = _rewrite_hls_manifest(text, target, cam_id, registered, allow_hosts)
+            return Response(content=rewritten, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-store", "X-Registered-Stream": "1"})
+        return await run_in_threadpool(_cctv_proxy_stream_resource, target, registered, request, allow_hosts)
+
+    @app.get("/api/cctv/stream/media")
+    async def cctv_stream_media(request: Request, id: str = Query(..., min_length=1, max_length=500)):
+        d = db(request)
+        info = await run_in_threadpool(_find_registered_cctv_stream, d, id)
+        if not info or not info.get("stream_url"):
+            raise HTTPException(status_code=404, detail="Registered stream not found")
+        target = str(info["stream_url"])
+        cam_id = str(info.get("composite_id") or id)
+        allow_hosts = await run_in_threadpool(_cctv_stream_allow_hosts, d)
+        try:
+            resp = await run_in_threadpool(_cctv_proxy_stream_resource, target, target, request, allow_hosts)
+            _cctv_frame_set_status(cam_id, db=d, status="ok", kind="stream", source_kind="registered_stream", message="", source_url=target)
+            return resp
+        except HTTPException as exc:
+            _cctv_frame_set_status(cam_id, db=d, status="error", kind="stream", source_kind="registered_stream", message=str(exc.detail)[:220], source_url=target)
+            raise
+        except Exception as exc:
+            _cctv_frame_set_status(cam_id, db=d, status="error", kind="stream", source_kind="registered_stream", message=str(exc)[:220], source_url=target)
+            raise HTTPException(status_code=502, detail=f"Stream fetch failed: {exc}")
+
     # ---------------------------------------------------------------- intel
     @app.get("/api/intel/overview")
     def intel_overview(request: Request):
@@ -952,6 +1700,28 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         except Exception:
             lat, lon = 0.0, 0.0
         return {"items": intel.live_satellites(d, lat, lon)}
+
+    @app.get("/api/intel/satellite-passes")
+    def intel_satellite_passes(request: Request,
+                               hours: int = Query(12, ge=1, le=48),
+                               min_elevation: float = Query(10.0, ge=0.0, le=90.0),
+                               limit: int = Query(40, ge=1, le=200),
+                               q: str = ""):
+        d = db(request)
+        s = d.all_settings()
+        try:
+            lat = float(s.get("lat")); lon = float(s.get("lon"))
+        except (TypeError, ValueError):
+            lat = lon = None
+        if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise HTTPException(400, "operator position is missing or invalid; set latitude/longitude in settings")
+        passes = intel.next_satellite_passes(
+            d, lat, lon, hours=hours, min_elevation_deg=min_elevation,
+            limit=limit, query=q,
+        )
+        return {"items": passes, "count": len(passes),
+                "observer": {"lat": lat, "lon": lon},
+                "hours": hours, "min_elevation_deg": min_elevation}
 
     @app.get("/api/intel/nasa")
     def intel_nasa(request: Request):
@@ -1011,13 +1781,34 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         return {"started": True, "sync": autosync.engine.snapshot(db(request))}
 
     @app.get("/api/map/intel")
-    def map_intel(request: Request):
+    def map_intel(request: Request,
+                  bbox: str = Query("", max_length=120),
+                  limit_cctv: int = Query(8000, ge=0, le=20000),
+                  limit_cables: int = Query(5000, ge=0, le=20000),
+                  limit_maritime: int = Query(400, ge=0, le=5000)):
         d = db(request)
         s = d.all_settings()
         try:
             lat = float(s.get("lat") or 0); lon = float(s.get("lon") or 0)
         except Exception:
             lat, lon = 0.0, 0.0
+        bbox_vals = None
+        if bbox:
+            try:
+                parts = [float(x) for x in bbox.split(",")]
+                if len(parts) == 4:
+                    minlon, minlat, maxlon, maxlat = parts
+                    if minlon <= maxlon and minlat <= maxlat:
+                        bbox_vals = (minlon, minlat, maxlon, maxlat)
+            except Exception:
+                bbox_vals = None
+        def in_bbox(latv, lonv):
+            if not bbox_vals: return True
+            try:
+                la = float(latv); lo = float(lonv)
+            except Exception:
+                return False
+            return (bbox_vals[0] <= lo <= bbox_vals[2]) and (bbox_vals[1] <= la <= bbox_vals[3])
         events = intel.map_events(d)
         # Keep every hazard point but cap the two conflict sets separately so
         # monthly verified events are not buried by the live media stream.
@@ -1030,6 +1821,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         features = []
         for ev in events:
             if ev.get("lat") is None or ev.get("lon") is None:
+                continue
+            if not in_bbox(ev["lat"], ev["lon"]):
                 continue
             features.append({
                 "type": "Feature",
@@ -1047,19 +1840,20 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     "url": ev.get("url") or "", "summary": ev.get("summary") or "",
                 },
             })
-        maritime = intel.maritime_positions(d, limit=400)
-        cables = intel.cable_features(d, limit=1500)
-        cctv = intel.cctv_features(d, limit=1500)
+        maritime = [m for m in intel.maritime_positions(d, limit=max(0, limit_maritime)) if in_bbox(m.get("lat"), m.get("lon"))]
+        cables = [c for c in intel.cable_features(d, limit=max(0, limit_cables)) if in_bbox(c.get("lat"), c.get("lon"))]
+        cctv = [c for c in intel.cctv_features(d, limit=max(0, limit_cctv)) if in_bbox(c.get("lat"), c.get("lon"))]
         return {
             "type": "FeatureCollection",
             "generated_at": utcnow(),
             "summary": {**intel.map_summary(events), "maritime": len(maritime), "cables": len(cables), "cctv": len(cctv)},
             "features": features,
-            "aircraft": intel.live_aircraft(db(request), limit=60),
-            "satellites": intel.live_satellites(db(request), lat, lon, limit=30),
+            "aircraft": intel.live_aircraft(d, limit=60),
+            "satellites": intel.live_satellites(d, lat, lon, limit=30),
             "maritime": maritime,
             "cables": cables,
             "cctv": cctv,
+            "bbox_applied": bool(bbox_vals),
         }
 
     # -------------------------------------------------------------- library
@@ -2069,6 +2863,13 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         rows = d.query("SELECT * FROM vitals WHERE patient_id=? ORDER BY ts DESC LIMIT 200", (patient_id,))
         return {"items": [dict(r) for r in rows]}
 
+    @app.get("/api/medical/patients/{patient_id}/medications")
+    def patient_medications(request: Request, patient_id: int):
+        d = db(request)
+        rows = d.query("SELECT * FROM medication_log WHERE patient_id=? ORDER BY ts DESC LIMIT 200",
+                       (patient_id,))
+        return {"items": [dict(r) for r in rows]}
+
     @app.get("/api/medical/summary")
     def medical_summary(request: Request):
         d = db(request)
@@ -2077,8 +2878,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         for r in rows:
             triage[r["triage"] or "UNASSESSED"] = triage.get(r["triage"] or "UNASSESSED", 0) + 1
         recent = d.query("SELECT * FROM vitals ORDER BY ts DESC LIMIT 10")
+        meds = d.query("SELECT * FROM medication_log ORDER BY ts DESC LIMIT 10")
         return {"patients": len(rows), "triage": triage,
-                "recent_vitals": [dict(r) for r in recent]}
+                "recent_vitals": [dict(r) for r in recent],
+                "recent_medications": [dict(r) for r in meds]}
 
     # --------------------------------------------------------------- vault
     @app.get("/api/vault/status")

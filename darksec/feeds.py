@@ -14,6 +14,7 @@ import io
 import json
 import re
 import threading
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -54,9 +55,11 @@ STALE_AFTER = {
     "celestrak_tle": 24 * 3600,
     "crisisgroup": 24 * 3600,
     "war_on_the_rocks": 24 * 3600,
-    "smithsonian_volcano": 14 * 86400,
+    "smithsonian_volcano": 48 * 3600,
     "who_don": 14 * 86400,
-    "safecast": 30 * 86400,
+    "safecast": 48 * 3600,
+    "eonet": 48 * 3600,
+    "thehackernews": 48 * 3600,
 }
 DATA_STALE_AFTER = {
     "gdacs": 48 * 3600,
@@ -87,9 +90,11 @@ DATA_STALE_AFTER = {
     "celestrak_tle": 24 * 3600,
     "crisisgroup": 21 * 86400,
     "war_on_the_rocks": 14 * 86400,
-    "smithsonian_volcano": 14 * 86400,
+    "smithsonian_volcano": 48 * 3600,
     "who_don": 14 * 86400,
-    "safecast": 30 * 86400,
+    "safecast": 48 * 3600,
+    "eonet": 48 * 3600,
+    "thehackernews": 48 * 3600,
 }
 DEFAULT_STALE_AFTER = 6 * 3600
 
@@ -453,24 +458,37 @@ def _parse_opensky(payload: dict) -> list[dict]:
 
 
 def _parse_celestrak(raw: str) -> list[dict]:
-    """Parse CelesTrak TLE text (one or more concatenated TLE sets)."""
+    """Parse CelesTrak TLE text (2-line or name + 2-line sets)."""
     items = []
     lines = [l.strip() for l in (raw or "").splitlines() if l.strip()]
     idx = 0
-    while idx + 1 < len(lines):
-        l1, l2 = lines[idx], lines[idx + 1]
-        if not l1.startswith("1 "):
+    while idx < len(lines):
+        name = None
+        if lines[idx].startswith("1 ") and idx + 1 < len(lines) and lines[idx + 1].startswith("2 "):
+            # The active catalogue is served without name lines.
+            l1, l2 = lines[idx], lines[idx + 1]
+            idx += 2
+        elif (idx + 2 < len(lines) and lines[idx + 1].startswith("1 ")
+              and lines[idx + 2].startswith("2 ")):
+            # Group endpoints (stations, weather, amateur) include a name line.
+            name = lines[idx]
+            l1, l2 = lines[idx + 1], lines[idx + 2]
+            idx += 3
+        else:
             idx += 1
             continue
         norad = None
         m = re.match(r"1\s+(\d{5})U", l1)
         if m:
             norad = int(m.group(1))
-        name = l2[8:16].strip() if len(l2) > 8 else ""
+        label = (name or "").strip()
+        if not label:
+            # Older payloads also stored the inclination here; prefer NORAD.
+            label = f"NORAD {norad}" if norad else "UNKNOWN"
         items.append({
-            "title": f"SAT {name or ('NORAD ' + str(norad))}",
+            "title": label,
             "norad": norad,
-            "name": name or (f"NORAD {norad}" if norad else "UNKNOWN"),
+            "name": label,
             "line1": l1,
             "line2": l2,
             "source": "CelesTrak",
@@ -478,7 +496,6 @@ def _parse_celestrak(raw: str) -> list[dict]:
             "time": utcnow(),
             "url": f"https://celestrak.org/norad/tle/{norad}" if norad else None,
         })
-        idx += 2
     return items
 
 
@@ -517,6 +534,23 @@ def _parse_air_quality(payload: dict) -> list[dict]:
         sev = "ALERT"
     else:
         sev = "INFO"
+    trend = []
+    hourly_time = hourly.get("time") or []
+    hourly_aqi = hourly.get("us_aqi") or []
+    current_stamp = str(cur.get("time")
+                        or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00"))[:13]
+    for idx, stamp in enumerate(hourly_time[:120]):
+        if str(stamp)[:13] < current_stamp:
+            continue
+        value = hourly_aqi[idx] if idx < len(hourly_aqi) else None
+        if value is None:
+            continue
+        if len(trend) >= 72:
+            break
+        try:
+            trend.append({"time": stamp, "aqi": int(float(value))})
+        except (TypeError, ValueError):
+            continue
     items.append({
         "title": f"Air quality US AQI {int(aqi)}",
         "time": cur.get("time") or datetime.now(timezone.utc).isoformat(),
@@ -524,6 +558,7 @@ def _parse_air_quality(payload: dict) -> list[dict]:
         "aqi": int(level),
         "pm2_5": cur.get("pm2_5"),
         "category": _aqi_category(level),
+        "trend": trend,
         "source": "Open-Meteo",
         "severity": sev,
         "url": "https://air-quality-api.open-meteo.com/",
@@ -545,6 +580,27 @@ _WMO = {
     85: "light snow showers", 86: "snow showers",
     95: "thunderstorm", 96: "thunderstorm with hail", 99: "severe thunderstorm with hail",
 }
+
+
+def _daily_forecast(payload: dict) -> list[dict]:
+    """Preserve the Open-Meteo 3-day daily arrays the feed already requests."""
+    daily = (payload or {}).get("daily") or {}
+    dates = daily.get("time") or []
+    out = []
+    for idx, date in enumerate(dates):
+        def at(name):
+            values = daily.get(name) or []
+            return values[idx] if idx < len(values) else None
+        code = at("weather_code")
+        out.append({
+            "date": date,
+            "temp_max_c": at("temperature_2m_max"),
+            "temp_min_c": at("temperature_2m_min"),
+            "precip_mm": at("precipitation_sum"),
+            "weather_code": code,
+            "condition": _WMO.get(int(code), "") if code is not None else "",
+        })
+    return out
 
 
 def _parse_weather(payload: dict) -> list[dict]:
@@ -579,6 +635,7 @@ def _parse_weather(payload: dict) -> list[dict]:
         "precip_mm": cur.get("precipitation"),
         "pressure_hpa": cur.get("pressure_msl"),
         "condition": cond,
+        "forecast": _daily_forecast(payload),
         "source": "Open-Meteo",
         "severity": "INFO",
         "url": "https://open-meteo.com/",
@@ -1206,11 +1263,81 @@ def _refresh_rsoe(db: Database, row) -> list[dict]:
     return items
 
 
+def _parse_nasa_firms(raw: str, source: str = "NASA FIRMS") -> list[dict]:
+    """Parse NASA FIRMS area CSV (operator-configured BYOK URL) or JSON/GeoJSON.
+    FIRMS requires an API key (MAP_KEY) in the request URL; DarkSec never ships keys.
+    Typical CSV columns: latitude,longitude,brightness,scan,track,acq_date,acq_time,
+    satellite,instrument,confidence,version,bright_t31,frp,daynight
+    """
+    text = (raw or "").strip()
+    if not text:
+        return []
+    # JSON/GeoJSON fallback
+    if text[0] in "[{":
+        try:
+            payload = json.loads(text)
+            items = _parse_geojson_items(payload, source, "fire", default_severity="ALERT")
+            for it in items:
+                it.setdefault("kind", "event")
+                it.setdefault("category", "fire")
+                if not it.get("severity"): it["severity"] = "ALERT"
+            return items
+        except Exception:
+            pass
+    # CSV
+    try:
+        rows = list(csv.DictReader(io.StringIO(text)))
+    except Exception:
+        return []
+    items = []
+    for i, row in enumerate(rows[:5000]):
+        if not isinstance(row, dict): continue
+        lat = _as_float(row.get("latitude") or row.get("lat"))
+        lon = _as_float(row.get("longitude") or row.get("lon") or row.get("lng"))
+        if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            continue
+        acq_date = str(row.get("acq_date") or "").strip()
+        acq_time = str(row.get("acq_time") or "").strip().zfill(4)
+        ts = utcnow()
+        if acq_date:
+            try:
+                hh, mm = (acq_time[:2], acq_time[2:4]) if len(acq_time) >= 4 else ("00","00")
+                ts = datetime(int(acq_date[:4]), int(acq_date[5:7]), int(acq_date[8:10]), int(hh), int(mm), tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                ts = acq_date
+        conf = row.get("confidence")
+        frp = _as_float(row.get("frp"))
+        sat = row.get("satellite") or row.get("instrument") or ""
+        sev = "ALERT"
+        try:
+            if conf is not None and str(conf).strip().isdigit() and int(conf) >= 80: sev = "SEVERE"
+        except Exception:
+            if str(conf).lower() in ("h", "high"): sev = "SEVERE"
+        title_sat = f" ({sat})" if sat else ""
+        items.append({
+            "id": f"firms-{acq_date}-{i}-{lat:.4f}-{lon:.4f}",
+            "kind": "event",
+            "category": "fire",
+            "title": f"Thermal anomaly / fire detection{title_sat}",
+            "lat": lat, "lon": lon, "time": ts,
+            "summary": f"NASA FIRMS (operator-configured, BYOK). Confidence {conf or '?'}; FRP {frp if frp is not None else '?'} MW. Verify locally before action.",
+            "severity": sev,
+            "source": source,
+            "confidence": conf, "frp": frp, "satellite": row.get("satellite"), "instrument": row.get("instrument"),
+            "daynight": row.get("daynight"), "brightness": row.get("brightness"),
+            "url": "https://firms.modaps.eosdis.nasa.gov/",
+            "raw": {k: v for k, v in row.items() if v not in (None, "")},
+        })
+    return items
+
+
 def _normalize(kind: str, raw: str, source: str = "RSS") -> list[dict]:
     if kind == "rss":
         return _parse_rss(raw, source)
     if kind == "rsoe":
         return _parse_rsoe(raw, source)
+    if kind in ("nasa_firms", "firms", "firms_csv"):
+        return _parse_nasa_firms(raw, source)
     try:
         payload = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
@@ -1289,7 +1416,14 @@ def _feed_url(db: Database, row) -> str:
 
 
 def _refresh_overpass_cctv(db: Database, row) -> list[dict]:
-    """Operator-triggered OSM surveillance camera locations via Overpass (ODbL). Locations only, no previews/streams."""
+    """Operator-triggered OSM surveillance camera locations via Overpass (ODbL). Locations only, no previews/streams.
+
+    The Overpass query is centered on the operator's configured position. To
+    avoid showing only a tiny "near me" bubble, the radius is configurable via
+    Settings key `cctv_radius_km` (default 50 km, clamped 10..500 km). Larger
+    radii are heavier for public Overpass mirrors and may time out; cached
+    camera locations remain visible on the map regardless of refresh status.
+    """
     s = db.all_settings()
     try:
         lat = float(s.get("lat")); lon = float(s.get("lon"))
@@ -1297,32 +1431,52 @@ def _refresh_overpass_cctv(db: Database, row) -> list[dict]:
         lat = lon = None
     if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("operator position is missing or invalid; set a valid latitude/longitude before refreshing CCTV locations")
-    radius_m = 25000  # 25km default; keep Overpass load reasonable
-    query = f"""[out:json][timeout:25];
+    try:
+        radius_km = float(s.get("cctv_radius_km") or 50)
+    except Exception:
+        radius_km = 50.0
+    radius_km = max(10.0, min(500.0, radius_km))
+    radius_m = int(radius_km * 1000)
+    # Nodes cover most mapped surveillance cameras; including ways/relations is
+    # more complete but significantly heavier on public mirrors.
+    query = f"""[out:json][timeout:35];
 (
   node["man_made"="surveillance"](around:{radius_m},{lat:.5f},{lon:.5f});
   way["man_made"="surveillance"](around:{radius_m},{lat:.5f},{lon:.5f});
   relation["man_made"="surveillance"](around:{radius_m},{lat:.5f},{lon:.5f});
 );
 out center tags;"""
+    # Public Overpass mirrors differ in load and availability. Try several
+    # global instances with a bounded per-attempt timeout so one dead mirror
+    # cannot hang the whole refresh. overpass.osm.ch is omitted (Switzerland).
     overpass_urls = [
         "https://overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
-        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+        "https://lz4.overpass-api.de/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
+        "https://overpass.nchc.org.tw/api/interpreter",
+        "https://overpass.osm.jp/api/interpreter",
     ]
-    last_exc = None
+    deadline = time.monotonic() + 90.0
+    failures: list[str] = []
     resp = None
     for ou in overpass_urls:
+        remaining = deadline - time.monotonic()
+        if remaining <= 5:
+            break
+        host = ou.split("/")[2]
         try:
-            resp = requests.post(ou, data={"data": query}, headers=UA, timeout=40)
+            resp = requests.post(ou, data={"data": query}, headers=UA,
+                                 timeout=(min(8.0, remaining), min(35.0, remaining)))
             resp.raise_for_status()
             break
         except Exception as exc:
-            last_exc = exc
+            failures.append(f"{host}: {exc}")
             resp = None
             continue
     if resp is None:
-        raise last_exc or RuntimeError("Overpass unavailable")
+        detail = "; ".join(failures[:4]) or "no mirror attempted"
+        raise RuntimeError(f"Overpass mirrors unavailable ({detail}). Cached camera locations remain readable; try again later or set cctv_radius_km smaller.")
     data = resp.json()
     items = []
     for el in (data.get("elements") or []):
@@ -1452,6 +1606,248 @@ def _ensure_submarine_cables_geojson() -> "Path | None":
     return target if target.is_file() else None
 
 
+def _cctv_catalog_candidates(db: Database) -> list[Path]:
+    """Local CCTV catalog files (operator-controlled, offline-capable).
+
+    Includes files under fielddata/maps/cctv* and, when present on this
+    machine, gods-eye-view curated/config camera catalogs. Local copies/imports
+    are preferred for deployments; direct reads from sibling repos are a
+    convenience for local development.
+    """
+    from . import config as _config
+    out: list[Path] = []
+    resource_root = Path(getattr(_config, "RESOURCE_ROOT", Path(".")))
+    data_dir = Path(getattr(_config, "DATA_DIR", resource_root / "fielddata"))
+    roots = [
+        data_dir / "maps" / "cctv_catalogs",
+        data_dir / "maps" / "cctv",
+        data_dir / "cctv_catalogs",
+        resource_root / "maps" / "cctv_catalogs",
+        resource_root / "maps" / "cctv",
+    ]
+    try:
+        settings = db.all_settings() if hasattr(db, "all_settings") else {}
+        extra = str((settings or {}).get("cctv_catalog_dir") or (settings or {}).get("cctv_catalog_path") or "").strip()
+        if extra:
+            ep = Path(extra).expanduser()
+            if ep.is_file():
+                out.append(ep)
+            elif ep.is_dir():
+                out.extend(sorted(ep.glob("*.json")))
+    except Exception:
+        pass
+    for root in roots:
+        try:
+            if root.is_dir():
+                out.extend(sorted(root.glob("*.json")))
+        except Exception:
+            pass
+    # Optional local sibling: gods-eye-view curated CCTV packs/configs.
+    gev = Path("/home/null/gods-eye-view")
+    try:
+        if gev.is_dir():
+            out.extend(sorted((gev / "config").glob("cctv_sources*.json")))
+            q = gev / "public" / "quebec-cameras.json"
+            if q.is_file():
+                out.append(q)
+    except Exception:
+        pass
+    seen = set()
+    uniq = []
+    for p in out:
+        try:
+            rp = str(p.resolve())
+        except Exception:
+            rp = str(p)
+        if rp in seen or not p.is_file():
+            continue
+        seen.add(rp)
+        uniq.append(p)
+    return uniq
+
+
+def _extract_cctv_catalog_records(data) -> list[dict]:
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)]
+    if not isinstance(data, dict):
+        return []
+    for k in ("cameras", "sources", "items", "data", "records", "features"):
+        v = data.get(k)
+        if isinstance(v, list):
+            if k == "features" or (v and isinstance(v[0], dict) and v[0].get("type") == "Feature"):
+                recs = []
+                for f in v:
+                    if not isinstance(f, dict):
+                        continue
+                    props = f.get("properties") if isinstance(f.get("properties"), dict) else {}
+                    geom = f.get("geometry") if isinstance(f.get("geometry"), dict) else {}
+                    coords = geom.get("coordinates") if isinstance(geom.get("coordinates"), (list, tuple)) else []
+                    rec = dict(props)
+                    if len(coords) >= 2 and rec.get("lon") is None and rec.get("lng") is None:
+                        try:
+                            rec["lon"] = float(coords[0]); rec["lat"] = float(coords[1])
+                        except Exception:
+                            pass
+                    if f.get("id") and not rec.get("id"):
+                        rec["id"] = f.get("id")
+                    recs.append(rec)
+                return recs
+            return [r for r in v if isinstance(r, dict)]
+    if "lat" in data and ("lon" in data or "lng" in data):
+        return [data]
+    return []
+
+
+def _normalize_cctv_catalog_item(rec: dict, source_file: str) -> dict | None:
+    try:
+        lat = rec.get("lat", rec.get("latitude"))
+        lon = rec.get("lon", rec.get("lng", rec.get("longitude")))
+        if lat is None or lon is None:
+            return None
+        lat = float(lat); lon = float(lon)
+    except Exception:
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    name = (rec.get("name") or rec.get("nameEn") or rec.get("title") or rec.get("label")
+            or rec.get("camera_id") or rec.get("id") or "Camera")
+    provider = (rec.get("provider") or rec.get("operator") or rec.get("operator_name")
+                or rec.get("source") or rec.get("sourceKind") or "catalog")
+    cam_id = (rec.get("camera_id") or rec.get("id") or rec.get("key")
+              or f"{Path(source_file).stem}:{round(lat,5)}:{round(lon,5)}:{str(name)[:40]}")
+    snapshot = rec.get("snapshotUrl") or rec.get("snapshot_url") or rec.get("imageUrl") or rec.get("image_url")
+    raw_url = rec.get("url") or rec.get("feed_url")
+    view_url = rec.get("viewerUrl") or rec.get("viewer_url") or raw_url or snapshot
+    heading = rec.get("headingDeg", rec.get("heading_deg", rec.get("heading", rec.get("direction"))))
+    try:
+        heading = float(heading) if heading not in (None, "") else None
+    except Exception:
+        heading = None
+    credit = rec.get("credit") or rec.get("attribution") or rec.get("operator")
+    license_ = rec.get("license") or rec.get("licence")
+    feed_type_raw = str(rec.get("feedType") or rec.get("feed_type") or "").lower().strip()
+    raw_url_s = str(raw_url or "")
+    is_stream = feed_type_raw in ("hls", "m3u8", "mp4", "video", "stream", "mpegts") or bool(re.search(r'\.(m3u8|mp4|m4v|webm|ts)(\?|$)', raw_url_s, re.I))
+    if feed_type_raw:
+        feed_type = feed_type_raw
+    elif is_stream:
+        feed_type = "hls" if ".m3u8" in raw_url_s.lower() else "mp4"
+    elif snapshot or (isinstance(view_url, str) and any(x in str(view_url).lower() for x in (".jpg", ".jpeg", ".png", "snapshot", "image"))):
+        feed_type = "image"
+    else:
+        feed_type = ""
+    stream_url = raw_url_s if is_stream and raw_url_s.startswith(("http://", "https://")) else ""
+    item = {
+        "id": str(cam_id),
+        "camera_id": str(cam_id),
+        "kind": "cctv",
+        "title": str(name),
+        "lat": lat,
+        "lon": lon,
+        "url": str(rec.get("viewerUrl") or rec.get("viewer_url") or snapshot or raw_url or ""),
+        "summary": rec.get("notes") or rec.get("description") or rec.get("category") or "",
+        "source": str(provider),
+        "provider": str(provider),
+        "status": str(rec.get("status") or "catalog"),
+        "surveillance_type": str(rec.get("surveillance_type") or rec.get("kind") or "camera"),
+        "import_source": Path(source_file).name,
+        "source_kind": str(rec.get("sourceKind") or rec.get("source_kind") or "imported_catalog"),
+        "time": rec.get("updated_at") or rec.get("time") or utcnow(),
+    }
+    if snapshot:
+        item["snapshot_url"] = str(snapshot)
+    if feed_type:
+        item["feed_type"] = str(feed_type)
+    if stream_url:
+        item["stream_url"] = stream_url
+    if raw_url_s and not stream_url and raw_url_s.startswith(("http://", "https://")) and not item.get("url"):
+        item["url"] = raw_url_s
+    if credit:
+        item["credit"] = str(credit)
+    if license_:
+        item["license"] = str(license_)
+    if heading is not None and -360 <= heading <= 360:
+        item["heading_deg"] = heading
+        item["direction"] = heading
+    for src, dst in (("headingConfidence", "heading_confidence"), ("pitchDeg", "pitch_deg"),
+                     ("fovDeg", "fov_deg"), ("rangeM", "range_m"),
+                     ("mountHeightM", "mount_height_m"), ("groundElevationM", "ground_elevation_m"),
+                     ("region", "region"), ("city", "city")):
+        v = rec.get(src, rec.get(dst))
+        if v is not None and v != "":
+            item[dst] = v
+    return item
+
+
+def _cctv_catalog_disabled(db: Database) -> set[str]:
+    try:
+        settings = db.all_settings() if hasattr(db, "all_settings") else {}
+        raw = (settings or {}).get("cctv_catalog_disabled_sources") or "[]"
+        if isinstance(raw, list):
+            vals = raw
+        else:
+            vals = json.loads(str(raw) or "[]")
+        return {str(v) for v in vals if v}
+    except Exception:
+        return set()
+
+
+def _refresh_cctv_catalog(db: Database, row) -> tuple[list[dict], dict]:
+    """Import local/curated CCTV catalogs into a cached map layer.
+
+    Reads JSON catalogs from fielddata/maps/cctv_catalogs and, when present,
+    from a local gods-eye-view checkout (config cctv_sources + quebec). This
+    provides broad offline-capable camera coverage; each item preserves source
+    credit/license metadata when present. Operators should verify source terms
+    before redistributing imported data.
+    """
+    files = _cctv_catalog_candidates(db)
+    disabled = _cctv_catalog_disabled(db)
+    pack_stats = []
+    if not files:
+        return [], {"pack_stats": [], "disabled_sources": sorted(disabled)}
+    items = []
+    seen_ids = set()
+    errors = []
+    for path in files:
+        name = path.name
+        enabled = name not in disabled and str(path) not in disabled
+        stat = {"source": name, "path": str(path), "enabled": enabled, "count": 0, "error": None}
+        if not enabled:
+            pack_stats.append(stat)
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception as exc:
+            stat["error"] = str(exc)
+            errors.append(f"{name}: {exc}")
+            pack_stats.append(stat)
+            continue
+        added = 0
+        for rec in _extract_cctv_catalog_records(data):
+            item = _normalize_cctv_catalog_item(rec, str(path))
+            if not item:
+                continue
+            iid = str(item.get("id") or item.get("camera_id") or "")
+            if iid in seen_ids:
+                iid = f"{iid}:{Path(str(path)).stem}"
+                item["id"] = iid
+                item["camera_id"] = iid
+            if iid in seen_ids:
+                continue
+            seen_ids.add(iid)
+            items.append(item)
+            added += 1
+        stat["count"] = added
+        pack_stats.append(stat)
+    if not items and errors and not any(s.get("enabled") and s.get("count", 0) > 0 for s in pack_stats):
+        # All enabled sources failed and produced nothing.
+        if not any(s.get("enabled") for s in pack_stats):
+            return [], {"pack_stats": pack_stats, "disabled_sources": sorted(disabled)}
+        raise RuntimeError("CCTV catalog import found no valid cameras (" + "; ".join(errors[:3]) + ")")
+    return items, {"pack_stats": pack_stats, "disabled_sources": sorted(disabled), "imported_at": utcnow()}
+
+
 def _refresh_maritime_scaffold(db: Database, row) -> list[dict]:
     """Load operator-provided maritime/AIS data from local GeoJSON/JSON files.
     Global real-time AIS usually requires a keyed/provider source; this makes the
@@ -1512,6 +1908,18 @@ def refresh(db: Database, feed_id: str | None = None) -> list[dict]:
                     (utcnow(), json.dumps({"items": items, "fetched_at": utcnow(), "source_note": "OpenStreetMap via Overpass API (locations only; no live previews)"}), row["id"]),
                 )
                 results.append({"id": row["id"], "status": "OK", "count": len(items)})
+                continue
+            if not url and fid == "cctv_catalog":
+                items, meta = _refresh_cctv_catalog(db, row)
+                note = "Local/imported CCTV catalogs (verify source terms/attribution before redistribution)"
+                payload = {"items": items, "fetched_at": utcnow(), "source_note": note}
+                if isinstance(meta, dict):
+                    payload.update(meta)
+                db.execute(
+                    "UPDATE feeds SET fetched_at=?, status='OK', payload=?, error=NULL WHERE id=?",
+                    (utcnow(), json.dumps(payload), row["id"]),
+                )
+                results.append({"id": row["id"], "status": "OK", "count": len(items), "packs": len((meta or {}).get("pack_stats") or [])})
                 continue
             if not url and fid == "infra_cables":
                 try:
@@ -1597,7 +2005,18 @@ def refresh(db: Database, feed_id: str | None = None) -> list[dict]:
                             continue
                         raise
                 else:
-                    resp = requests.get(url, headers=UA, timeout=TIMEOUT)
+                    if fid == "gdacs":
+                        # GDACS's WAF rejects browser-like User-Agent strings
+                        # (including the app's standard UA) with an HTML
+                        # "Request Rejected" page. A plain client UA gets JSON.
+                        resp = requests.get(
+                            url,
+                            headers={"User-Agent": "python-requests/2.32.3",
+                                     "Accept": "application/json"},
+                            timeout=TIMEOUT,
+                        )
+                    else:
+                        resp = requests.get(url, headers=UA, timeout=TIMEOUT)
                     resp.raise_for_status()
                     raw = resp.text
                     items = _normalize(row["kind"], raw, row["name"])
