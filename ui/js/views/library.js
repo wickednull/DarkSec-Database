@@ -361,7 +361,7 @@ async function pdfViewer(docId, doc) {
     { value: "200", label: "200%" },
   ], "fit");
 
-  const fsBtn = btn("FULL SCREEN", { size: "sm", icon: "maximize", onClick: async () => { wrap.classList.toggle("pdf-fs", !wrap.classList.contains("pdf-fs")); } });
+  const fsBtn = btn("FULL SCREEN", { size: "sm", icon: "maximize", onClick: async () => { shell.classList.toggle("pdf-fs", !shell.classList.contains("pdf-fs")); } });
   const toolbar = h("div", { class: "pdf-toolbar" },
     prev, next, pageInput, pageInfo, h("span", { class: "grow" }), title,
     rotLeft, rotRight, zoomOut, zoomIn, fit, fitPage, zoomSelect,
@@ -480,7 +480,7 @@ async function pdfViewer(docId, doc) {
     node: wrap,
     cleanup() {
       disposed = true;
-      wrap.classList.remove("pdf-fs");
+      shell.classList.remove("pdf-fs");
       document.removeEventListener("keydown", keyHandler);
       window.removeEventListener("resize", onResize);
       try { renderTask?.cancel(); } catch {}
