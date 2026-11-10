@@ -386,6 +386,8 @@ async function pdfViewer(docId, doc) {
     const task = lib.getDocument({
       url: `/api/library/doc/${docId}/file`,
       withCredentials: true,
+      disableRange: true,
+      disableAutoFetch: false,
       cMapUrl: "/ui/vendor/pdfjs/cmaps/",
       cMapPacked: true,
       standardFontDataUrl: "/ui/vendor/pdfjs/standard_fonts/",
@@ -395,7 +397,24 @@ async function pdfViewer(docId, doc) {
     updateControls();
     await draw();
   } catch (err) {
-    stage.replaceChildren(h("div", { class: "callout danger", text: `Could not render PDF: ${err.message || err}` }));
+    const msg = err?.message || String(err || "unknown error");
+    const box = h("div", { class: "col gap-8" },
+      h("div", { class: "callout danger", text: `Could not render PDF in the console viewer: ${msg}` }),
+      h("div", { class: "small muted", text: "The file may be scanned, encrypted, or use a PDF feature this viewer cannot handle. Try opening it in a new tab or downloading it." }),
+      h("div", { class: "row wrap gap-6" },
+        btn("OPEN IN NEW TAB", { size: "sm", icon: "link", onClick: () => window.open(`/api/library/doc/${docId}/file`, "_blank", "noopener") }),
+        btn("DOWNLOAD", { size: "sm", icon: "download", onClick: () => { location.href = `/api/library/doc/${docId}/file?download=true`; } }),
+      ),
+    );
+    if (doc.text_available) {
+      const pre = h("pre", { style: { whiteSpace: "pre-wrap", maxHeight: "50vh", overflow: "auto", marginTop: "8px" }, text: "Loading extracted text…" });
+      box.appendChild(h("details", { class: "small", open: true, style: { marginTop: "8px" } },
+        h("summary", { style: { cursor: "pointer", color: "var(--muted)" }, text: "Extracted text (if available)" }),
+        pre,
+      ));
+      api.text(`/api/library/doc/${docId}/text`).then((t) => { pre.textContent = String(t || "(empty)"); }).catch((e) => { pre.textContent = `Could not load text: ${e.message}`; });
+    }
+    stage.replaceChildren(box);
     return { node: wrap, cleanup: () => { disposed = true; try { pdf?.destroy(); } catch {} } };
   }
 
