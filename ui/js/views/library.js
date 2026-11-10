@@ -300,39 +300,10 @@ async function renderDocument(root, params) {
   const isTexty = /\.(txt|md|html|htm)$/i.test(doc.name || doc.path || "");
 
   if (isPdf) {
-    const frame = h("iframe", {
-      src: `/api/library/doc/${docId}/file`,
-      title: doc.name || "PDF document",
-      style: { width: "100%", height: "78vh", border: "1px solid var(--border)", borderRadius: "8px", background: "#fff" },
-    });
-    const viewerPanel = panel({
-      title: "PDF viewer (browser native — search, zoom, print built in)",
-      icon: "file", flush: true,
-      body: frame,
-    });
-    const fallback = panel({
-      title: "Fallback / extracted text", icon: "file",
-      body: h("div", { class: "col gap-6 small" },
-        h("div", { class: "muted", text: "If the embedded viewer does not load, use the buttons below." }),
-        h("div", { class: "row wrap gap-6" },
-          btn("OPEN IN NEW TAB", { size: "sm", icon: "link", onClick: () => window.open(`/api/library/doc/${docId}/file`, "_blank", "noopener") }),
-          btn("DOWNLOAD", { size: "sm", icon: "download", onClick: () => { location.href = `/api/library/doc/${docId}/file?download=true`; } }),
-        ),
-        doc.text_available ? h("details", { class: "small", style: { marginTop: "8px" } },
-          h("summary", { style: { cursor: "pointer", color: "var(--muted)" }, text: "Show extracted text" }),
-          h("pre", { style: { whiteSpace: "pre-wrap", maxHeight: "40vh", overflow: "auto", marginTop: "6px" }, text: "Loading…" })
-        ) : null,
-      ),
-    });
-    // Load extracted text into the details block if present.
-    if (doc.text_available) {
-      const pre = fallback.querySelector("pre");
-      api.text(`/api/library/doc/${docId}/text`).then((t) => { if (pre) pre.textContent = String(t || "(empty)"); }).catch((e) => { if (pre) pre.textContent = `Could not load text: ${e.message}`; });
-    }
-    root.appendChild(viewerPanel);
-    root.appendChild(fallback);
+    const viewer = await pdfViewer(docId, doc);
+    root.appendChild(viewer.node);
     root.appendChild(meta);
-    return () => {};
+    return viewer.cleanup;
   }
 
   root.appendChild(meta);
@@ -373,14 +344,27 @@ async function pdfViewer(docId, doc) {
 
   const prev = btn("PREV", { size: "sm", icon: "chevron-left" });
   const next = btn("NEXT", { size: "sm", icon: "chevron-right" });
+  const pageInput = input({ type: "number", min: "1", value: "1", style: { width: "58px" } });
   const zoomOut = btn("−", { size: "sm", title: "Zoom out" });
   const zoomIn = btn("+", { size: "sm", title: "Zoom in" });
+  const rotLeft = btn("↺", { size: "sm", title: "Rotate left" });
+  const rotRight = btn("↻", { size: "sm", title: "Rotate right" });
   const fit = btn("FIT WIDTH", { size: "sm", tone: "ghost" });
+  const fitPage = btn("FIT PAGE", { size: "sm", tone: "ghost" });
+  const zoomSelect = select([
+    { value: "fit", label: "Fit width" },
+    { value: "page", label: "Fit page" },
+    { value: "75", label: "75%" },
+    { value: "100", label: "100%" },
+    { value: "125", label: "125%" },
+    { value: "150", label: "150%" },
+    { value: "200", label: "200%" },
+  ], "fit");
 
   const fsBtn = btn("FULL SCREEN", { size: "sm", icon: "maximize", onClick: async () => { wrap.classList.toggle("pdf-fs", !wrap.classList.contains("pdf-fs")); } });
   const toolbar = h("div", { class: "pdf-toolbar" },
-    prev, next, pageInfo, h("span", { class: "grow" }), title,
-    zoomOut, zoomIn, fit,
+    prev, next, pageInput, pageInfo, h("span", { class: "grow" }), title,
+    rotLeft, rotRight, zoomOut, zoomIn, fit, fitPage, zoomSelect,
     fsBtn,
     btn("DOWNLOAD", { size: "sm", icon: "download", onClick: () => { location.href = `/api/library/doc/${docId}/file?download=true`; } }),
   );
@@ -391,6 +375,8 @@ async function pdfViewer(docId, doc) {
   let pageNum = 1;
   let zoom = 1.2;
   let fitMode = true;
+  let fitType = "width";
+  let rotation = 0;
   let renderTask = null;
   let disposed = false;
 
@@ -417,6 +403,8 @@ async function pdfViewer(docId, doc) {
     if (!pdf) return;
     prev.disabled = pageNum <= 1;
     next.disabled = pageNum >= pdf.numPages;
+    pageInput.max = String(pdf.numPages);
+    pageInput.value = String(pageNum);
   }
 
   async function draw() {
@@ -424,13 +412,15 @@ async function pdfViewer(docId, doc) {
     try {
       if (renderTask) { try { renderTask.cancel(); } catch {} renderTask = null; }
       const page = await pdf.getPage(pageNum);
-      const base = page.getViewport({ scale: 1 });
+      const base = page.getViewport({ scale: 1, rotation });
       let scale = zoom;
       if (fitMode) {
         const width = Math.max(200, stage.clientWidth - 26);
-        scale = Math.max(0.2, Math.min(4, width / base.width));
+        const height = Math.max(200, stage.clientHeight - 26);
+        if (fitType === "page") scale = Math.max(0.2, Math.min(4, Math.min(width / base.width, height / base.height)));
+        else scale = Math.max(0.2, Math.min(4, width / base.width));
       }
-      const viewport = page.getViewport({ scale });
+      const viewport = page.getViewport({ scale, rotation });
       const dpr = window.devicePixelRatio || 1;
       canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
       canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
@@ -459,9 +449,23 @@ async function pdfViewer(docId, doc) {
 
   prev.addEventListener("click", () => { if (pageNum > 1) { pageNum--; draw(); } });
   next.addEventListener("click", () => { if (pdf && pageNum < pdf.numPages) { pageNum++; draw(); } });
-  zoomOut.addEventListener("click", () => { fitMode = false; zoom = Math.max(0.25, zoom * 0.82); draw(); });
-  zoomIn.addEventListener("click", () => { fitMode = false; zoom = Math.min(5, zoom * 1.22); draw(); });
-  fit.addEventListener("click", () => { fitMode = true; draw(); });
+  pageInput.addEventListener("change", () => {
+    const n = parseInt(pageInput.value, 10);
+    if (pdf && Number.isFinite(n) && n >= 1 && n <= pdf.numPages) { pageNum = n; draw(); }
+    else pageInput.value = String(pageNum);
+  });
+  zoomOut.addEventListener("click", () => { fitMode = false; zoom = Math.max(0.25, zoom * 0.82); zoomSelect.value = "custom"; draw(); });
+  zoomIn.addEventListener("click", () => { fitMode = false; zoom = Math.min(5, zoom * 1.22); zoomSelect.value = "custom"; draw(); });
+  rotLeft.addEventListener("click", () => { rotation = (rotation + 270) % 360; fitMode = false; draw(); });
+  rotRight.addEventListener("click", () => { rotation = (rotation + 90) % 360; fitMode = false; draw(); });
+  fit.addEventListener("click", () => { fitMode = true; fitType = "width"; zoomSelect.value = "fit"; draw(); });
+  fitPage.addEventListener("click", () => { fitMode = true; fitType = "page"; zoomSelect.value = "page"; draw(); });
+  zoomSelect.addEventListener("change", () => {
+    const v = zoomSelect.value;
+    if (v === "fit") { fitMode = true; fitType = "width"; draw(); return; }
+    if (v === "page") { fitMode = true; fitType = "page"; draw(); return; }
+    fitMode = false; zoom = (parseInt(v, 10) || 100) / 100; draw();
+  });
 
   const keyHandler = (e) => {
     if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
