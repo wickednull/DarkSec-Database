@@ -345,7 +345,7 @@ export async function render(root) {
       box.appendChild(body);
       const saveBtn = btn("SAVE AS LOG", { size: "sm", tone: "ghost", icon: "save", onClick: async () => {
         try {
-          const title = String(content || "").split("\\n")[0].slice(0, 120) || "Delamain note";
+          const title = String(content || "").split("\n")[0].slice(0, 120) || "Delamain note";
           const res = await api.post("/api/assistant/log", { title, content: String(content || "") });
           toast(`Saved to mission log (#${res.id})`, "ok");
         } catch (e) { toast(e.message, "error"); }
@@ -367,6 +367,21 @@ export async function render(root) {
     const body = h("div", { class: "small", style: { whiteSpace: "pre-wrap" } });
     box.appendChild(body);
     return { box, body, meta };
+  }
+
+  function renderToolEvents(events) {
+    const list = Array.isArray(events) ? events.filter((e) => e && e.name) : [];
+    if (!list.length) return null;
+    const lines = list.map((e) => {
+      const r = e.result || {};
+      const ok = r.ok !== false && !r.error;
+      const detail = r.error ? `error: ${r.error}` : (r.id ? `#${r.id}` : (Array.isArray(r.results) ? `${r.results.length} result(s)` : "done"));
+      return `${ok ? "✔" : "✖"} ${e.name}${detail ? " — " + detail : ""}`;
+    });
+    return h("details", { class: "small", open: true, style: { marginTop: "8px" } },
+      h("summary", { style: { cursor: "pointer", color: "var(--muted)" }, text: `Actions taken (${list.length})` }),
+      h("pre", { style: { whiteSpace: "pre-wrap", marginTop: "6px", color: "var(--muted)", fontSize: "11px" }, text: lines.join("\n") })
+    );
   }
 
   async function loadConversations() {
@@ -605,7 +620,7 @@ export async function render(root) {
           transcript.appendChild(ui.box); transcript.scrollTop = transcript.scrollHeight;
           const reader = resp.body.getReader();
           const decoder = new TextDecoder();
-          let buf = "", content = "", thinking = "", finalModel = model, hadError = null, doneData = null;
+          let buf = "", content = "", thinking = "", finalModel = model, hadError = null, doneData = null, toolEvents = [];
           while (true) {
             const { value, done } = await reader.read();
             if (done) break;
@@ -623,8 +638,13 @@ export async function render(root) {
                 transcript.scrollTop = transcript.scrollHeight;
               } else if (evt.type === "error") {
                 hadError = evt.error || "Streaming error";
+              } else if (evt.type === "tool") {
+                toolEvents.push({ name: evt.name, result: evt.result });
+                const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+                ui.meta.textContent = `${finalModel} · running ${evt.name || "tool"} · ${secs}s`;
               } else if (evt.type === "done") {
                 doneData = evt; content = evt.content || content; thinking = evt.thinking || thinking; finalModel = evt.model || finalModel;
+                if (Array.isArray(evt.tools) && evt.tools.length) toolEvents = evt.tools;
               }
             }
           }
@@ -646,6 +666,8 @@ export async function render(root) {
             );
             ui.box.appendChild(details);
           }
+          const toolNode = renderToolEvents(toolEvents);
+          if (toolNode) ui.box.appendChild(toolNode);
           if (hadError) toast(`Stream warning: ${hadError}`, "warn");
           transcript.scrollTop = transcript.scrollHeight;
         } else if (resp.status !== 404 && resp.status !== 405) {
@@ -673,6 +695,8 @@ export async function render(root) {
           );
           try { transcript.lastChild?.appendChild(details); transcript.scrollTop = transcript.scrollHeight; } catch {}
         }
+        const toolNode = renderToolEvents(res?.tools);
+        if (toolNode) { try { transcript.lastChild?.appendChild(toolNode); } catch {} }
       }
     } catch (e) {
       try { pending?.remove(); } catch {}

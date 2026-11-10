@@ -294,6 +294,71 @@ def _record_row(row: sqlite3.Row) -> dict:
     return dict(row)
 
 
+# --------------------------------------------------------------- AI write limits
+# Delamain may write to the mission log and vault when the operator asks. These
+# caps keep a misbehaving local model from filling the disk with junk notes.
+AI_LOG_MAX_PER_HOUR = 20
+AI_LOG_TOTAL_CAP = 1000
+AI_NOTE_MAX_PER_HOUR = 10
+AI_NOTE_TOTAL_CAP = 200
+AI_LOG_MAX_CHARS = 20_000
+AI_NOTE_MAX_CHARS = 10_000
+
+
+def _hour_ago() -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
+
+
+def ai_log_save(d: Database, title: str, body: str, category: str = "GENERAL") -> dict:
+    """Insert an AI-authored mission-log entry with hourly and total caps."""
+    content = str(body or "").strip()[:AI_LOG_MAX_CHARS]
+    if not content:
+        raise ValueError("body is required")
+    heading = str(title or "Delamain note").strip()[:200] or "Delamain note"
+    cat = re.sub(r"[^A-Za-z0-9 _/-]", "", str(category or "GENERAL")).strip().upper()[:40] or "GENERAL"
+    recent = d.one("SELECT count(*) c FROM log_entries WHERE category='AI' AND ts >= ?", (_hour_ago(),))
+    if recent and int(recent["c"] or 0) >= AI_LOG_MAX_PER_HOUR:
+        raise ValueError(f"AI log limit reached ({AI_LOG_MAX_PER_HOUR}/hour). Try again later.")
+    total = d.one("SELECT count(*) c FROM log_entries WHERE category='AI'")
+    if total and int(total["c"] or 0) >= AI_LOG_TOTAL_CAP:
+        overflow = int(total["c"]) - AI_LOG_TOTAL_CAP + 1
+        ids = [r["id"] for r in d.query("SELECT id FROM log_entries WHERE category='AI' ORDER BY id ASC LIMIT ?", (overflow,))]
+        for rid in ids:
+            d.delete("log_entries", rid)
+    new_id = d.insert("log_entries", {"ts": utcnow(), "category": "AI", "title": heading, "body": content,
+                                      "tags": f"delamain,{cat.lower()}", "lat": None, "lon": None})
+    d.audit("ASSISTANT_LOG", f"id={new_id} chars={len(content)} cat={cat}")
+    return {"ok": True, "id": new_id, "title": heading,
+            "limit_note": f"Saved to mission log (AI category). Max {AI_LOG_MAX_PER_HOUR}/hour, {AI_LOG_TOTAL_CAP} total."}
+
+
+def ai_note_save(d: Database, v, title: str, body: str, tags: str = "") -> dict:
+    """Insert an AI-authored encrypted note with hourly and total caps."""
+    if not v.unlocked():
+        raise ValueError("Vault is locked. Unlock it before asking Delamain to save a note.")
+    content = str(body or "").strip()[:AI_NOTE_MAX_CHARS]
+    if not content:
+        raise ValueError("body is required")
+    heading = str(title or "Delamain note").strip()[:300] or "Delamain note"
+    recent = d.one("SELECT count(*) c FROM notes WHERE tags='delamain' AND ts >= ?", (_hour_ago(),))
+    if recent and int(recent["c"] or 0) >= AI_NOTE_MAX_PER_HOUR:
+        raise ValueError(f"AI note limit reached ({AI_NOTE_MAX_PER_HOUR}/hour). Try again later.")
+    total = d.one("SELECT count(*) c FROM notes WHERE tags='delamain'")
+    if total and int(total["c"] or 0) >= AI_NOTE_TOTAL_CAP:
+        overflow = int(total["c"]) - AI_NOTE_TOTAL_CAP + 1
+        ids = [r["id"] for r in d.query("SELECT id FROM notes WHERE tags='delamain' ORDER BY id ASC LIMIT ?", (overflow,))]
+        for rid in ids:
+            d.delete("notes", rid)
+    label = str(tags or "").strip()[:500]
+    cipher = v.encrypt(json.dumps({"title": heading, "body": content, "tags": label}))
+    new_id = d.insert("notes", {"ts": utcnow(), "updated": utcnow(), "title": "ENCRYPTED",
+                                "cipher": cipher, "tags": "delamain"})
+    d.audit("ASSISTANT_NOTE", f"id={new_id} chars={len(content)}")
+    return {"ok": True, "id": new_id, "title": heading,
+            "limit_note": f"Saved encrypted vault note. Max {AI_NOTE_MAX_PER_HOUR}/hour, {AI_NOTE_TOTAL_CAP} total."}
+
+
+
 # --------------------------------------------------------------------------
 # App factory
 # --------------------------------------------------------------------------
@@ -639,6 +704,33 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         return {"ok": True}
 
     # ------------------------------------------------------------ assistant (local Ollama)
+    def assistant_tool_executor(d: Database, v):
+        """Execute the narrow set of local tools Delamain is allowed to call."""
+        def execute(name: str, args: dict) -> dict:
+            args = args if isinstance(args, dict) else {}
+            name = str(name or "").strip()
+            try:
+                if name == "save_log_entry":
+                    return ai_log_save(d, args.get("title"), args.get("body"), args.get("category") or "GENERAL")
+                if name == "save_note":
+                    return ai_note_save(d, v, args.get("title"), args.get("body"), args.get("tags") or "")
+                if name == "search_library":
+                    q = str(args.get("query") or "").strip()
+                    if not q:
+                        return {"ok": False, "error": "query is required"}
+                    rows = library.search(d, q, limit=5)
+                    return {"ok": True, "results": [
+                        {"name": r.get("name"), "category": r.get("category"),
+                         "path": r.get("rel_path"), "snippet": (r.get("snippet") or "")[:1200]}
+                        for r in rows[:5]
+                    ]}
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            except Exception as e:
+                return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+            return {"ok": False, "error": f"unknown tool: {name}"}
+        return execute
+
     @app.get("/api/assistant/status")
     async def assistant_status(request: Request):
         return await run_in_threadpool(assistant.status, db(request))
@@ -667,7 +759,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         # Do not audit full prompt/content by default (may contain sensitive notes).
         d.audit("ASSISTANT_CHAT", json.dumps({"model": model or d.get_setting("ollama_model", ""), "prompt_chars": len(prompt), "has_context": bool(context), "think": think, "images": len(image_paths)}), request.client.host if request.client else "")
         try:
-            result = await run_in_threadpool(assistant.chat, d, prompt, history, context, model, think, image_paths)
+            result = await run_in_threadpool(assistant.chat, d, prompt, history, context, model, think, image_paths, assistant_tool_executor(d, vault(request)))
             # Persist to conversation history when requested.
             if conversation_id is not None:
                 try:
@@ -722,7 +814,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             final_content = ""
             final_model = use_model
             try:
-                for chunk in assistant.chat_stream(d, prompt, history, context, model, think, image_paths):
+                for chunk in assistant.chat_stream(d, prompt, history, context, model, think, image_paths, assistant_tool_executor(d, vault(request))):
                     yield json.dumps(chunk, ensure_ascii=False, default=str) + "\n"
                     if isinstance(chunk, dict) and chunk.get("type") == "done":
                         final_content = chunk.get("content") or final_content
@@ -808,25 +900,12 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     @app.post("/api/assistant/log")
     def assistant_log(request: Request, payload: dict = Body(...)):
         d = db(request)
-        content = str(payload.get("content") or "").strip()
-        title = str(payload.get("title") or "Delamain note").strip()[:200] or "Delamain note"
-        if not content:
-            raise HTTPException(status_code=400, detail="content is required")
-        content = content[:20000]
-        # Rate limit: max 20 AI-saved log entries per hour.
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
-        recent = d.one("SELECT count(*) c FROM log_entries WHERE category='AI' AND ts >= ?", (cutoff,))
-        if recent and int(recent["c"] or 0) >= 20:
-            raise HTTPException(status_code=429, detail="Too many AI-saved notes this hour. Try again later.")
-        # Cap total AI-saved entries to 1000, pruning oldest.
-        total = d.one("SELECT count(*) c FROM log_entries WHERE category='AI'")
-        if total and int(total["c"] or 0) >= 1000:
-            ids = [r["id"] for r in d.query("SELECT id FROM log_entries WHERE category='AI' ORDER BY id ASC LIMIT 100")]
-            for rid in ids:
-                d.delete("log_entries", rid)
-        new_id = d.insert("log_entries", {"ts": utcnow(), "category": "AI", "title": title, "body": content, "tags": "delamain", "lat": None, "lon": None})
-        d.audit("ASSISTANT_LOG", f"id={new_id} chars={len(content)}")
-        return {"ok": True, "id": new_id, "limit_note": "Saved to mission log (AI category). Max 20/hour, 1000 total."}
+        try:
+            return ai_log_save(d, payload.get("title") or "Delamain note",
+                               payload.get("content") or payload.get("body") or "",
+                               payload.get("category") or "GENERAL")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     # ------------------------------------------------------------ settings
     @app.get("/api/settings")
@@ -869,7 +948,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     raise HTTPException(status_code=400, detail=f"{key} out of range")
                 value = f
             if key in ("sdr_tx_enabled", "sdr_tx_attested", "sdr_amp", "scanlines", "sound",
-                       "map_vector", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think"):
+                       "map_vector", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_history_filter"):
                 value = bool(value)
             if key in ("callsign", "team", "operator", "timezone", "units", "date_format",
                        "grid_format", "accent", "tile_source", "mbtiles_path", "dem_mbtiles_path",

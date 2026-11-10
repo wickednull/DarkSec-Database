@@ -416,6 +416,8 @@ export async function render(root) {
   /* ---------------------------------------------------------- assistant */
   const assistantEnabled = checkbox("Enable Delamain (local AI / Ollama)", !!settings.assistant_enabled);
   const assistantThink = checkbox("Enable model thinking/reasoning", !!settings.assistant_think);
+  const assistantTools = checkbox("Allow Delamain to save notes/logs", settings.assistant_tools !== false);
+  const assistantHistoryFilter = checkbox("Filter risky/refused topics from chat history", settings.assistant_history_filter !== false);
   const ollamaBase = input({ value: settings.ollama_base_url || "http://127.0.0.1:11434", placeholder: "http://127.0.0.1:11434" });
   const ollamaModel = input({ value: settings.ollama_model || "", placeholder: "e.g. llama3.2, mistral, qwen2.5:7b" });
   const assistantTemp = input({ type: "number", step: "0.1", min: "0", max: "2", value: settings.assistant_temperature ?? 0.2 });
@@ -429,7 +431,7 @@ export async function render(root) {
     sub: "Local AI model integration for assistant chat and field support",
     icon: "cpu",
     body: h("div", { class: "col gap-8" },
-      h("div", { class: "row wrap gap-16" }, assistantEnabled, assistantThink),
+      h("div", { class: "row wrap gap-16" }, assistantEnabled, assistantThink, assistantTools, assistantHistoryFilter),
       h("div", { class: "form-grid" },
         field("Ollama base URL", ollamaBase, "Local endpoint. Default: http://127.0.0.1:11434"),
         field("Model", ollamaModel, "Must be pulled in Ollama (e.g. `ollama pull llama3.2`).")),
@@ -450,6 +452,8 @@ export async function render(root) {
     await saveSimple({
       assistant_enabled: assistantEnabled.querySelector("input").checked,
       assistant_think: assistantThink.querySelector("input").checked,
+      assistant_tools: assistantTools.querySelector("input").checked,
+      assistant_history_filter: assistantHistoryFilter.querySelector("input").checked,
       ollama_base_url: ollamaBase.value.trim(),
       ollama_model: ollamaModel.value.trim(),
       assistant_temperature: Number(assistantTemp.value),

@@ -41,6 +41,7 @@ def _settings(db: Database) -> dict:
         "max_tokens": max(128, min(8192, int(float(s.get("assistant_max_tokens") or 2048)))),
         "think": bool(s.get("assistant_think", False)),
         "history_filter": bool(s.get("assistant_history_filter", True)),
+        "tools": bool(s.get("assistant_tools", True)),
         "opsec_mode": bool(s.get("opsec_mode", False)),
         "units": s.get("units") or "metric",
         "callsign": s.get("callsign") or "",
@@ -403,6 +404,13 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
     if lib_ctx:
         sys += lib_ctx
         sys += "\nWhen you use the retrieved library passages above, cite the document name(s) you relied on."
+    if cfg.get("tools", True):
+        sys += (
+            "\nYou can act on the operator's system with these tools: save_log_entry (mission log), "
+            "save_note (encrypted vault note; requires the vault to be unlocked), and search_library. "
+            "Call them only when the operator asks you to save/record something or to search the library. "
+            "Do not invent saves; report exactly what you saved. Writes are rate-limited by the server."
+        )
     msgs.append({"role": "system", "content": sys})
     kept = 0
     for m in reversed((history or [])[-20:]):
@@ -433,7 +441,85 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
     return msgs
 
 
-def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, stream: bool = False, images: list | None = None):
+def tool_specs() -> list[dict]:
+    """Local tools Delamain may call. Write tools are rate-limited server-side."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "save_log_entry",
+                "description": (
+                    "Save a short note to the operator's mission log. Use this when the operator asks you to "
+                    "record, log, remember, or write something down for later. Keep it concise."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Short title, max 200 characters."},
+                        "body": {"type": "string", "description": "Note body. Max 20000 characters."},
+                        "category": {"type": "string", "description": "Optional category label, e.g. GENERAL, MEDICAL, WATER, COMMS, SECURITY."},
+                    },
+                    "required": ["title", "body"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "save_note",
+                "description": (
+                    "Save an encrypted note to the operator's vault. Use only when the operator explicitly asks "
+                    "you to save a note (the vault must be unlocked). Keep it concise."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Short title, max 300 characters."},
+                        "body": {"type": "string", "description": "Note body. Max 10000 characters."},
+                        "tags": {"type": "string", "description": "Optional comma-separated tags."},
+                    },
+                    "required": ["title", "body"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_library",
+                "description": "Search the indexed offline document library for passages matching a query.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "Search terms."}},
+                    "required": ["query"],
+                },
+            },
+        },
+    ]
+
+
+def _tool_call_args(tc: dict) -> tuple[str, dict]:
+    fn = (tc or {}).get("function") or {}
+    name = str(fn.get("name") or "").strip()
+    args = fn.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except Exception:
+            args = {}
+    if not isinstance(args, dict):
+        args = {}
+    return name, args
+
+
+def _tool_result_text(result: Any) -> str:
+    try:
+        text = json.dumps(result, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(result)
+    return text[:6000]
+
+
+def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, stream: bool = False, images: list | None = None, tools: list | None = None):
     cfg = _settings(db)
     if not cfg["enabled"]:
         raise ValueError("Assistant is disabled in settings.")
@@ -450,28 +536,56 @@ def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, 
         "keep_alive": "10m",
         "options": {"temperature": cfg["temperature"], "num_ctx": cfg["num_ctx"], "num_predict": cfg["max_tokens"]},
     }
+    if tools and cfg.get("tools", True):
+        payload["tools"] = tools
     return cfg, use_model, payload
 
 
-def chat(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None) -> dict:
-    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=False, images=images)
-    resp = requests.post(f"{cfg['base_url']}/api/chat", headers=UA, data=json.dumps(payload), timeout=cfg["timeout"])
-    resp.raise_for_status()
-    data = resp.json() if resp.content else {}
-    if isinstance(data, dict) and data.get("error"):
-        raise RuntimeError(str(data.get("error"))[:400])
-    msg = (data.get("message") or {}) if isinstance(data, dict) else {}
+def chat(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None, tool_executor=None) -> dict:
+    use_tools = bool(tool_executor)
+    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=False, images=images, tools=tool_specs() if use_tools else None)
+    messages = payload["messages"]
+    tool_events: list[dict] = []
+    data: dict = {}
     content = ""
-    thinking = ""
-    if isinstance(msg, dict):
-        content = msg.get("content") or ""
-        thinking = msg.get("thinking") or ""
+    thinking_text = ""
+    for _round in range(4):
+        resp = requests.post(f"{cfg['base_url']}/api/chat", headers=UA, data=json.dumps(payload), timeout=cfg["timeout"])
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        if isinstance(data, dict) and data.get("error"):
+            err_text = str(data.get("error"))
+            if payload.get("tools") and "tool" in err_text.lower():
+                # Model/daemon does not support tool calling; retry without tools.
+                payload.pop("tools", None)
+                continue
+            raise RuntimeError(err_text[:400])
+        msg = (data.get("message") or {}) if isinstance(data, dict) else {}
+        content = ""
+        thinking_text = ""
+        if isinstance(msg, dict):
+            content = msg.get("content") or ""
+            thinking_text = msg.get("thinking") or ""
+        calls = msg.get("tool_calls") if isinstance(msg, dict) else None
+        if calls and use_tools:
+            messages.append({"role": "assistant", "content": str(content or ""), "tool_calls": calls})
+            for tc in list(calls)[:4]:
+                name, args = _tool_call_args(tc)
+                try:
+                    out = tool_executor(name, args)
+                except Exception as e:
+                    out = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+                tool_events.append({"name": name, "args": args, "result": out})
+                messages.append({"role": "tool", "tool_name": name, "content": _tool_result_text(out)})
+            payload["messages"] = messages
+            continue
+        break
     # Qwen 3.5 / thinking models may return useful text in `thinking` when `content` is empty.
-    if not str(content).strip() and str(thinking).strip():
-        content = str(thinking).strip()
+    if not str(content).strip() and str(thinking_text).strip():
+        content = str(thinking_text).strip()
     if not str(content).strip() and isinstance(data, dict) and data.get("response"):
         content = str(data.get("response"))
-    thinking_text = str(thinking or "").strip()
+    thinking_text = str(thinking_text or "").strip()
     done_reason = data.get("done_reason") if isinstance(data, dict) else None
     truncated = done_reason == "length"
     return {
@@ -486,65 +600,96 @@ def chat(db: Database, prompt: str, history: list[dict] | None = None, context: 
         "note": "Response truncated at the token limit. Increase 'Max reply tokens' in Settings for longer answers." if truncated else "",
         "total_duration": data.get("total_duration") if isinstance(data, dict) else None,
         "eval_count": data.get("eval_count") if isinstance(data, dict) else None,
+        "tools": tool_events,
         "created_at": utcnow(),
     }
 
 
-def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None):
+def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None, tool_executor=None):
     """Yield NDJSON-friendly dicts for streaming UI updates."""
-    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=True, images=images)
-    content_acc = ""
-    thinking_acc = ""
+    use_tools = bool(tool_executor)
+    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=True, images=images, tools=tool_specs() if use_tools else None)
+    messages = payload["messages"]
+    tool_events: list[dict] = []
     final_model = use_model
     try:
-        with requests.post(f"{cfg['base_url']}/api/chat", headers=UA, data=json.dumps(payload), timeout=cfg["timeout"], stream=True) as resp:
-            resp.raise_for_status()
-            for raw in resp.iter_lines(decode_unicode=True):
-                if not raw:
-                    continue
-                try:
-                    data = json.loads(raw)
-                except Exception:
-                    continue
-                if isinstance(data, dict) and data.get("error"):
-                    yield {"type": "error", "error": str(data.get("error"))[:400], "model": final_model}
-                    return
-                if isinstance(data, dict) and data.get("model"):
-                    final_model = data.get("model") or final_model
-                msg = (data.get("message") or {}) if isinstance(data, dict) else {}
-                cdelta = ""
-                tdelta = ""
-                if isinstance(msg, dict):
-                    cdelta = str(msg.get("content") or "")
-                    tdelta = str(msg.get("thinking") or "")
-                if cdelta:
-                    content_acc += cdelta
-                    yield {"type": "delta", "channel": "content", "delta": cdelta, "model": final_model}
-                if tdelta:
-                    thinking_acc += tdelta
-                    # stream thinking sparingly to UI (it can be verbose)
-                    yield {"type": "delta", "channel": "thinking", "delta": tdelta, "model": final_model}
-                if isinstance(data, dict) and data.get("done"):
-                    if not content_acc.strip() and thinking_acc.strip():
-                        content_acc = thinking_acc.strip()
-                    yield {
-                        "type": "done",
-                        "ok": True,
-                        "model": final_model,
-                        "content": content_acc,
-                        "thinking": thinking_acc[:12000],
-                        "thinking_present": bool(thinking_acc.strip()),
-                        "done_reason": data.get("done_reason"),
-                        "truncated": data.get("done_reason") == "length",
-                        "note": "Response truncated at the token limit. Increase 'Max reply tokens' in Settings for longer answers." if data.get("done_reason") == "length" else "",
-                        "total_duration": data.get("total_duration"),
-                        "eval_count": data.get("eval_count"),
-                        "created_at": utcnow(),
-                    }
-                    return
-        # stream ended without done
-        if not content_acc.strip() and thinking_acc.strip():
-            content_acc = thinking_acc.strip()
-        yield {"type": "done", "ok": True, "model": final_model, "content": content_acc, "thinking": thinking_acc[:12000], "thinking_present": bool(thinking_acc.strip()), "created_at": utcnow()}
+        for _round in range(4):
+            content_acc = ""
+            thinking_acc = ""
+            calls: list = []
+            done_data: dict = {}
+            tools_unsupported = False
+            with requests.post(f"{cfg['base_url']}/api/chat", headers=UA, data=json.dumps(payload), timeout=cfg["timeout"], stream=True) as resp:
+                resp.raise_for_status()
+                for raw in resp.iter_lines(decode_unicode=True):
+                    if not raw:
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except Exception:
+                        continue
+                    if isinstance(data, dict) and data.get("error"):
+                        err_text = str(data.get("error"))
+                        if payload.get("tools") and "tool" in err_text.lower():
+                            payload.pop("tools", None)
+                            tools_unsupported = True
+                            break
+                        yield {"type": "error", "error": err_text[:400], "model": final_model}
+                        return
+                    if isinstance(data, dict) and data.get("model"):
+                        final_model = data.get("model") or final_model
+                    msg = (data.get("message") or {}) if isinstance(data, dict) else {}
+                    cdelta = ""
+                    tdelta = ""
+                    if isinstance(msg, dict):
+                        cdelta = str(msg.get("content") or "")
+                        tdelta = str(msg.get("thinking") or "")
+                        if msg.get("tool_calls"):
+                            calls.extend(msg.get("tool_calls") or [])
+                    if cdelta:
+                        content_acc += cdelta
+                        yield {"type": "delta", "channel": "content", "delta": cdelta, "model": final_model}
+                    if tdelta:
+                        thinking_acc += tdelta
+                        # stream thinking sparingly to UI (it can be verbose)
+                        yield {"type": "delta", "channel": "thinking", "delta": tdelta, "model": final_model}
+                    if isinstance(data, dict) and data.get("done"):
+                        done_data = data
+                        break
+            if tools_unsupported:
+                continue
+            if calls and use_tools and _round < 3:
+                messages.append({"role": "assistant", "content": str(content_acc or ""), "tool_calls": calls})
+                for tc in list(calls)[:4]:
+                    name, args = _tool_call_args(tc)
+                    try:
+                        out = tool_executor(name, args)
+                    except Exception as e:
+                        out = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+                    tool_events.append({"name": name, "args": args, "result": out})
+                    messages.append({"role": "tool", "tool_name": name, "content": _tool_result_text(out)})
+                    yield {"type": "tool", "name": name, "result": out, "model": final_model}
+                payload["messages"] = messages
+                continue
+            if not content_acc.strip() and thinking_acc.strip():
+                content_acc = thinking_acc.strip()
+            yield {
+                "type": "done",
+                "ok": True,
+                "model": final_model,
+                "content": content_acc,
+                "thinking": thinking_acc[:12000],
+                "thinking_present": bool(thinking_acc.strip()),
+                "done_reason": done_data.get("done_reason"),
+                "truncated": done_data.get("done_reason") == "length",
+                "note": "Response truncated at the token limit. Increase 'Max reply tokens' in Settings for longer answers." if done_data.get("done_reason") == "length" else "",
+                "total_duration": done_data.get("total_duration"),
+                "eval_count": done_data.get("eval_count"),
+                "tools": tool_events,
+                "created_at": utcnow(),
+            }
+            return
+        # fell through the loop without a final answer
+        yield {"type": "done", "ok": True, "model": final_model, "content": "", "thinking": "", "thinking_present": False, "tools": tool_events, "created_at": utcnow()}
     except Exception as e:
         yield {"type": "error", "error": f"{type(e).__name__}: {str(e)[:400]}", "model": final_model}

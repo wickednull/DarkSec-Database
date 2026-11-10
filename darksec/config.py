@@ -123,5 +123,6 @@ def default_settings() -> dict:
         "assistant_max_tokens": 2048,
         "assistant_think": False,
         "assistant_history_filter": True,
+        "assistant_tools": True,
         "lan_access_enabled": False,
     }

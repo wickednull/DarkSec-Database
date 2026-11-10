@@ -104,6 +104,13 @@ Set the endpoint (default `http://127.0.0.1:11434`) and model name in
 **Settings → Assistant**. Only local endpoints are used; nothing is sent to a
 cloud service. The assistant can include cached intelligence context when asked.
 
+Delamain can also act on the local system when you ask it to: it can save an entry
+to the mission log, save an encrypted vault note (vault must be unlocked), and
+search the indexed document library. These tools are rate-limited server-side
+(default 20 log entries/hour and 1000 total; 10 vault notes/hour and 200 total) so
+a misbehaving model cannot fill the disk. Turn the tools off entirely in
+**Settings → Assistant → Allow Delamain to save notes/logs**.
+
 
 ### Desktop shell (Electron)
 
