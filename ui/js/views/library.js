@@ -300,10 +300,42 @@ async function renderDocument(root, params) {
   const isTexty = /\.(txt|md|html|htm)$/i.test(doc.name || doc.path || "");
 
   if (isPdf) {
-    const viewer = await pdfViewer(docId, doc);
-    root.appendChild(viewer.node);
+    const frame = h("iframe", {
+      src: `/api/library/doc/${docId}/file`,
+      title: doc.name || "PDF document",
+      style: { width: "100%", height: "78vh", border: "1px solid var(--border)", borderRadius: "8px", background: "#fff" },
+    });
+    const viewerPanel = panel({
+      title: "PDF viewer (browser native — search, zoom, print built in)",
+      icon: "file", flush: true,
+      body: frame,
+    });
+    const fallback = panel({
+      title: "Fallback / extracted text", icon: "file",
+      body: h("div", { class: "col gap-6 small" },
+        h("div", { class: "muted", text: "If the embedded viewer does not load, use the buttons below." }),
+        h("div", { class: "row wrap gap-6" },
+          btn("OPEN IN NEW TAB", { size: "sm", icon: "link", onClick: () => window.open(`/api/library/doc/${docId}/file`, "_blank", "noopener") }),
+          btn("DOWNLOAD", { size: "sm", icon: "download", onClick: () => { location.href = `/api/library/doc/${docId}/file?download=true`; } }),
+          btn("CONSOLE VIEWER", { size: "sm", tone: "ghost", onClick: async () => {
+            const v = await pdfViewer(docId, doc);
+            viewerPanel.replaceWith(v.node);
+          } }),
+        ),
+        doc.text_available ? h("details", { class: "small", style: { marginTop: "8px" } },
+          h("summary", { style: { cursor: "pointer", color: "var(--muted)" }, text: "Show extracted text" }),
+          h("pre", { style: { whiteSpace: "pre-wrap", maxHeight: "40vh", overflow: "auto", marginTop: "6px" }, text: "Loading…" })
+        ) : null,
+      ),
+    });
+    if (doc.text_available) {
+      const pre = fallback.querySelector("pre");
+      api.text(`/api/library/doc/${docId}/text`).then((t) => { if (pre) pre.textContent = String(t || "(empty)"); }).catch((e) => { if (pre) pre.textContent = `Could not load text: ${e.message}`; });
+    }
+    root.appendChild(viewerPanel);
+    root.appendChild(fallback);
     root.appendChild(meta);
-    return viewer.cleanup;
+    return () => {};
   }
 
   root.appendChild(meta);

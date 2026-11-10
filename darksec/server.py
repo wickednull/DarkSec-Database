@@ -485,7 +485,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                         return JSONResponse({"error": "CSRF check failed"}, status_code=403)
         resp = await call_next(request)
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         resp.headers.setdefault("Referrer-Policy", "no-referrer")
         resp.headers.setdefault("Permissions-Policy", "geolocation=(self), microphone=(), camera=()")
         resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
@@ -496,8 +496,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; "
                 "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; "
-                "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
-                "form-action 'self'",
+                "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; "                "form-action 'self'",
             )
         if path.startswith("/api/") or is_html:
             resp.headers.setdefault("Cache-Control", "no-store")
