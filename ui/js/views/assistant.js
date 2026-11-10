@@ -557,7 +557,10 @@ export async function render(root) {
       try {
         const headers = { "Content-Type": "application/json", "Accept": "application/x-ndjson" };
         const token = csrfToken(); if (token) headers["X-DarkSec-CSRF"] = token;
-        const headerTimeout = setTimeout(() => { try { controller.abort(); } catch {} }, 45000);
+        // Do not abort too early: background tabs and slow CPU models can take
+        // a while before the first token arrives. Rely on the user's cancel
+        // button and the backend assistant timeout instead.
+        const headerTimeout = setTimeout(() => { try { controller.abort(); } catch {} }, 300000);
         let resp;
         try {
           resp = await fetch("/api/assistant/chat/stream", {
