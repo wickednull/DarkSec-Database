@@ -147,6 +147,12 @@ export async function render(root) {
     h("div", { class: "small", style: { whiteSpace: "pre-wrap" }, text: "Ask for field planning help, SITREP drafting, checklists, triage prompts, comms/logistics planning, map/intel interpretation, or gear/water/food/power reasoning. Attach images for vision models, use the mic for voice input, and review past chats below. I can include a cached app-context snapshot if enabled. I won’t invent live readings." })
   );
   transcript.appendChild(intro);
+  for (const m of (state.messages || [])) addMsg(m.role, m.content, m.meta || "", m.images || [], { record: false });
+  if (state.sending) {
+    const note = h("div", { class: "callout small amber" }, h("div", { class: "small", style: { whiteSpace: "pre-wrap" }, text: "Delamain is responding… switching tabs won't cancel it; the reply will appear here when it finishes." }));
+    transcript.appendChild(note);
+    transcript.scrollTop = transcript.scrollHeight;
+  }
 
   const promptInput = textarea({ rows: 4, placeholder: "Ask the local survival AI… (Ctrl/Cmd+Enter to send)" });
 
@@ -666,6 +672,9 @@ export async function render(root) {
       setSending(false);
     }
   }
+
+  // Restore sending UI state if a request is still in flight.
+  if (state.sending) { try { setSending(true); } catch {} }
 
   // override createConversation to rebuild picker (already defined below? ensure exists)
   // (createConversation2 assigned above)
