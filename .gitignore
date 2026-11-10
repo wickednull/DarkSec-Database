@@ -26,6 +26,8 @@ Thumbs.db
 
 # Document binaries (PDFs and other large/proprietary source docs)
 *.pdf
+# Corrupted PDFs quarantined locally
+corrupted/
 *.PDF
 *.epub
 *.djvu
