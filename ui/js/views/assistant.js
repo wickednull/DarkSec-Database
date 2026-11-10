@@ -154,6 +154,19 @@ export async function render(root) {
     transcript.scrollTop = transcript.scrollHeight;
   }
 
+  // Live-refresh transcript when an in-flight request finishes elsewhere.
+  const refreshTranscript = () => {
+    transcript.replaceChildren(intro);
+    for (const m of (state.messages || [])) addMsg(m.role, m.content, m.meta || "", m.images || [], { record: false });
+    if (state.sending) {
+      const note = h("div", { class: "callout small amber" }, h("div", { class: "small", style: { whiteSpace: "pre-wrap" }, text: "Delamain is responding… switching tabs won't cancel it; the reply will appear here when it finishes." }));
+      transcript.appendChild(note);
+    }
+    transcript.scrollTop = transcript.scrollHeight;
+  };
+  const onUpdate = () => { try { refreshTranscript(); } catch {} };
+  window.addEventListener("darksec:assistant-update", onUpdate);
+
   const promptInput = textarea({ rows: 4, placeholder: "Ask the local survival AI… (Ctrl/Cmd+Enter to send)" });
 
   // Image attach
@@ -670,6 +683,7 @@ export async function render(root) {
       if (pendingTicker) { clearInterval(pendingTicker); pendingTicker = null; }
       if (state.abortController === controller) state.abortController = null;
       setSending(false);
+      try { window.dispatchEvent(new CustomEvent("darksec:assistant-update")); } catch {}
     }
   }
 
@@ -678,4 +692,6 @@ export async function render(root) {
 
   // override createConversation to rebuild picker (already defined below? ensure exists)
   // (createConversation2 assigned above)
+
+  return () => { try { window.removeEventListener("darksec:assistant-update", onUpdate); } catch {} };
 }
