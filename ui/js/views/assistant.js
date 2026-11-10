@@ -7,7 +7,7 @@ function csrfToken() {
   return m ? decodeURIComponent(m[1]) : "";
 }
 
-const chatSession = { messages: [], selectedModel: "", think: null, includeContext: false, sending: false, abortController: null };
+const chatSession = { conversationId: null, messages: [], selectedModel: "", think: null, includeContext: false, sending: false, abortController: null, pendingImages: [], recognizing: false };
 
 function nowTs() { return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
 
@@ -83,6 +83,13 @@ async function buildContext() {
   return ctx;
 }
 
+function imageUrl(p) {
+  if (!p || typeof p !== "string") return "";
+  if (p.startsWith("data:") || p.startsWith("http")) return p;
+  const name = p.split("/").pop();
+  return `/api/assistant/image/${encodeURIComponent(name)}`;
+}
+
 export async function render(root) {
   root.replaceChildren(loading("Loading survival AI…"));
   let status = null, modelsResp = null;
@@ -102,15 +109,14 @@ export async function render(root) {
   }
   const initialModel = (store.settings?.ollama_model || status?.model || modelsResp?.configured_model || "").trim();
   if (!chatSession.selectedModel && initialModel) chatSession.selectedModel = initialModel;
-  // Thinking off by default for responsiveness (especially CPU). User can toggle per chat.
   if (chatSession.think === null) chatSession.think = false;
-  const state = chatSession; // persist across tab navigation within app session
+  const state = chatSession;
   root.replaceChildren();
 
   root.appendChild(pageHead({
     kicker: "COMMAND // DELAMAIN",
     title: "Delamain",
-    desc: "Local, operator-controlled AI assistant backed by Ollama. Detects installed Ollama models, lets you select one, and can include cached app context (intel/status/dashboard). Do not treat AI output as live sensor truth.",
+    desc: "Local, operator-controlled AI assistant backed by Ollama. Supports chat history, image attachments for vision models, voice input/output (browser-dependent), and indexed document retrieval.",
     actions: [
       btn("SETTINGS", { icon: "settings", tone: "ghost", onClick: () => { location.hash = "#/settings"; } }),
       btn("DETECT MODELS", { icon: "refresh", onClick: refreshModels }),
@@ -128,20 +134,95 @@ export async function render(root) {
   layout.append(main, side);
   root.appendChild(layout);
 
+  // Conversation picker
+  const convBar = h("div", { class: "row wrap gap-8", style: { alignItems: "center" } });
+  const convSelect = select([{ value: "", label: "Select conversation…" }], state.conversationId ? String(state.conversationId) : "");
+  const newConvBtn = btn("NEW CHAT", { size: "sm", icon: "plus", onClick: createConversation });
+  const delConvBtn = btn("DELETE", { size: "sm", tone: "danger", icon: "trash", onClick: deleteConversation });
+  convBar.append(convSelect, newConvBtn, delConvBtn);
+  main.appendChild(panel({ title: "Conversations", icon: "cpu", body: convBar }));
+
   const transcript = h("div", { class: "col gap-10", style: { minHeight: "320px", maxHeight: "56vh", overflow: "auto", padding: "4px 2px" } });
   const intro = h("div", { class: "callout" },
-    h("div", { class: "small", style: { whiteSpace: "pre-wrap" }, text: "Ask for field planning help, SITREP drafting, checklists, triage prompts, comms/logistics planning, map/intel interpretation, or gear/water/food/power reasoning. I can include a cached app-context snapshot if enabled. I won’t invent live readings." })
+    h("div", { class: "small", style: { whiteSpace: "pre-wrap" }, text: "Ask for field planning help, SITREP drafting, checklists, triage prompts, comms/logistics planning, map/intel interpretation, or gear/water/food/power reasoning. Attach images for vision models, use the mic for voice input, and review past chats below. I can include a cached app-context snapshot if enabled. I won’t invent live readings." })
   );
   transcript.appendChild(intro);
-  for (const m of (state.messages || [])) addMsg(m.role, m.content, m.meta || "", { record: false });
 
   const promptInput = textarea({ rows: 4, placeholder: "Ask the local survival AI… (Ctrl/Cmd+Enter to send)" });
+
+  // Image attach
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = "image/*";
+  fileInput.multiple = true;
+  fileInput.style.display = "none";
+  document.body.appendChild(fileInput);
+  const previewRow = h("div", { class: "row wrap gap-8" });
+  const attachBtn = btn("ATTACH IMAGE", { size: "sm", icon: "image", onClick: () => fileInput.click() });
+  fileInput.addEventListener("change", async () => {
+    for (const f of (fileInput.files || [])) {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result || ""));
+        r.onerror = () => reject(new Error("read failed"));
+        r.readAsDataURL(f);
+      }).catch(() => null);
+      if (dataUrl) state.pendingImages.push(dataUrl);
+    }
+    fileInput.value = "";
+    renderPreviews();
+  });
+  function renderPreviews() {
+    previewRow.replaceChildren();
+    state.pendingImages.forEach((src, idx) => {
+      const wrap = h("div", { style: { position: "relative" } });
+      const img = h("img", { src, style: { width: "64px", height: "64px", objectFit: "cover", borderRadius: "6px", border: "1px solid var(--border)" } });
+      const rm = btn("×", { size: "sm", tone: "danger", onClick: () => { state.pendingImages.splice(idx, 1); renderPreviews(); } });
+      rm.style.position = "absolute"; rm.style.top = "-6px"; rm.style.right = "-6px";
+      wrap.append(img, rm);
+      previewRow.appendChild(wrap);
+    });
+  }
+
   const ctxToggle = toggle("Include cached app context (status/intel/dashboard/settings)", !!state.includeContext, (v) => { state.includeContext = v; });
   const thinkToggle = toggle("Enable thinking/reasoning (slower on CPU)", !!state.think, (v) => { state.think = v; }, { title: "Per-request override. Slower on CPU-only systems; disable if responses stall." });
   const sendBtn = btn("SEND", { icon: "arrow-right", tone: "primary", onClick: send });
   const cancelBtn = btn("CANCEL", { icon: "close", tone: "danger", onClick: cancelSend });
   cancelBtn.style.display = "none";
   const clearBtn = btn("CLEAR", { icon: "trash", tone: "ghost", onClick: () => { state.messages = []; transcript.replaceChildren(intro); } });
+
+  // Voice
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null;
+  const micBtn = btn("MIC", { size: "sm", icon: "mic", onClick: () => {
+    if (!SpeechRec) { toast("Speech recognition not supported in this browser", "warn"); return; }
+    if (state.recognizing) {
+      try { recognition?.stop(); } catch {}
+      state.recognizing = false;
+      micBtn.textContent = "MIC";
+      return;
+    }
+    recognition = new SpeechRec();
+    recognition.lang = (store.settings?.language || "en-US");
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.onstart = () => { state.recognizing = true; micBtn.textContent = "LISTENING…"; };
+    recognition.onend = () => { state.recognizing = false; micBtn.textContent = "MIC"; };
+    recognition.onerror = (e) => { toast(`Mic error: ${e.error || e.message}`, "error"); state.recognizing = false; micBtn.textContent = "MIC"; };
+    recognition.onresult = (e) => {
+      const t = Array.from(e.results).map(r => r[0].transcript).join(" ").trim();
+      if (t) promptInput.value = (promptInput.value ? promptInput.value.trim() + " " : "") + t;
+    };
+    try { recognition.start(); } catch (e) { toast(e.message, "error"); }
+  } });
+  const speakBtn = btn("READ ALOUD", { size: "sm", icon: "volume-2", onClick: () => {
+    if (!window.speechSynthesis) { toast("Text-to-speech not supported", "warn"); return; }
+    const last = [...state.messages].reverse().find(m => m.role === "assistant");
+    if (!last) { toast("No assistant message to read", "warn"); return; }
+    try { window.speechSynthesis.cancel(); } catch {}
+    const u = new SpeechSynthesisUtterance(String(last.content || ""));
+    window.speechSynthesis.speak(u);
+  } });
 
   function setSending(on) {
     state.sending = !!on;
@@ -201,7 +282,7 @@ export async function render(root) {
       }
       renderStatus();
       renderModelPicker();
-      const alert = root.querySelector(".alert-strip, .callout.alert, .alert");
+      const alert2 = root.querySelector(".alert-strip, .callout.alert, .alert");
       if (status?.reachable) toast(`Detected ${names.length} installed model(s)`, names.length ? "ok" : "warn");
       else toast(status?.error || "Ollama not reachable", "error");
     } catch (e) { toast(e.message, "error"); }
@@ -209,12 +290,20 @@ export async function render(root) {
   renderStatus();
   renderModelPicker();
 
-  function addMsg(role, content, meta = "", opts = {}) {
+  function renderImages(images) {
+    const arr = Array.isArray(images) ? images : [];
+    if (!arr.length) return null;
+    return h("div", { class: "row wrap gap-6 mt-6" },
+      ...arr.map(p => h("img", { src: imageUrl(p), style: { maxWidth: "180px", maxHeight: "180px", borderRadius: "6px", border: "1px solid var(--border)" } }))
+    );
+  }
+
+  function addMsg(role, content, meta = "", images = [], opts = {}) {
     const record = opts.record !== false;
     const ts = meta || nowTs();
     if (record && (role === "user" || role === "assistant")) {
-      state.messages.push({ role, content: String(content || ""), meta: ts });
-      if (state.messages.length > 100) state.messages = state.messages.slice(-80);
+      state.messages.push({ role, content: String(content || ""), meta: ts, images: Array.isArray(images) ? images : [] });
+      if (state.messages.length > 200) state.messages = state.messages.slice(-160);
     }
     const isUser = role === "user";
     const box = h("div", { class: "callout " + (isUser ? "cyan" : ""), style: { borderLeft: isUser ? "3px solid rgba(72,215,255,.45)" : "3px solid rgba(93,255,154,.35)" } });
@@ -236,6 +325,8 @@ export async function render(root) {
       }
       box.appendChild(body);
     }
+    const imgs = renderImages(images);
+    if (imgs) box.appendChild(imgs);
     try { transcript.appendChild(box); transcript.scrollTop = transcript.scrollHeight; } catch {}
   }
 
@@ -251,11 +342,185 @@ export async function render(root) {
     return { box, body, meta };
   }
 
+  async function loadConversations() {
+    try {
+      const res = await api.get("/api/assistant/conversations");
+      const items = res?.items || [];
+      const opts = [{ value: "", label: "Select conversation…" }, ...items.map(c => ({ value: String(c.id), label: `${c.title || "Chat"} (${c.msg_count || 0})` }))];
+      const newSel = select(opts, state.conversationId ? String(state.conversationId) : "");
+      newSel.addEventListener("change", () => {
+        const v = newSel.value;
+        if (v) loadConversation(parseInt(v, 10));
+        else { state.conversationId = null; state.messages = []; transcript.replaceChildren(intro); }
+      });
+      convSelect.replaceWith(newSel);
+      // keep reference
+      // eslint-disable-next-line no-global-assign
+      // update convSelect variable by reassigning in closure scope not possible; instead use a wrapper
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  // We need a mutable reference to the select element; use an object wrapper.
+  // Rework: store select in state and replace via parent.
+  // The above approach is awkward; instead implement simpler picker rebuild.
+  // (We'll instead keep a container.)
+
+  async function loadConversation(id) {
+    try {
+      state.conversationId = id;
+      const res = await api.get(`/api/assistant/conversations/${id}/messages`);
+      const items = res?.items || [];
+      state.messages = items.map(m => ({ role: m.role, content: m.content || "", meta: m.created_at || nowTs(), images: Array.isArray(m.images) ? m.images : [] }));
+      transcript.replaceChildren(intro);
+      for (const m of state.messages) addMsg(m.role, m.content, m.meta, m.images, { record: false });
+      toast(`Loaded conversation ${id}`, "ok");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function createConversation() {
+    try {
+      const c = await api.post("/api/assistant/conversations", { title: "New chat" });
+      state.conversationId = c.id;
+      state.messages = [];
+      transcript.replaceChildren(intro);
+      await loadConversations();
+      // select it
+      const sel = document.querySelector("select");
+      if (sel) sel.value = String(c.id);
+      toast("New conversation created", "ok");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function deleteConversation() {
+    if (!state.conversationId) { toast("No conversation selected", "warn"); return; }
+    if (!confirm("Delete this conversation and its messages?")) return;
+    try {
+      await api.del(`/api/assistant/conversations/${state.conversationId}`);
+      state.conversationId = null;
+      state.messages = [];
+      transcript.replaceChildren(intro);
+      await loadConversations();
+      toast("Conversation deleted", "ok");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  // Fix conversation picker: use a container and rebuild select inside it.
+  // We appended convSelect already; but loadConversations replaces it and loses reference.
+  // To keep it simple, rebuild picker in a container.
+  // Remove the previous convBar select by rebuilding convBar contents each load.
+  // We'll instead create a container and manage select inside.
+
+  // Rebuild convBar as container with dynamic select
+  const convContainer = h("div", { class: "row wrap gap-8", style: { alignItems: "center" } });
+  convContainer.append(newConvBtn, delConvBtn);
+  // replace convBar in DOM
+  convBar.replaceWith(convContainer);
+  // We'll insert select at front when loading
+  async function rebuildConvPicker() {
+    try {
+      const res = await api.get("/api/assistant/conversations");
+      const items = res?.items || [];
+      const opts = [{ value: "", label: "Select conversation…" }, ...items.map(c => ({ value: String(c.id), label: `${c.title || "Chat"} (${c.msg_count || 0})` }))];
+      const newSel = select(opts, state.conversationId ? String(state.conversationId) : "");
+      newSel.addEventListener("change", () => {
+        const v = newSel.value;
+        if (v) loadConversation(parseInt(v, 10));
+        else { state.conversationId = null; state.messages = []; transcript.replaceChildren(intro); }
+      });
+      // remove old select
+      const old = convContainer.querySelector("select");
+      if (old) old.remove();
+      convContainer.insertBefore(newSel, convContainer.firstChild);
+    } catch (e) { toast(e.message, "error"); }
+  }
+  // initial
+  await rebuildConvPicker();
+
+  main.appendChild(panel({
+    title: "Assistant Chat", icon: "cpu", flush: true,
+    body: h("div", { class: "col gap-10", style: { padding: "12px" } },
+      transcript,
+      field("PROMPT", promptInput),
+      previewRow,
+      h("div", { class: "col gap-6" },
+        h("div", { class: "row wrap gap-12" }, ctxToggle, thinkToggle),
+        h("div", { class: "row wrap gap-8", style: { justifyContent: "flex-end" } }, attachBtn, micBtn, speakBtn, clearBtn, cancelBtn, sendBtn))
+    )
+  }));
+
+  const quick = [
+    ["Draft SITREP", "Draft a concise SITREP from the included app context. Mark unknowns, stale data, and assumptions clearly."],
+    ["Intel summary", "Summarize the included intel/dashboard context into immediate risks, watch items, and next checks. Separate confirmed cached data from inference."],
+    ["72-hour priorities", "Give a practical 72-hour survival priority checklist (life safety, shelter, water, medical, comms, security, logistics). Ask 2-3 clarifying questions only if essential."],
+    ["MARCH / first aid", "Give a conservative MARCH/first-aid priority checklist for a field responder. Do not diagnose or prescribe; recommend qualified medical care when available."],
+    ["Water plan", "Help plan water procurement, treatment, storage, and rationing priorities for field conditions. State assumptions and contamination risks."],
+    ["Comms discipline", "Create a short comms check and message-discipline checklist for a small team (brevity, authentication/confirmation habits, fallback plan). Avoid sensitive specifics."],
+    ["Go-bag check", "Build a practical go-bag / sustainment checklist prioritized by mission length and likely hazards. Mark critical vs optional items."],
+    ["CBRN caution", "Using included context if present, give conservative CBRN/hazard precautions and immediate next checks. Do not invent readings or declare areas safe."],
+    ["Route planning", "Help me think through route planning risks and checks (weather, hazards, timing, comms, contingencies). Ask for origin/destination/constraints if needed."],
+  ];
+  side.appendChild(panel({
+    title: "Quick Prompts", icon: "cpu",
+    body: h("div", { class: "col gap-6" }, ...quick.map(([label, text]) => btn(label, { tone: "ghost", size: "sm", onClick: () => { promptInput.value = text; promptInput.focus(); } })))
+  }));
+  side.appendChild(panel({ title: "Model", icon: "cpu", body: modelBox }));
+  side.appendChild(panel({ title: "Connection", icon: "info", body: statusBox }));
+  side.appendChild(panel({
+    title: "Local Setup", icon: "settings",
+    body: h("div", { class: "col gap-6 small" },
+      h("div", { class: "muted", text: "1. Install/start Ollama locally." }),
+      h("div", { class: "muted", text: "2. Pull a model (example: `ollama pull llama3.2` or another model you trust)." }),
+      h("div", { class: "muted", text: "3. Use ATTACH IMAGE for vision models, MIC for voice input, READ ALOUD for speech output." }),
+      h("div", { class: "callout amber tiny", text: "Safety: AI guidance can be wrong. Verify critical medical, navigation, legal, and hazard decisions against training, authoritative references, and real conditions." }),
+    )
+  }));
+
+  // createConversation should refresh picker
+  // redefine createConversation to rebuild picker
+  async function createConversation2() {
+    try {
+      const c = await api.post("/api/assistant/conversations", { title: "New chat" });
+      state.conversationId = c.id;
+      state.messages = [];
+      transcript.replaceChildren(intro);
+      await rebuildConvPicker();
+      const sel = convContainer.querySelector("select");
+      if (sel) sel.value = String(c.id);
+      toast("New conversation created", "ok");
+    } catch (e) { toast(e.message, "error"); }
+  }
+  newConvBtn.onclick = createConversation2;
+
+  async function deleteConversation2() {
+    if (!state.conversationId) { toast("No conversation selected", "warn"); return; }
+    if (!confirm("Delete this conversation and its messages?")) return;
+    try {
+      await api.del(`/api/assistant/conversations/${state.conversationId}`);
+      state.conversationId = null;
+      state.messages = [];
+      transcript.replaceChildren(intro);
+      await rebuildConvPicker();
+      toast("Conversation deleted", "ok");
+    } catch (e) { toast(e.message, "error"); }
+  }
+  delConvBtn.onclick = deleteConversation2;
+
   async function send() {
     const text = (promptInput.value || "").trim();
-    if (!text || state.sending) return;
+    if (!text && state.pendingImages.length === 0) return;
+    if (state.sending) return;
     const model = state.selectedModel || store.settings?.ollama_model || status?.model || "";
     if (!model) { toast("Select an installed model first (Detect Models)", "warn"); return; }
+    // ensure conversation
+    if (!state.conversationId) {
+      try {
+        const c = await api.post("/api/assistant/conversations", { title: (text || "Image chat").slice(0, 60) });
+        state.conversationId = c.id;
+        await rebuildConvPicker();
+        const sel = convContainer.querySelector("select");
+        if (sel) sel.value = String(c.id);
+      } catch (e) { toast(e.message, "error"); return; }
+    }
     let pending = null;
     let pendingTicker = null;
     let stage = "Building context and connecting…";
@@ -265,8 +530,11 @@ export async function render(root) {
     setSending(true);
     try {
       const priorHistory = (state.messages || []).slice(-12).map(m => ({ role: m.role, content: m.content }));
-      addMsg("user", text);
+      addMsg("user", text || "(image)", nowTs(), state.pendingImages.slice(), { record: true });
+      const sentImages = state.pendingImages.slice();
       promptInput.value = "";
+      state.pendingImages = [];
+      renderPreviews();
       const waitNote = state.think ? " Thinking/reasoning is enabled and can take much longer on CPU." : "";
       const paintWait = () => {
         if (!pending) return;
@@ -277,7 +545,7 @@ export async function render(root) {
       paintWait();
       transcript.appendChild(pending); transcript.scrollTop = transcript.scrollHeight;
       pendingTicker = setInterval(paintWait, 1000);
-      const payload = { prompt: text, history: priorHistory, model, think: !!state.think };
+      const payload = { prompt: text || "Describe the attached image.", history: priorHistory, model, think: !!state.think, conversation_id: state.conversationId, images: sentImages };
       if (state.includeContext) {
         stage = "Collecting cached app context…"; paintWait();
         payload.context = await buildContext();
@@ -285,7 +553,6 @@ export async function render(root) {
       if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
       stage = "Connecting to local AI (first words can take 10–30s on CPU)…"; paintWait();
 
-      // Try streaming endpoint first (best UX on CPU); fall back to non-streaming.
       let usedStream = false;
       try {
         const headers = { "Content-Type": "application/json", "Accept": "application/x-ndjson" };
@@ -334,15 +601,14 @@ export async function render(root) {
           if (hadError && !String(content).trim()) throw new Error(hadError);
           const finalContent = String(content || "").trim() || "(model returned empty content)";
           const truncNote = (doneData?.truncated || doneData?.done_reason === "length") ? " · truncated (increase Max reply tokens)" : "";
-          // Render markdown at end for nicer formatting
           try {
             const html = renderMarkdown(finalContent);
             if (typeof html === "string") ui.body.innerHTML = html;
             else ui.body.textContent = finalContent;
           } catch { ui.body.textContent = finalContent; }
           ui.meta.textContent = `${finalModel} · ${nowTs()}${truncNote}`;
-          state.messages.push({ role: "assistant", content: finalContent, meta: ui.meta.textContent });
-          if (state.messages.length > 100) state.messages = state.messages.slice(-80);
+          state.messages.push({ role: "assistant", content: finalContent, meta: ui.meta.textContent, images: [] });
+          if (state.messages.length > 200) state.messages = state.messages.slice(-160);
           if (thinking && String(thinking).trim()) {
             const details = h("details", { class: "small", style: { marginTop: "8px" } },
               h("summary", { style: { cursor: "pointer", color: "var(--muted)" }, text: "Model thinking/reasoning" }),
@@ -353,14 +619,13 @@ export async function render(root) {
           if (hadError) toast(`Stream warning: ${hadError}`, "warn");
           transcript.scrollTop = transcript.scrollHeight;
         } else if (resp.status !== 404 && resp.status !== 405) {
-          // streaming endpoint exists but failed - try to parse error and fall back
           let detail = "";
           try { const j = await resp.json(); detail = j?.detail || j?.error || ""; } catch {}
           if (detail) throw new Error(detail);
         }
       } catch (streamErr) {
         if (streamErr?.name === "AbortError") throw streamErr;
-        if (usedStream) throw streamErr; // already committed to stream UI
+        if (usedStream) throw streamErr;
         console.warn("assistant stream fallback", streamErr);
       }
 
@@ -370,7 +635,7 @@ export async function render(root) {
         const truncNote = (res?.truncated || res?.done_reason === "length") ? " · truncated (increase Max reply tokens)" : "";
         try { pending?.remove(); } catch {}
         pending = null;
-        addMsg("assistant", content, res?.model ? `${res.model} · ${nowTs()}${truncNote}` : `${nowTs()}${truncNote}`);
+        addMsg("assistant", content, res?.model ? `${res.model} · ${nowTs()}${truncNote}` : `${nowTs()}${truncNote}`, [], { record: true });
         if (res?.thinking && String(res.thinking).trim()) {
           const details = h("details", { class: "small", style: { marginTop: "8px" } },
             h("summary", { style: { cursor: "pointer", color: "var(--muted)" }, text: "Model thinking/reasoning" }),
@@ -382,13 +647,13 @@ export async function render(root) {
     } catch (e) {
       try { pending?.remove(); } catch {}
       if (e?.name === "AbortError" || /aborted|AbortError/i.test(String(e?.message || e || ""))) {
-        addMsg("assistant", "_Request cancelled._", nowTs(), { record: false });
+        addMsg("assistant", "_Request cancelled._", nowTs(), [], { record: false });
         toast("Cancelled", "warn");
       } else {
         const msg = e?.message || String(e);
         console.error("assistant chat failed", e);
         try {
-          addMsg("assistant", `**Error:** ${msg}\n\nIf this was a timeout, increase **Assistant timeout** in Settings (CPU-only models can be slow) or use \`qwen3.5:2b\`/\`qwen3.5:4b\` with shorter prompts. Also confirm Ollama is running and the selected model is installed.`, "", { record: false });
+          addMsg("assistant", `**Error:** ${msg}`, "", [], { record: false });
         } catch {}
         toast(msg, "error");
       }
@@ -399,41 +664,6 @@ export async function render(root) {
     }
   }
 
-  main.appendChild(panel({
-    title: "Assistant Chat", icon: "cpu", flush: true,
-    body: h("div", { class: "col gap-10", style: { padding: "12px" } },
-      transcript,
-      field("PROMPT", promptInput),
-      h("div", { class: "col gap-6" },
-        h("div", { class: "row wrap gap-12" }, ctxToggle, thinkToggle),
-        h("div", { class: "row wrap gap-8", style: { justifyContent: "flex-end" } }, clearBtn, cancelBtn, sendBtn))
-    )
-  }));
-
-  const quick = [
-    ["Draft SITREP", "Draft a concise SITREP from the included app context. Mark unknowns, stale data, and assumptions clearly."],
-    ["Intel summary", "Summarize the included intel/dashboard context into immediate risks, watch items, and next checks. Separate confirmed cached data from inference."],
-    ["72-hour priorities", "Give a practical 72-hour survival priority checklist (life safety, shelter, water, medical, comms, security, logistics). Ask 2-3 clarifying questions only if essential."],
-    ["MARCH / first aid", "Give a conservative MARCH/first-aid priority checklist for a field responder. Do not diagnose or prescribe; recommend qualified medical care when available."],
-    ["Water plan", "Help plan water procurement, treatment, storage, and rationing priorities for field conditions. State assumptions and contamination risks."],
-    ["Comms discipline", "Create a short comms check and message-discipline checklist for a small team (brevity, authentication/confirmation habits, fallback plan). Avoid sensitive specifics."],
-    ["Go-bag check", "Build a practical go-bag / sustainment checklist prioritized by mission length and likely hazards. Mark critical vs optional items."],
-    ["CBRN caution", "Using included context if present, give conservative CBRN/hazard precautions and immediate next checks. Do not invent readings or declare areas safe."],
-    ["Route planning", "Help me think through route planning risks and checks (weather, hazards, timing, comms, contingencies). Ask for origin/destination/constraints if needed."],
-  ];
-  side.appendChild(panel({
-    title: "Quick Prompts", icon: "cpu",
-    body: h("div", { class: "col gap-6" }, ...quick.map(([label, text]) => btn(label, { tone: "ghost", size: "sm", onClick: () => { promptInput.value = text; promptInput.focus(); } })))
-  }));
-  side.appendChild(panel({ title: "Model", icon: "cpu", body: modelBox }));
-  side.appendChild(panel({ title: "Connection", icon: "info", body: statusBox }));
-  side.appendChild(panel({
-    title: "Local Setup", icon: "settings",
-    body: h("div", { class: "col gap-6 small" },
-      h("div", { class: "muted", text: "1. Install/start Ollama locally." }),
-      h("div", { class: "muted", text: "2. Pull a model (example: `ollama pull llama3.2` or another model you trust)." }),
-      h("div", { class: "muted", text: "3. Set the model/base URL in System Settings if needed." }),
-      h("div", { class: "callout amber tiny", text: "Safety: AI guidance can be wrong. Verify critical medical, navigation, legal, and hazard decisions against training, authoritative references, and real conditions." }),
-    )
-  }));
+  // override createConversation to rebuild picker (already defined below? ensure exists)
+  // (createConversation2 assigned above)
 }

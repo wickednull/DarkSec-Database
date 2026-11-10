@@ -324,6 +324,26 @@ CREATE TABLE IF NOT EXISTS cctv_media_health (
 
 -- Query indexes are created in _ensure_indexes() so an older database with a
 -- missing column cannot stop the application from starting.
+
+-- Delamain chat history (conversations + messages).
+CREATE TABLE IF NOT EXISTS assistant_conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS assistant_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT DEFAULT '',
+    images TEXT DEFAULT '[]',
+    model TEXT,
+    meta TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (conversation_id) REFERENCES assistant_conversations(id) ON DELETE CASCADE
+);
 """
 
 

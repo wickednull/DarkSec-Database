@@ -5,12 +5,16 @@ No cloud dependency. Errors are returned clearly so the UI can stay offline-safe
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
+
+from . import config as _config
 
 import requests
 
@@ -217,6 +221,68 @@ def _quick_extract(path_str: str, max_chars: int = 1500) -> str:
     return ""
 
 
+def save_image(data: str) -> str | None:
+    """Save a base64/data-URL image into UPLOAD_DIR; return its path or None."""
+    if not data or not isinstance(data, str):
+        return None
+    s = data.strip()
+    mime = "image/png"
+    b64 = s
+    if s.startswith("data:"):
+        try:
+            header, b64 = s.split(",", 1)
+            if ":" in header and ";" in header:
+                mime = header.split(":", 1)[1].split(";", 1)[0].strip() or mime
+        except Exception:
+            return None
+    ext = ".png"
+    if "jpeg" in mime or "jpg" in mime:
+        ext = ".jpg"
+    elif "webp" in mime:
+        ext = ".webp"
+    elif "gif" in mime:
+        ext = ".gif"
+    try:
+        raw = base64.b64decode(b64, validate=False)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        _config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        name = f"assistant_{uuid.uuid4().hex}{ext}"
+        path = _config.UPLOAD_DIR / name
+        path.write_bytes(raw)
+        return str(path)
+    except Exception:
+        return None
+
+
+def _to_base64_image(value: Any) -> str | None:
+    """Convert a path/data-URL/raw-base64 value into raw base64 for Ollama."""
+    if not value or not isinstance(value, str):
+        return None
+    s = value.strip()
+    if s.startswith("data:"):
+        try:
+            return s.split(",", 1)[1].strip()
+        except Exception:
+            return None
+    # treat as file path if it exists
+    p = Path(s)
+    if p.is_file():
+        try:
+            return base64.b64encode(p.read_bytes()).decode("ascii")
+        except Exception:
+            return None
+    # assume raw base64
+    try:
+        base64.b64decode(s, validate=False)
+        return s
+    except Exception:
+        return None
+
+
 def _library_context(db: Database, query: str, limit: int = 5, max_chars: int = 6000) -> str:
     """Retrieve relevant snippets from the indexed document library (PDFs etc.).
 
@@ -317,7 +383,7 @@ def _library_context(db: Database, query: str, limit: int = 5, max_chars: int = 
     )
 
 
-def build_messages(db: Database, user_text: str, history: list[dict] | None = None, context: Any = None) -> list[dict]:
+def build_messages(db: Database, user_text: str, history: list[dict] | None = None, context: Any = None, images: list | None = None) -> list[dict]:
     cfg = _settings(db)
     msgs = []
     sys = cfg["system_prompt"] or "Your name is Delamain, a local survival assistant."
@@ -352,18 +418,26 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
     # restore chronological order for the kept history
     body = msgs[1:]
     msgs = msgs[:1] + list(reversed(body))
-    msgs.append({"role": "user", "content": str(user_text or "")[:8000]})
+    user_msg = {"role": "user", "content": str(user_text or "")[:8000]}
+    b64s = []
+    for img in (images or []):
+        b = _to_base64_image(img)
+        if b:
+            b64s.append(b)
+    if b64s:
+        user_msg["images"] = b64s
+    msgs.append(user_msg)
     return msgs
 
 
-def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, stream: bool = False):
+def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, stream: bool = False, images: list | None = None):
     cfg = _settings(db)
     if not cfg["enabled"]:
         raise ValueError("Assistant is disabled in settings.")
     use_model = (model or cfg["model"]).strip()
     if not use_model:
         raise ValueError("No Ollama model configured. Set assistant/ollama model in Settings.")
-    messages = build_messages(db, prompt, history=history, context=context)
+    messages = build_messages(db, prompt, history=history, context=context, images=images)
     use_think = bool(cfg.get("think", False)) if think is None else bool(think)
     payload = {
         "model": use_model,
@@ -376,8 +450,8 @@ def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, 
     return cfg, use_model, payload
 
 
-def chat(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None) -> dict:
-    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=False)
+def chat(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None) -> dict:
+    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=False, images=images)
     resp = requests.post(f"{cfg['base_url']}/api/chat", headers=UA, data=json.dumps(payload), timeout=cfg["timeout"])
     resp.raise_for_status()
     data = resp.json() if resp.content else {}
@@ -413,9 +487,9 @@ def chat(db: Database, prompt: str, history: list[dict] | None = None, context: 
     }
 
 
-def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None):
+def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None):
     """Yield NDJSON-friendly dicts for streaming UI updates."""
-    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=True)
+    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=True, images=images)
     content_acc = ""
     thinking_acc = ""
     final_model = use_model

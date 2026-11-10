@@ -656,11 +656,27 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         context = payload.get("context")
         model = str(payload.get("model") or "").strip() or None
         think = payload.get("think") if "think" in payload else None
-        # Do not audit full prompt/content by default (may contain sensitive notes).
-        d.audit("ASSISTANT_CHAT", json.dumps({"model": model or d.get_setting("ollama_model", ""), "prompt_chars": len(prompt), "has_context": bool(context), "think": think}), request.client.host if request.client else "")
+        conversation_id = payload.get("conversation_id")
         try:
-            result = await run_in_threadpool(assistant.chat, d, prompt, history, context, model, think)
+            conversation_id = int(conversation_id) if conversation_id is not None else None
+        except Exception:
+            conversation_id = None
+        images = payload.get("images") if isinstance(payload.get("images"), list) else []
+        image_paths = [p for p in (assistant.save_image(x) for x in images) if p]
+        # Do not audit full prompt/content by default (may contain sensitive notes).
+        d.audit("ASSISTANT_CHAT", json.dumps({"model": model or d.get_setting("ollama_model", ""), "prompt_chars": len(prompt), "has_context": bool(context), "think": think, "images": len(image_paths)}), request.client.host if request.client else "")
+        try:
+            result = await run_in_threadpool(assistant.chat, d, prompt, history, context, model, think, image_paths)
+            # Persist to conversation history when requested.
+            if conversation_id is not None:
+                try:
+                    d.insert("assistant_messages", {"conversation_id": conversation_id, "role": "user", "content": prompt, "images": json.dumps(image_paths), "model": model or d.get_setting("ollama_model", ""), "meta": "", "created_at": utcnow()})
+                    d.insert("assistant_messages", {"conversation_id": conversation_id, "role": "assistant", "content": result.get("content") or "", "images": "[]", "model": result.get("model"), "meta": result.get("done_reason") or "", "created_at": utcnow()})
+                    d.execute("UPDATE assistant_conversations SET updated_at=? WHERE id=?", (utcnow(), conversation_id))
+                except Exception:
+                    pass
             d.audit("ASSISTANT_OK", json.dumps({"model": result.get("model"), "chars": len(result.get("content") or "")}), request.client.host if request.client else "")
+            result["image_paths"] = image_paths
             return result
         except ValueError as e:
             d.audit("ASSISTANT_ERR", f"400:{str(e)[:200]}")
@@ -691,25 +707,102 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         context = payload.get("context")
         model = str(payload.get("model") or "").strip() or None
         think = payload.get("think") if "think" in payload else None
+        conversation_id = payload.get("conversation_id")
+        try:
+            conversation_id = int(conversation_id) if conversation_id is not None else None
+        except Exception:
+            conversation_id = None
+        images = payload.get("images") if isinstance(payload.get("images"), list) else []
+        image_paths = [p for p in (assistant.save_image(x) for x in images) if p]
         use_model = model or d.get_setting("ollama_model", "")
-        d.audit("ASSISTANT_CHAT", json.dumps({"model": use_model, "prompt_chars": len(prompt), "has_context": bool(context), "think": think, "stream": True}), request.client.host if request.client else "")
+        d.audit("ASSISTANT_CHAT", json.dumps({"model": use_model, "prompt_chars": len(prompt), "has_context": bool(context), "think": think, "stream": True, "images": len(image_paths)}), request.client.host if request.client else "")
 
         def generate():
+            final_content = ""
+            final_model = use_model
             try:
-                for chunk in assistant.chat_stream(d, prompt, history, context, model, think):
+                for chunk in assistant.chat_stream(d, prompt, history, context, model, think, image_paths):
                     yield json.dumps(chunk, ensure_ascii=False, default=str) + "\n"
                     if isinstance(chunk, dict) and chunk.get("type") == "done":
-                        try: d.audit("ASSISTANT_OK", json.dumps({"model": chunk.get("model"), "chars": len(chunk.get("content") or ""), "stream": True}), request.client.host if request.client else "")
+                        final_content = chunk.get("content") or final_content
+                        final_model = chunk.get("model") or final_model
+                        try: d.audit("ASSISTANT_OK", json.dumps({"model": final_model, "chars": len(final_content or ""), "stream": True}), request.client.host if request.client else "")
                         except Exception: pass
-                    if isinstance(chunk, dict) and chunk.get("type") == "error":
-                        try: d.audit("ASSISTANT_ERR", f"stream:{str(chunk.get('error',''))[:200]}")
-                        except Exception: pass
+                        if conversation_id is not None:
+                            try:
+                                d.insert("assistant_messages", {"conversation_id": conversation_id, "role": "user", "content": prompt, "images": json.dumps(image_paths), "model": model or d.get_setting("ollama_model", ""), "meta": "", "created_at": utcnow()})
+                                d.insert("assistant_messages", {"conversation_id": conversation_id, "role": "assistant", "content": final_content or "", "images": "[]", "model": final_model, "meta": chunk.get("done_reason") or "", "created_at": utcnow()})
+                                d.execute("UPDATE assistant_conversations SET updated_at=? WHERE id=?", (utcnow(), conversation_id))
+                            except Exception:
+                                pass
             except Exception as e:
                 try: d.audit("ASSISTANT_ERR", f"stream500:{type(e).__name__}:{str(e)[:200]}")
                 except Exception: pass
                 yield json.dumps({"type": "error", "error": f"{type(e).__name__}: {str(e)[:400]}"}, ensure_ascii=False) + "\n"
 
         return StreamingResponse(generate(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ----------------------------------------------------------- assistant history/images
+    @app.get("/api/assistant/conversations")
+    def assistant_conversations_list(request: Request):
+        d = db(request)
+        rows = d.query("SELECT c.id, c.title, c.created_at, c.updated_at, "
+                       "(SELECT count(*) FROM assistant_messages m WHERE m.conversation_id=c.id) AS msg_count "
+                       "FROM assistant_conversations c ORDER BY c.updated_at DESC")
+        return {"items": [dict(r) for r in rows]}
+
+    @app.post("/api/assistant/conversations")
+    def assistant_conversations_create(request: Request, payload: dict = Body(default={})):
+        d = db(request)
+        title = str(payload.get("title") or "New chat").strip()[:120] or "New chat"
+        cid = d.insert("assistant_conversations", {"title": title, "created_at": utcnow(), "updated_at": utcnow()})
+        return {"id": cid, "title": title, "created_at": utcnow(), "updated_at": utcnow()}
+
+    @app.get("/api/assistant/conversations/{conv_id}/messages")
+    def assistant_conversation_messages(request: Request, conv_id: int):
+        d = db(request)
+        rows = d.query("SELECT id, conversation_id, role, content, images, model, meta, created_at "
+                       "FROM assistant_messages WHERE conversation_id=? ORDER BY id ASC", (conv_id,))
+        out = []
+        for r in rows:
+            item = dict(r)
+            try:
+                item["images"] = json.loads(item.get("images") or "[]")
+            except Exception:
+                item["images"] = []
+            out.append(item)
+        return {"items": out}
+
+    @app.delete("/api/assistant/conversations/{conv_id}")
+    def assistant_conversation_delete(request: Request, conv_id: int):
+        d = db(request)
+        d.execute("DELETE FROM assistant_messages WHERE conversation_id=?", (conv_id,))
+        d.execute("DELETE FROM assistant_conversations WHERE id=?", (conv_id,))
+        d.audit("ASSISTANT_CONV_DELETE", f"id={conv_id}")
+        return {"ok": True}
+
+    @app.post("/api/assistant/image")
+    async def assistant_image_upload(request: Request, payload: dict = Body(...)):
+        d = db(request)
+        data = payload.get("data")
+        path = assistant.save_image(data)
+        require(bool(path), "Invalid image data", 400)
+        name = Path(path).name
+        d.audit("ASSISTANT_IMAGE", f"{name}")
+        return {"path": path, "url": f"/api/assistant/image/{name}"}
+
+    @app.get("/api/assistant/image/{name}")
+    def assistant_image_get(name: str):
+        safe = Path(name).name
+        path = config.UPLOAD_DIR / safe
+        require(path.exists() and path.is_file(), "Image not found", 404)
+        # basic safety: ensure inside upload dir
+        try:
+            path.resolve().relative_to(config.UPLOAD_DIR.resolve())
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        from fastapi.responses import FileResponse
+        return FileResponse(path)
 
     # ------------------------------------------------------------ settings
     @app.get("/api/settings")
