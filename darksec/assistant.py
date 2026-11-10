@@ -40,6 +40,7 @@ def _settings(db: Database) -> dict:
         "num_ctx": max(512, min(32768, int(float(s.get("assistant_num_ctx") or 4096)))),
         "max_tokens": max(128, min(8192, int(float(s.get("assistant_max_tokens") or 2048)))),
         "think": bool(s.get("assistant_think", False)),
+        "history_filter": bool(s.get("assistant_history_filter", True)),
         "opsec_mode": bool(s.get("opsec_mode", False)),
         "units": s.get("units") or "metric",
         "callsign": s.get("callsign") or "",
@@ -411,7 +412,7 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
         content = m.get("content")
         if role not in ("user", "assistant") or not isinstance(content, str) or not content.strip():
             continue
-        if _history_is_poisoned(m):
+        if cfg.get("history_filter", True) and _history_is_poisoned(m):
             continue
         msgs.append({"role": role, "content": content[:8000]})
         kept += 1
