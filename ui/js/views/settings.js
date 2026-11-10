@@ -25,6 +25,7 @@ export async function render(root) {
   let gpsCandidate = null;
   let phoneSessionId = null;
   let phonePollTimer = null;
+  let autoAcceptedReceivedAt = null;
   let libStats = status.library || {};
 
   root.replaceChildren();
@@ -740,6 +741,12 @@ export async function render(root) {
           ["ALTITUDE", fix.alt_m != null ? `${fmt.num(fix.alt_m, 1)} m (not applied)` : "not reported"],
         ]));
         phoneAcceptButton.disabled = Number(fix.age_seconds) > 30;
+        // Auto-accept when LAN/mobile access is enabled.
+        const lanEnabled = !!(store.settings?.lan_access_enabled || lanInput?.checked);
+        if (lanEnabled && Number(fix.age_seconds) <= 30 && fix.received_at && fix.received_at !== autoAcceptedReceivedAt) {
+          autoAcceptedReceivedAt = fix.received_at;
+          acceptPhoneGps().catch(() => {});
+        }
       } else {
         phoneFix.textContent = "No phone fix received.";
         phoneAcceptButton.disabled = true;
