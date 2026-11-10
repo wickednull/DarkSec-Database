@@ -117,16 +117,18 @@ def extract_text(path: Path, ext: str) -> tuple[str, int | None]:
             except Exception:
                 pass
         try:
-            from pypdf import PdfReader
-            reader = PdfReader(str(path))
-            pages = min(len(reader.pages), MAX_PDF_PAGES)
-            chunks = []
-            for i in range(pages):
-                try:
-                    chunks.append(reader.pages[i].extract_text() or "")
-                except Exception:
-                    continue
-            return ("\n".join(chunks))[:MAX_TEXT_CHARS], len(reader.pages)
+            import contextlib, io
+            with contextlib.redirect_stderr(io.StringIO()):
+                from pypdf import PdfReader
+                reader = PdfReader(str(path))
+                pages = min(len(reader.pages), MAX_PDF_PAGES)
+                chunks = []
+                for i in range(pages):
+                    try:
+                        chunks.append(reader.pages[i].extract_text() or "")
+                    except Exception:
+                        continue
+                return ("\n".join(chunks))[:MAX_TEXT_CHARS], len(reader.pages)
         except Exception:
             return "", None
     if ext in (".epub", ".cbz"):

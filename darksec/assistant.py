@@ -175,17 +175,19 @@ def _quick_extract(path_str: str, max_chars: int = 1500) -> str:
             pass
     if ext == ".pdf":
         try:
-            from pypdf import PdfReader
-            reader = PdfReader(str(p))
-            chunks = []
-            for i in range(min(5, len(reader.pages))):
-                try:
-                    chunks.append(reader.pages[i].extract_text() or "")
-                except Exception:
-                    continue
-            text = "\n".join(chunks)[:max_chars]
-            if text.strip():
-                return text.strip()
+            import contextlib, io
+            with contextlib.redirect_stderr(io.StringIO()):
+                from pypdf import PdfReader
+                reader = PdfReader(str(p))
+                chunks = []
+                for i in range(min(5, len(reader.pages))):
+                    try:
+                        chunks.append(reader.pages[i].extract_text() or "")
+                    except Exception:
+                        continue
+                text = "\n".join(chunks)[:max_chars]
+                if text.strip():
+                    return text.strip()
         except Exception:
             pass
         # OCR fallback for scanned/image PDFs (requires tesseract + pdf2image)
