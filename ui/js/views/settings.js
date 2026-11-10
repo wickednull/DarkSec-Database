@@ -125,6 +125,7 @@ export async function render(root) {
       h("div", { class: "row wrap mt-10" },
         btn("SAVE POSITION", { tone: "primary", icon: "save", onClick: savePosition }),
         btn("GPS FIX", { icon: "satellite", onClick: gpsFix }),
+        btn("PHONE GPS (BROWSER)", { icon: "smartphone", onClick: browserGpsFix }),
         btn("OPEN MAP", { icon: "map", onClick: () => { location.hash = "#/map"; } }),
         btn("NAV TOOLS", { icon: "route", onClick: () => { location.hash = "#/nav"; } }))),
   });
@@ -615,6 +616,48 @@ export async function render(root) {
       toast("GPS fix copied — review and save");
       updateCoordPreview();
     } catch (err) { toast(err.message || "GPS unavailable", "error"); }
+  }
+
+  async function browserGpsFix() {
+    if (!navigator.geolocation) { toast("Browser geolocation not supported", "warn"); return; }
+    toast("Requesting location permission…", "warn");
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      const c = pos.coords;
+      lat.value = c.latitude;
+      lon.value = c.longitude;
+      if (Number.isFinite(c.altitude)) elevation.value = Math.round(c.altitude);
+      const accuracy = Number.isFinite(c.accuracy) ? `±${fmt.num(c.accuracy, 1)} m` : "accuracy unavailable";
+      const lanEnabled = !!(store.settings?.lan_access_enabled || lanInput?.checked);
+      if (lanEnabled) {
+        try {
+          await store.saveSettings({
+            lat: c.latitude,
+            lon: c.longitude,
+            elevation_m: Number.isFinite(c.altitude) ? Math.round(c.altitude) : store.settings?.elevation_m,
+            position_source: "phone",
+            position_updated_at: new Date().toISOString(),
+            position_fix_at: new Date().toISOString(),
+            position_accuracy_m: Number.isFinite(c.accuracy) ? c.accuracy : null,
+            position_mode: 3,
+          });
+          await store.loadStatus({ force: true });
+          const quality = positionConfidence(store.settings);
+          positionStatus.className = `callout ${quality.tone} small`;
+          positionStatus.textContent = `Phone/browser fix auto-saved over LAN (${accuracy}).`;
+          toast("Phone location saved", "ok");
+          await updateCoordPreview();
+          return;
+        } catch (err) {
+          toast(err.message || "Could not save phone location", "error");
+        }
+      }
+      positionStatus.className = "callout warn small";
+      positionStatus.textContent = `Phone/browser fix captured (${accuracy}). Review the coordinate and SAVE POSITION to apply it; this is not live tracking.`;
+      toast("Location captured — review and save", "ok");
+      await updateCoordPreview();
+    }, (err) => {
+      toast(err.message || "Location permission denied", "error");
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
   }
 
   async function loadPhoneInterfaces() {
