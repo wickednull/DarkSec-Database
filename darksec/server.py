@@ -363,9 +363,11 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             autosync.engine.start(db)
         if not no_index and not os.environ.get("DARKSEC_NO_INDEX"):
             try:
-                if library.metadata_count(db) == 0:
-                    library.start_index(deep=bool(db.get_setting("auto_deep_index", True)), force=False)
-                    db.audit("INDEX_AUTO", "Background library index started")
+                # Always reconcile metadata (fast) so PDFs added to the library
+                # folders show up without a manual reindex; deep text extraction
+                # only runs for documents that are not yet indexed.
+                library.start_index(deep=bool(db.get_setting("auto_deep_index", True)), force=False)
+                db.audit("INDEX_AUTO", "Background library index started")
             except Exception as exc:
                 db.audit("INDEX_AUTO_FAIL", str(exc)[:300])
         if handshake:
