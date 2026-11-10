@@ -215,6 +215,22 @@ export async function render(root) {
       if (lanInput.checked) await api.post("/api/lan/start");
       else await api.post("/api/lan/stop");
       await refreshLan();
+      // When LAN/mobile access is enabled, also start phone GPS on the LAN IP
+      // if possible, so a mobile browser can provide a position fix.
+      if (lanInput.checked) {
+        try {
+          const st = await api.get("/api/lan/status");
+          if (st?.ip && !phoneSessionId) {
+            if (![...phoneInterface.options].some(o => o.value === st.ip)) {
+              const opt = document.createElement("option");
+              opt.value = st.ip; opt.textContent = `${st.ip} (LAN)`;
+              phoneInterface.appendChild(opt);
+            }
+            phoneInterface.value = st.ip;
+            await startPhoneGps();
+          }
+        } catch {}
+      }
       toast(lanInput.checked ? "LAN access started" : "LAN access stopped", "warn");
     } catch (err) {
       toast(err.message || "LAN toggle failed", "error");
