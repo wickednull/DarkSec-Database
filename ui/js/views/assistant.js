@@ -343,6 +343,14 @@ export async function render(root) {
         body.textContent = String(content || "(failed to render response)");
       }
       box.appendChild(body);
+      const saveBtn = btn("SAVE AS LOG", { size: "sm", tone: "ghost", icon: "save", onClick: async () => {
+        try {
+          const title = String(content || "").split("\\n")[0].slice(0, 120) || "Delamain note";
+          const res = await api.post("/api/assistant/log", { title, content: String(content || "") });
+          toast(`Saved to mission log (#${res.id})`, "ok");
+        } catch (e) { toast(e.message, "error"); }
+      } });
+      box.appendChild(h("div", { class: "row wrap gap-6 mt-6" }, saveBtn));
     }
     const imgs = renderImages(images);
     if (imgs) box.appendChild(imgs);

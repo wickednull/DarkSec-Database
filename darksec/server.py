@@ -805,6 +805,29 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         from fastapi.responses import FileResponse
         return FileResponse(path)
 
+    @app.post("/api/assistant/log")
+    def assistant_log(request: Request, payload: dict = Body(...)):
+        d = db(request)
+        content = str(payload.get("content") or "").strip()
+        title = str(payload.get("title") or "Delamain note").strip()[:200] or "Delamain note"
+        if not content:
+            raise HTTPException(status_code=400, detail="content is required")
+        content = content[:20000]
+        # Rate limit: max 20 AI-saved log entries per hour.
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
+        recent = d.one("SELECT count(*) c FROM log_entries WHERE category='AI' AND ts >= ?", (cutoff,))
+        if recent and int(recent["c"] or 0) >= 20:
+            raise HTTPException(status_code=429, detail="Too many AI-saved notes this hour. Try again later.")
+        # Cap total AI-saved entries to 1000, pruning oldest.
+        total = d.one("SELECT count(*) c FROM log_entries WHERE category='AI'")
+        if total and int(total["c"] or 0) >= 1000:
+            ids = [r["id"] for r in d.query("SELECT id FROM log_entries WHERE category='AI' ORDER BY id ASC LIMIT 100")]
+            for rid in ids:
+                d.delete("log_entries", rid)
+        new_id = d.insert("log_entries", {"ts": utcnow(), "category": "AI", "title": title, "body": content, "tags": "delamain", "lat": None, "lon": None})
+        d.audit("ASSISTANT_LOG", f"id={new_id} chars={len(content)}")
+        return {"ok": True, "id": new_id, "limit_note": "Saved to mission log (AI category). Max 20/hour, 1000 total."}
+
     # ------------------------------------------------------------ settings
     @app.get("/api/settings")
     def get_settings(request: Request):

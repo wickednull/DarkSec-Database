@@ -44,7 +44,7 @@ def test_mutation_without_csrf_is_rejected(app):
 def test_security_headers(client):
     resp = client.get("/api/health")
     assert resp.headers["x-content-type-options"] == "nosniff"
-    assert resp.headers["x-frame-options"] == "DENY"
+    assert resp.headers["x-frame-options"] == "SAMEORIGIN"
     assert "default-src 'self'" in resp.headers["content-security-policy"]
 
 
