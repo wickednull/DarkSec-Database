@@ -17,7 +17,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -32,6 +32,30 @@ UA = {
 }
 TIMEOUT = 15
 UCDP_TIMEOUT = 90
+
+SAFECAST_URL = "https://api.safecast.org/measurements.json"
+WHO_NEWS_RSS = "https://www.who.int/rss-feeds/news-english.xml"
+# WHO's public RSS feed has been returning a 2020/2018 archive with only one
+# recent item mixed in. The newsroom Sitefinity API behind the site itself is
+# current, ordered and much smaller, so use it as the primary WHO source.
+WHO_NEWS_API = ("https://www.who.int/api/news/newsitems"
+                "?sf_provider=OpenAccessDataProvider&sf_culture=en"
+                "&$top=60&$orderby=PublicationDateAndTime%20desc"
+                "&$select=Title,ItemDefaultUrl,FormatedDate,"
+                "PublicationDateAndTime,NewsType")
+# The Smithsonian weekly report switched to a Daily Volcanic Activity Report
+# and stopped updating its RSS in October 2026. USGS HANS publishes current
+# CAP volcano alerts as RSS, so merge those in to keep the layer current.
+USGS_VOLCANO_CAP = "https://volcanoes.usgs.gov/hans-public/rss/cap/"
+SMITHSONIAN_WEEKLY_RSS = "https://volcano.si.edu/news/WeeklyVolcanoRSS.xml"
+
+# Overpass mirrors differ in what they allow: overpass.openstreetmap.fr
+# rejects browser-like agents as un-whitelisted, while overpass-api.de is
+# tolerant. Keep a plain application UA and fall back to the normal one.
+OVERPASS_UA = {
+    "User-Agent": "DarkSecNightwatch/2.0 (+https://github.com/darksec; OSM CCTV layer)",
+    "Accept": "application/json",
+}
 
 CELESTRAK_HEADERS = [
     {
@@ -60,6 +84,12 @@ STALE_AFTER = {
     "safecast": 48 * 3600,
     "eonet": 48 * 3600,
     "thehackernews": 48 * 3600,
+    # USGS is polled every 10 minutes; its payload is a rolling 24h window.
+    "usgs_quakes": 2 * 3600,
+    # CCTV layers are cached map geometry refreshed manually or on a long
+    # cadence. Camera locations do not go "stale" like a news headline.
+    "public_cctv": 7 * 86400,
+    "cctv_catalog": 7 * 86400,
 }
 DATA_STALE_AFTER = {
     "gdacs": 48 * 3600,
@@ -74,29 +104,30 @@ DATA_STALE_AFTER = {
     "breaking_defense": 7 * 86400,
     "defense_one": 7 * 86400,
     "long_war_journal": 14 * 86400,
-    "bbc_world": 24 * 3600,
-    "bbc_middle_east": 24 * 3600,
-    "guardian_world": 24 * 3600,
-    "france24_world": 24 * 3600,
-    "dw_news": 24 * 3600,
-    "aljazeera_world": 24 * 3600,
-    "twz_defense": 7 * 86400,
-    "breaking_defense": 7 * 86400,
-    "defense_one": 7 * 86400,
-    "long_war_journal": 14 * 86400,
     "crisisgroup": 21 * 86400,
     "rsoe_edis": 4 * 3600,
     "ucdp_candidate": 50 * 86400,
     "celestrak_tle": 24 * 3600,
-    "crisisgroup": 21 * 86400,
     "war_on_the_rocks": 14 * 86400,
-    "smithsonian_volcano": 48 * 3600,
+    # Weekly report cadence: items can legitimately be up to a week old.
+    "smithsonian_volcano": 10 * 86400,
     "who_don": 14 * 86400,
     "safecast": 48 * 3600,
     "eonet": 48 * 3600,
     "thehackernews": 48 * 3600,
+    # 2.5_day is a rolling 24h feed; a quiet stretch is normal and must not
+    # be reported as a broken/stale source.
+    "usgs_quakes": 24 * 3600,
+    "public_cctv": 30 * 86400,
+    "cctv_catalog": 90 * 86400,
 }
 DEFAULT_STALE_AFTER = 6 * 3600
+
+# Kinds whose item timestamps are layer metadata rather than "latest news".
+# Their cached geometry is useful even when the source hasn't updated, so
+# data-age staleness does not apply (fetch-age limits still do).
+DATA_STALE_EXEMPT_KINDS = {"cctv", "cables", "maritime", "ais"}
+
 
 # Positional/telemetry feeds are useful as map layers but their timestamps are
 # not meaningful "latest intelligence" headlines; exclude them from summaries.
@@ -703,10 +734,12 @@ def _parse_eonet(payload: dict) -> list[dict]:
 
 def _parse_safecast(payload: list) -> list[dict]:
     """Volunteer radiation measurements. Not a calibrated official monitor."""
+    rows = [m for m in (payload or []) if isinstance(m, dict)]
+    # The API returns rows oldest-first when `since` is used and ignores
+    # `order=created_at desc`. Sort locally so the newest readings are kept.
+    rows.sort(key=lambda m: _parse_ts(m.get("captured_at")), reverse=True)
     items = []
-    for m in (payload or [])[:60]:
-        if not isinstance(m, dict):
-            continue
+    for m in rows[:60]:
         value = m.get("value")
         unit = m.get("unit") or ""
         mid = m.get("id")
@@ -723,6 +756,58 @@ def _parse_safecast(payload: list) -> list[dict]:
             "source": "Safecast",
         })
     return items
+
+
+def _parse_who_news(payload: dict) -> list[dict]:
+    """Map the WHO Sitefinity news API onto the common feed item shape."""
+    items = []
+    for row in (payload.get("value") or []) if isinstance(payload, dict) else []:
+        if not isinstance(row, dict):
+            continue
+        title = _sanitize(row.get("Title"), 300)
+        if not title:
+            continue
+        path = str(row.get("ItemDefaultUrl") or "").strip()
+        url = path if path.startswith(("http://", "https://")) else (
+            f"https://www.who.int{path}" if path.startswith("/") else "https://www.who.int/news-room")
+        published = row.get("PublicationDateAndTime") or row.get("FormatedDate")
+        news_type = _sanitize(row.get("NewsType"), 80)
+        items.append({
+            "title": title,
+            "time": _iso_time(published),
+            "url": url,
+            "summary": news_type,
+            "lat": None, "lon": None,
+            "categories": [news_type] if news_type else [],
+            "severity": "INFO",
+            "source": "WHO",
+        })
+    return items
+
+
+def _parse_ts(value) -> float:
+    parsed = parse_time(value)
+    return parsed.timestamp() if parsed else 0.0
+
+
+def _merge_items(*groups, limit: int = 120) -> list[dict]:
+    """Deduplicate and newest-sort items from several sources."""
+    seen = set()
+    merged = []
+    for group in groups:
+        for item in group or []:
+            if not isinstance(item, dict):
+                continue
+            key = (str(item.get("url") or "").strip(),
+                   str(item.get("title") or "").strip())
+            if key == ("", ""):
+                key = ("", "", str(item.get("time") or "").strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    merged.sort(key=lambda item: _parse_ts(item.get("time")), reverse=True)
+    return merged[:limit]
 
 
 GDELT_LASTUPDATE = "https://data.gdeltproject.org/gdeltv2/lastupdate.txt"
@@ -1366,6 +1451,8 @@ def _normalize(kind: str, raw: str, source: str = "RSS") -> list[dict]:
         return _parse_eonet(payload)
     if kind == "safecast":
         return _parse_safecast(payload)
+    if kind == "who_news":
+        return _parse_who_news(payload)
     if kind in ("maritime", "ais", "cables", "cctv", "geojson"):
         return _parse_geojson_items(payload, source, kind)
     # Unknown structured kind: best-effort scaffold parse.
@@ -1389,7 +1476,7 @@ def _feed_url(db: Database, row) -> str:
         lon = float(lon_raw) if lon_raw is not None and str(lon_raw).strip() != "" else None
     except (TypeError, ValueError):
         lat = lon = None
-    needs_position = fid in ("open_meteo_air", "open_meteo_weather", "safecast")
+    needs_position = fid in ("open_meteo_air", "open_meteo_weather")
     if needs_position and (lat is None or lon is None or not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0)):
         raise ValueError("operator position is missing or invalid; set a valid latitude/longitude before refreshing this feed")
     if fid == "open_meteo_air":
@@ -1404,9 +1491,12 @@ def _feed_url(db: Database, row) -> str:
                 "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code"
                 "&timezone=UTC&forecast_days=3")
     if fid == "safecast":
-        return ("https://api.safecast.org/measurements.json"
-                "?per_page=50&order=created_at+desc"
-                f"&latitude={lat:.4f}&longitude={lon:.4f}&distance=200000")
+        # Ask for a recent time window instead of relying on `order=desc`
+        # (the API ignores it and returned 2018 readings) or a geospatial
+        # `distance` filter (slow enough to time out on the public API).
+        since = (datetime.now(timezone.utc) - timedelta(hours=6))
+        return (f"{SAFECAST_URL}?per_page=200"
+                f"&since={since.strftime('%Y-%m-%dT%H:%M:%SZ')}")
     if fid == "gdacs":
         today = datetime.now(timezone.utc).date()
         start = today - timedelta(days=30)
@@ -1415,12 +1505,66 @@ def _feed_url(db: Database, row) -> str:
     return url
 
 
+def _overpass_fetch_json(query: str, urls: list[str], budget: float = 45.0) -> dict:
+    """Race several public Overpass mirrors and return the first usable JSON.
+
+    Public mirrors are frequently overloaded or unreachable; querying them
+    sequentially made a single slow mirror exhaust the whole refresh budget.
+    Each attempt has short connect/read limits and the first success wins.
+    """
+    if not urls:
+        raise RuntimeError("no Overpass mirrors configured")
+    deadline = time.monotonic() + max(10.0, budget)
+    failures: list[str] = []
+
+    def attempt(base_url: str) -> dict:
+        remaining = max(2.0, deadline - time.monotonic())
+        timeout = (min(6.0, remaining), min(28.0, remaining))
+        try:
+            resp = None
+            for headers in (OVERPASS_UA, UA):
+                resp = requests.post(base_url, data={"data": query}, headers=headers, timeout=timeout)
+                # Some reverse proxies reject form POSTs with 405/406/415 even
+                # though the upstream interpreter accepts GET.
+                if resp.status_code in (405, 406, 415):
+                    resp = requests.get(base_url, params={"data": query}, headers=headers, timeout=timeout)
+                # A mirror may reject one UA but accept the other.
+                if resp.status_code == 403 and headers is not UA:
+                    continue
+                break
+            resp.raise_for_status()
+            text = resp.text.lstrip()
+            if not text.startswith(("{", "[")):
+                raise RuntimeError(f"non-JSON response ({text[:40]!r})")
+            return resp.json()
+        except Exception as exc:
+            host = base_url.split("/")[2]
+            raise RuntimeError(f"{host}: {exc}") from exc
+
+    pool = ThreadPoolExecutor(max_workers=min(4, len(urls)))
+    futures = [pool.submit(attempt, u) for u in urls]
+    try:
+        for future in as_completed(futures, timeout=max(10.0, budget)):
+            try:
+                return future.result()
+            except Exception as exc:
+                failures.append(str(exc))
+    except TimeoutError:
+        failures.append(f"no mirror answered within {int(budget)}s")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    raise RuntimeError(
+        "Overpass mirrors unavailable (" + "; ".join(failures[:4])
+        + "). Cached camera locations remain readable; try again later or set cctv_radius_km smaller."
+    )
+
+
 def _refresh_overpass_cctv(db: Database, row) -> list[dict]:
     """Operator-triggered OSM surveillance camera locations via Overpass (ODbL). Locations only, no previews/streams.
 
     The Overpass query is centered on the operator's configured position. To
     avoid showing only a tiny "near me" bubble, the radius is configurable via
-    Settings key `cctv_radius_km` (default 50 km, clamped 10..500 km). Larger
+    Settings key `cctv_radius_km` (default 15 km, clamped 5..250 km). Larger
     radii are heavier for public Overpass mirrors and may time out; cached
     camera locations remain visible on the map regardless of refresh status.
     """
@@ -1432,24 +1576,24 @@ def _refresh_overpass_cctv(db: Database, row) -> list[dict]:
     if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("operator position is missing or invalid; set a valid latitude/longitude before refreshing CCTV locations")
     try:
-        radius_km = float(s.get("cctv_radius_km") or 50)
+        radius_km = float(s.get("cctv_radius_km") or 15)
     except Exception:
-        radius_km = 50.0
-    radius_km = max(10.0, min(500.0, radius_km))
+        radius_km = 15.0
+    radius_km = max(5.0, min(250.0, radius_km))
     radius_m = int(radius_km * 1000)
-    # Nodes cover most mapped surveillance cameras; including ways/relations is
-    # more complete but significantly heavier on public mirrors.
-    query = f"""[out:json][timeout:35];
+    # Nodes and ways cover mapped surveillance cameras. Relations are omitted:
+    # they are rare, much heavier to resolve, and were a common timeout cause.
+    query = f"""[out:json][timeout:25][maxsize:33554432];
 (
   node["man_made"="surveillance"](around:{radius_m},{lat:.5f},{lon:.5f});
   way["man_made"="surveillance"](around:{radius_m},{lat:.5f},{lon:.5f});
-  relation["man_made"="surveillance"](around:{radius_m},{lat:.5f},{lon:.5f});
 );
-out center tags;"""
-    # Public Overpass mirrors differ in load and availability. Try several
-    # global instances with a bounded per-attempt timeout so one dead mirror
+out center tags qt 4000;"""
+    # Public Overpass mirrors differ in load and availability. Race a few
+    # global instances with bounded per-attempt timeouts so one dead mirror
     # cannot hang the whole refresh. overpass.osm.ch is omitted (Switzerland).
     overpass_urls = [
+        "https://overpass.openstreetmap.fr/api/interpreter",
         "https://overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
         "https://lz4.overpass-api.de/api/interpreter",
@@ -1457,27 +1601,12 @@ out center tags;"""
         "https://overpass.nchc.org.tw/api/interpreter",
         "https://overpass.osm.jp/api/interpreter",
     ]
-    deadline = time.monotonic() + 90.0
-    failures: list[str] = []
-    resp = None
-    for ou in overpass_urls:
-        remaining = deadline - time.monotonic()
-        if remaining <= 5:
-            break
-        host = ou.split("/")[2]
-        try:
-            resp = requests.post(ou, data={"data": query}, headers=UA,
-                                 timeout=(min(8.0, remaining), min(35.0, remaining)))
-            resp.raise_for_status()
-            break
-        except Exception as exc:
-            failures.append(f"{host}: {exc}")
-            resp = None
-            continue
-    if resp is None:
-        detail = "; ".join(failures[:4]) or "no mirror attempted"
-        raise RuntimeError(f"Overpass mirrors unavailable ({detail}). Cached camera locations remain readable; try again later or set cctv_radius_km smaller.")
-    data = resp.json()
+    # Optional operator-configured mirror (regional/self-hosted) goes first.
+    custom = str(s.get("cctv_overpass_url") or "").strip()
+    if custom.startswith(("http://", "https://")):
+        overpass_urls.insert(0, custom)
+    data = _overpass_fetch_json(query, overpass_urls, budget=45.0)
+
     items = []
     for el in (data.get("elements") or []):
         tags = el.get("tags") or {}
@@ -1876,6 +2005,75 @@ def _refresh_maritime_scaffold(db: Database, row) -> list[dict]:
     )
 
 
+def _refresh_safecast(db: Database, row) -> list[dict]:
+    """Recent Safecast measurements.
+
+    The public API ignores `order=created_at desc` and returns old readings;
+    geospatial `distance` queries are slow and frequently time out. Request a
+    bounded recent window instead and sort the response locally.
+    """
+    now = datetime.now(timezone.utc)
+    last_exc: Exception | None = None
+    for hours in (12, 24 * 7):
+        since = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = f"{SAFECAST_URL}?per_page=200&since={since}"
+        try:
+            raw = _get_text_with_fallbacks(url, [UA], timeout=max(TIMEOUT, 20))
+            items = _parse_safecast(json.loads(raw))
+            if items:
+                return items
+        except Exception as exc:
+            last_exc = exc
+            continue
+    if last_exc is not None:
+        raise last_exc
+    return []
+
+
+def _refresh_who(db: Database, row) -> list[dict]:
+    """WHO news via the current newsroom API, with the legacy RSS as backup."""
+    errors = []
+    for url, kind, source in (
+        (WHO_NEWS_API, "who_news", row["name"]),
+        (WHO_NEWS_RSS, "rss", row["name"]),
+    ):
+        try:
+            raw = _get_text_with_fallbacks(url, [UA], timeout=max(TIMEOUT, 25))
+            items = _normalize(kind, raw, source)
+            if items:
+                return items
+            errors.append(f"{url.split('/')[2]}: no items")
+        except Exception as exc:
+            errors.append(f"{url.split('/')[2]}: {exc}")
+    raise RuntimeError("WHO news sources unavailable (" + "; ".join(errors[:2]) + ")")
+
+
+def _refresh_volcano(db: Database, row) -> list[dict]:
+    """Merge the Smithsonian weekly report with current USGS HANS CAP alerts.
+
+    The Smithsonian weekly RSS stopped publishing in October 2026 while the
+    program moved to a daily report without an RSS feed. USGS CAP alerts are
+    current and official, so they keep the volcano layer from going stale.
+    """
+    errors = []
+    groups = []
+    weekly = (row["url"] or "").strip() or SMITHSONIAN_WEEKLY_RSS
+    try:
+        raw = _get_text_with_fallbacks(weekly, [UA])
+        groups.append(_parse_rss(raw, row["name"]))
+    except Exception as exc:
+        errors.append(f"weekly report: {exc}")
+    try:
+        raw = _get_text_with_fallbacks(USGS_VOLCANO_CAP, [UA])
+        groups.append(_parse_rss(raw, "USGS Volcano (HANS)"))
+    except Exception as exc:
+        errors.append(f"USGS CAP: {exc}")
+    items = _merge_items(*groups, limit=100)
+    if not items:
+        raise RuntimeError("no volcano activity available (" + "; ".join(errors[:2]) + ")")
+    return items
+
+
 def refresh(db: Database, feed_id: str | None = None) -> list[dict]:
     rows = db.query(
         "SELECT * FROM feeds" + (" WHERE id=?" if feed_id else ""),
@@ -1953,6 +2151,16 @@ def refresh(db: Database, feed_id: str | None = None) -> list[dict]:
                 items = _refresh_ucdp(db, row)
             elif row["kind"] == "rsoe":
                 items = _refresh_rsoe(db, row)
+            elif fid == "safecast":
+                items = _refresh_safecast(db, row)
+            elif row["kind"] == "who_news" or (
+                fid == "who_don" and (row["url"] or "").strip() in ("", WHO_NEWS_RSS, WHO_NEWS_API)
+            ):
+                items = _refresh_who(db, row)
+            elif fid == "smithsonian_volcano" and (
+                (row["url"] or "").strip() in ("", SMITHSONIAN_WEEKLY_RSS)
+            ):
+                items = _refresh_volcano(db, row)
             else:
                 url = _feed_url(db, row)
                 if not str(url or "").strip():
@@ -2061,7 +2269,8 @@ def list_feeds(db: Database, item_limit: int | None = 30) -> list[dict]:
         if status == "OK" and age is not None and age > STALE_AFTER.get(row["id"], DEFAULT_STALE_AFTER):
             status = "STALE"
             stale_reason = "fetch"
-        if status == "OK" and data_age is not None and data_age > DATA_STALE_AFTER.get(row["id"], DEFAULT_STALE_AFTER):
+        if status == "OK" and data_age is not None and row["kind"] not in DATA_STALE_EXEMPT_KINDS \
+                and data_age > DATA_STALE_AFTER.get(row["id"], DEFAULT_STALE_AFTER):
             status = "STALE"
             stale_reason = "data"
         out.append({

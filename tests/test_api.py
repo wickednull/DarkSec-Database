@@ -528,3 +528,106 @@ def test_cctv_stream_allowlist_rewrites_configured_hosts(client, monkeypatch):
     assert "https://cdn.allowed.test/seg1.ts" not in r.text
     # cleanup
     db.set_setting("cctv_stream_host_allowlist", "[]")
+
+
+# ------------------------------------------------------------ feed freshness
+def test_safecast_parser_keeps_newest_measurements():
+    from darksec import feeds
+
+    items = feeds._parse_safecast([
+        {"id": 1, "value": 10, "unit": "cpm", "captured_at": "2018-09-01T16:29:55.000Z",
+         "latitude": 1, "longitude": 2},
+        {"id": 2, "value": 11, "unit": "cpm", "captured_at": "2026-11-10T23:00:00.000Z",
+         "latitude": 1, "longitude": 2},
+        {"id": 3, "value": 12, "unit": "cpm", "captured_at": "2025-01-01T00:00:00.000Z",
+         "latitude": 1, "longitude": 2},
+    ])
+    assert [item["time"] for item in items] == [
+        "2026-11-10T23:00:00.000Z",
+        "2025-01-01T00:00:00.000Z",
+        "2018-09-01T16:29:55.000Z",
+    ]
+
+
+def test_who_news_api_parser():
+    from darksec import feeds
+
+    items = feeds._parse_who_news({"value": [{
+        "Title": "WHO update",
+        "ItemDefaultUrl": "/10-11-2026-who-update",
+        "PublicationDateAndTime": "2026-11-10T21:00:54Z",
+        "NewsType": "News",
+    }]})
+    assert items[0]["title"] == "WHO update"
+    assert items[0]["url"] == "https://www.who.int/10-11-2026-who-update"
+    assert items[0]["time"].startswith("2026-11-10T21:00:54")
+    assert items[0]["source"] == "WHO"
+
+
+def test_stale_thresholds_fit_source_cadence(tmp_path):
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from darksec import feeds
+    from darksec.db import Database
+
+    db = Database(str(tmp_path / "freshness.db"))
+    now = datetime.now(timezone.utc)
+    quake_time = (now - timedelta(hours=8)).isoformat()
+    db.execute(
+        "UPDATE feeds SET status='OK', fetched_at=?, payload=? WHERE id='usgs_quakes'",
+        (now.isoformat(), json.dumps({"items": [{"title": "M 3.0", "time": quake_time}]})),
+    )
+    # CCTV timestamps are capture/fetch metadata, not headline freshness.
+    db.execute(
+        "UPDATE feeds SET status='OK', fetched_at=?, payload=? WHERE id='public_cctv'",
+        (now.isoformat(), json.dumps({"items": [
+            {"title": "Camera", "time": (now - timedelta(days=60)).isoformat(), "kind": "cctv"}
+        ]})),
+    )
+    rows = {f["id"]: f for f in feeds.list_feeds(db)}
+    # An 8h-old quake in a rolling 24h feed is normal, not stale.
+    assert rows["usgs_quakes"]["status"] == "OK"
+    assert rows["public_cctv"]["status"] == "OK"
+
+
+def test_overpass_get_fallback_on_406(monkeypatch):
+    import requests
+
+    from darksec import feeds
+
+    def fake_post(*args, **kwargs):
+        class Rejected:
+            status_code = 406
+            def raise_for_status(self):
+                raise requests.HTTPError("406 Not Acceptable", response=self)
+        return Rejected()
+
+    def fake_get(*args, **kwargs):
+        class Ok:
+            status_code = 200
+            text = '{"elements": []}'
+            def raise_for_status(self): return None
+            def json(self): return {"elements": []}
+        return Ok()
+
+    monkeypatch.setattr(feeds.requests, "post", fake_post)
+    monkeypatch.setattr(feeds.requests, "get", fake_get)
+    assert feeds._overpass_fetch_json("q", ["https://mirror.test/api/interpreter"], budget=10) == {"elements": []}
+
+
+def test_osm_camera_page_is_not_a_snapshot(client):
+    import json
+
+    from darksec import config
+    from darksec.db import Database
+
+    db = Database(config.DB_PATH)
+    payload = {"items": [{
+        "id": "osm-page-1", "kind": "cctv", "title": "OSM camera", "lat": 1, "lon": 2,
+        "url": "https://www.openstreetmap.org/node/123", "source": "OpenStreetMap (Overpass, ODbL)",
+    }]}
+    db.execute("update feeds set payload=?, status='OK' where id='cctv_catalog'", (json.dumps(payload),))
+    # The OSM node page must not be fetched as an image snapshot.
+    r = client.get("/api/cctv/frame", params={"id": "cctv_catalog:osm-page-1"})
+    assert r.status_code == 404

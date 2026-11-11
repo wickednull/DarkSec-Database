@@ -1413,10 +1413,28 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 if cid not in candidates:
                     continue
                 url = None
-                for key in ("snapshot_url", "snapshotUrl", "image_url", "imageUrl", "url", "feed_url"):
+                for key in ("snapshot_url", "snapshotUrl", "image_url", "imageUrl", "feed_url"):
                     val = it.get(key)
                     if isinstance(val, str) and val.strip().startswith(("http://", "https://")):
                         url = val.strip(); break
+                if not url:
+                    # Generic `url` is media for curated catalog/stream entries,
+                    # but for OSM cameras it is the openstreetmap.org node page.
+                    # Treating that page as a snapshot caused HTML content-type
+                    # errors (and slow page fetches) for every OSM camera.
+                    cand = it.get("url")
+                    feed_type = str(it.get("feed_type") or it.get("feedType") or "").lower()
+                    if isinstance(cand, str) and cand.strip().startswith(("http://", "https://")):
+                        cand = cand.strip()
+                        host = (urlsplit(cand).hostname or "").lower()
+                        is_page = host in ("openstreetmap.org", "www.openstreetmap.org", "osm.org", "www.osm.org")
+                        is_media = (
+                            feed_type in ("image", "jpeg", "jpg", "png", "snapshot",
+                                          "hls", "m3u8", "mp4", "video")
+                            or bool(re.search(r"\.(jpe?g|png|gif|webp|bmp|m3u8|mp4|m4v|webm)(\?|$)", cand, re.I))
+                        )
+                        if not is_page and is_media:
+                            url = cand
                 if not url:
                     continue
                 refresh_ms = it.get("frame_refresh_ms", it.get("frameRefreshMs"))
@@ -1462,7 +1480,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             r = requests.get(
                 url,
                 headers={"User-Agent": "DarkSecNightwatch/2.0", "Accept": "image/*,*/*;q=0.8"},
-                timeout=12,
+                timeout=(5, 20),
                 stream=True,
                 allow_redirects=True,
             )
@@ -1697,7 +1715,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         rng = request.headers.get("range")
         if rng:
             headers["Range"] = rng
-        r = requests.get(target_url, headers=headers, timeout=20, stream=True, allow_redirects=False)
+        r = requests.get(target_url, headers=headers, timeout=(5, 20), stream=True, allow_redirects=False)
         # Do not follow redirects to arbitrary hosts.
         if r.is_redirect or r.is_permanent_redirect:
             loc = r.headers.get("location") or ""
@@ -1707,7 +1725,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     r.close()
                     raise HTTPException(status_code=400, detail="Stream redirect target not allowed")
             r.close()
-            r = requests.get(abs_loc, headers=headers, timeout=20, stream=True, allow_redirects=False)
+            r = requests.get(abs_loc, headers=headers, timeout=(5, 20), stream=True, allow_redirects=False)
         if r.status_code >= 400:
             detail = f"Upstream stream error {r.status_code}"
             r.close()
@@ -1789,7 +1807,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             raise HTTPException(status_code=400, detail="Unsupported stream scheme")
         allow_hosts = await run_in_threadpool(_cctv_stream_allow_hosts, d)
         def fetch_text():
-            r = requests.get(target, headers={"User-Agent": "DarkSecNightwatch/2.0", "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*"}, timeout=15)
+            r = requests.get(target, headers={"User-Agent": "DarkSecNightwatch/2.0", "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*"}, timeout=(4, 15))
             r.raise_for_status()
             body = r.text
             if len(body) > 2 * 1024 * 1024:
@@ -1823,7 +1841,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             if not _cctv_stream_allowed(registered, target, allow_hosts):
                 raise HTTPException(status_code=400, detail="Stream subresource host not allowed")
             def fetch_text():
-                r = requests.get(target, headers={"User-Agent": "DarkSecNightwatch/2.0", "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*"}, timeout=15)
+                r = requests.get(target, headers={"User-Agent": "DarkSecNightwatch/2.0", "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*"}, timeout=(4, 15))
                 r.raise_for_status()
                 body = r.text
                 if len(body) > 2 * 1024 * 1024:

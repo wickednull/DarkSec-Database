@@ -1063,7 +1063,7 @@ export async function render(root) {
       body: h("div", { class: "col gap-10" },
         field("Display name", name),
         field("Source URL", url, "Changing the URL clears this feed's cached payload so old items are not presented under the new source."),
-        field("Parser kind", kind, "Must match an implemented parser: rss, gdacs, eonet, usgs, celestrak, opensky, swpc_kp, weather, air_quality…"),
+        field("Parser kind", kind, "Must match an implemented parser: rss, gdacs, eonet, usgs, celestrak, opensky, swpc_kp, weather, air_quality, who_news…"),
         h("div", { class: "callout small", text: `Feed ID ${feed.id} is fixed. Position-dependent feeds override the URL with the configured latitude/longitude at refresh time.` })),
       actions: [
         btn("CANCEL", { tone: "ghost", onClick: () => m.close() }),

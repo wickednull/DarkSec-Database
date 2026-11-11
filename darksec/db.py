@@ -388,7 +388,11 @@ FEED_SEED = [
     ("rsoe_edis", "RSOE EDIS Global Disaster Events", "https://rsoe-edis.org/eventList", "rsoe"),
     ("safecast", "Safecast Radiation Reports", "https://api.safecast.org/measurements.json", "safecast"),
     ("smithsonian_volcano", "Smithsonian/USGS Volcanic Activity", "https://volcano.si.edu/news/WeeklyVolcanoRSS.xml", "rss"),
-    ("who_don", "WHO News (English)", "https://www.who.int/rss-feeds/news-english.xml", "rss"),
+    ("who_don", "WHO News (English)",
+     "https://www.who.int/api/news/newsitems?sf_provider=OpenAccessDataProvider"
+     "&sf_culture=en&$top=60&$orderby=PublicationDateAndTime%20desc"
+     "&$select=Title,ItemDefaultUrl,FormatedDate,PublicationDateAndTime,NewsType",
+     "who_news"),
     ("reliefweb", "ReliefWeb Updates", "https://reliefweb.int/updates/rss.xml", "rss"),
     ("opensky_states", "OpenSky Live Aircraft (public positions)", "https://opensky-network.org/api/states/all?limit=4000", "opensky"),
     ("celestrak_tle", "CelesTrak Active Satellite TLE", "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle", "celestrak"),
@@ -574,6 +578,36 @@ class Database:
                  "celestrak", "CelesTrak Active Satellite TLE"),
             )
             self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('feeds_v4',?)",
+                         (utcnow(),))
+
+        # WHO's legacy RSS feed only exposed a 2020/2018 archive with one
+        # recent item. The newsroom's own Sitefinity API is current and
+        # smaller; migrate only untouched default feeds.
+        who_api = ("https://www.who.int/api/news/newsitems"
+                   "?sf_provider=OpenAccessDataProvider&sf_culture=en"
+                   "&$top=60&$orderby=PublicationDateAndTime%20desc"
+                   "&$select=Title,ItemDefaultUrl,FormatedDate,"
+                   "PublicationDateAndTime,NewsType")
+        if self.one("SELECT 1 FROM meta WHERE key='feeds_v5'") is None:
+            self.execute(
+                "UPDATE feeds SET url=?, kind=?, name=? WHERE id='who_don' "
+                "AND (url IS NULL OR url='' OR url=?)",
+                (who_api, "who_news", "WHO News (English)",
+                 "https://www.who.int/rss-feeds/news-english.xml"),
+            )
+            self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('feeds_v5',?)",
+                         (utcnow(),))
+
+        # The old CCTV radius default (50 km) made Overpass refreshes slow and
+        # timeout-prone in dense cities. Move untouched defaults to 15 km;
+        # operators can still raise it explicitly in Settings.
+        if self.one("SELECT 1 FROM meta WHERE key='cctv_radius_v1'") is None:
+            try:
+                if str(self.get_setting("cctv_radius_km", "") or "").strip() == "50":
+                    self.set_setting("cctv_radius_km", 15)
+            except Exception:
+                pass
+            self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('cctv_radius_v1',?)",
                          (utcnow(),))
 
         # Delamain prompt refinement: older defaults were easy for small local
