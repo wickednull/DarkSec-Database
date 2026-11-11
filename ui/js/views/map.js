@@ -321,7 +321,7 @@ export async function render(root, params = {}) {
       ["Severe event", "#ffb02e", "dot"],
       ["Routine event", "#5dff9a", "dot"],
       ["Conflict (UCDP verified)", "#ff8a3d", "diamond"],
-      ["Conflict (GDELT live)", "#ffb02e", "diamond"],
+      ["Conflict (GDELT media, unverified)", "#ffb02e", "diamond"],
       ["Aircraft", "#48d7ff", "ring"],
       ["Satellite", "#c78bff", "ring"],
       ["Maritime / AIS", "#35c9ff", "dot"],
@@ -338,7 +338,7 @@ export async function render(root, params = {}) {
     title: "Legend", icon: "info",
     body: h("div", { class: "col gap-6" },
       legend,
-      h("div", { class: "tiny dim", text: "Hazard dots scale with reported magnitude. Conflict diamonds are orange for monthly UCDP verified events and amber for live GDELT media reports; faded markers are older than 24 h. Satellite positions are propagated from cached TLEs, not observations." })),
+      h("div", { class: "tiny dim", text: "Hazard dots scale with reported magnitude. Conflict diamonds are orange for monthly UCDP verified events and amber for unverified GDELT media reports; faded markers are older than 24 h. Satellite positions are propagated from cached TLEs, not observations." })),
     flush: false,
   }));
 
@@ -940,7 +940,7 @@ export async function render(root, params = {}) {
         ctx.font = `${selected ? 'bold ' : ''}8px JetBrains Mono, monospace`;
         ctx.textBaseline = "top";
         ctx.fillStyle = selected ? '#fff' : color;
-        const label = selected ? String(p.title || 'Conflict').slice(0, 44) : `${p.verified ? "VERIFIED" : "LIVE"}${fatalities ? ` ${fatalities} KILLED` : ""}`;
+        const label = selected ? String(p.title || 'Conflict').slice(0, 44) : `${p.verified ? "VERIFIED" : "MEDIA"}${fatalities ? ` ${fatalities} KILLED` : ""}`;
         if (selected) { ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.lineWidth = 3; ctx.strokeText(label, sp.x + 9, sp.y + 2); }
         ctx.fillText(label, sp.x + 9, sp.y + 2);
         ctx.globalAlpha = 1;
@@ -1517,7 +1517,7 @@ export async function render(root, params = {}) {
     if (s.x < -40 || s.y < -40 || s.x > w + 40 || s.y > hh + 40) { hideMapPopup(); return; }
     const d = sel.data || {};
     const isConflict = d.kind === 'conflict' || d.feed_id === 'gdelt_conflict' || d.feed_id === 'ucdp_candidate';
-    const kicker = sel.kind === 'aircraft' ? 'AIRCRAFT' : sel.kind === 'sat' ? 'SATELLITE' : sel.kind === 'maritime' ? 'MARITIME / AIS' : sel.kind === 'cable' ? 'CABLE / LANDING POINT' : sel.kind === 'cctv' ? 'CCTV / CAMERA (OSM)' : (isConflict ? (d.verified ? 'CONFLICT · VERIFIED' : 'CONFLICT · LIVE') : 'HAZARD / EVENT');
+    const kicker = sel.kind === 'aircraft' ? 'AIRCRAFT' : sel.kind === 'sat' ? 'SATELLITE' : sel.kind === 'maritime' ? 'MARITIME / AIS' : sel.kind === 'cable' ? 'CABLE / LANDING POINT' : sel.kind === 'cctv' ? 'CCTV / CAMERA (OSM)' : (isConflict ? (d.verified ? 'CONFLICT · VERIFIED' : 'CONFLICT · UNVERIFIED MEDIA') : 'HAZARD / EVENT');
     const title = sel.kind === 'aircraft' ? (d.callsign || d.title || 'Aircraft')
       : sel.kind === 'sat' ? (d.name || `NORAD ${d.norad || '?'}`)
       : sel.kind === 'maritime' ? (d.title || d.vessel || d.mmsi || 'Vessel')
@@ -1608,6 +1608,9 @@ export async function render(root, params = {}) {
       push('TITLE', d.title); push('SOURCE', d.source); push('SEVERITY', d.severity);
       push('TIME', d.time ? fmt.date(d.time) : ''); push('AGE', intelAge(d.age_hours)); push('PLACE', d.place);
       push('COUNTRY', d.country); push('PRECISION', d.precision); push('VERIFIED', d.verified ? 'YES (UCDP)' : 'NO');
+      if (d.event_type) push(d.verified ? 'EVENT TYPE' : 'AUTOMATED CODE', d.event_type);
+      if (d.confidence) push('CONFIDENCE', d.confidence);
+      if (d.label_basis) push('LABEL BASIS', d.label_basis);
       if (d.mag!=null) push('MAGNITUDE', d.mag); if (d.fatalities!=null) push('FATALITIES', d.fatalities);
       if (d.depth_km!=null) push('DEPTH', `${d.depth_km} km`); if (d.mentions!=null) push('MENTIONS', d.mentions);
       if (d.summary) push('SUMMARY', String(d.summary).slice(0,300));

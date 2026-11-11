@@ -165,6 +165,9 @@ def _event_from_item(feed: dict, item: dict) -> dict | None:
         "event_code": item.get("event_code"),
         "event_date": item.get("event_date"),
         "source_headline": item.get("source_headline") or "",
+        "article_headline": item.get("article_headline") or "",
+        "label_basis": item.get("label_basis") or "",
+        "confidence": item.get("confidence") or "",
     }
 
 

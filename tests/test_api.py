@@ -667,3 +667,74 @@ def test_assistant_chat_log_saves_to_vault(client):
     leaked = db.one("SELECT count(*) c FROM log_entries WHERE body LIKE ?", (f"%{marker}%",))
     assert leaked["c"] == 0
     client.post("/api/vault/lock")
+
+
+# ------------------------------------------------------------- GDELT labels
+def _gdelt_row(code, url, place="Riverside State Park, Washington", actor1=""):
+    row = [""] * 61
+    row[0] = "1332537495"
+    row[1] = "20261111063000"
+    row[6] = actor1
+    row[26] = code
+    row[28] = "19"
+    row[31] = "4"
+    row[51] = "3"
+    row[52] = place
+    row[53] = "US"
+    row[56] = "47.7432"
+    row[57] = "-117.535"
+    row[59] = "20261111063000"
+    row[60] = url
+    return row
+
+
+def test_gdelt_wildfire_article_is_not_a_missile_strike():
+    from darksec import feeds
+
+    row = _gdelt_row(
+        "195",
+        "https://www.spokesman.com/stories/2026/nov/10/upthegrove-local-officials-implore-legislature-for/",
+    )
+    items = feeds._gdelt_conflict_items([row])
+    assert items == []
+
+
+def test_gdelt_conflict_labels_use_source_headline():
+    from darksec import feeds
+
+    row = _gdelt_row(
+        "195",
+        "https://example.com/world/russia-launches-missile-strike-on-kyiv",
+        place="Kyiv, Ukraine",
+        actor1="RUSSIA",
+    )
+    items = feeds._gdelt_conflict_items([row])
+    assert len(items) == 1
+    item = items[0]
+    assert "missile strike" in item["title"].lower()
+    assert item["severity"] == "ALERT"
+    assert item["event_type"] == "Air / missile strike"
+    assert item["label_basis"] == "article headline"
+    assert item["confidence"] == "low"
+
+
+def test_gdelt_legacy_items_are_revalidated():
+    from darksec import feeds
+
+    legacy = {
+        "id": "gdelt:1",
+        "title": "Air / missile strike — Riverside State Park, Washington",
+        "time": "2026-11-11T06:30:00+00:00",
+        "place": "Riverside State Park, Washington",
+        "event_code": "195",
+        "url": "https://www.spokesman.com/stories/2026/nov/10/upthegrove-local-officials-implore-legislature-for/",
+        "severity": "CRITICAL",
+    }
+    assert feeds._revalidate_cached_gdelt_item(legacy) is None
+
+    legacy["url"] = "https://example.com/world/israel-bombs-lebanons-churches"
+    legacy["title"] = "Air / missile strike — Lebanon"
+    fixed = feeds._revalidate_cached_gdelt_item(legacy)
+    assert fixed["title"] == "Israel bombs lebanons churches"
+    assert fixed["severity"] == "ALERT"
+    assert fixed["label_version"] == feeds.GDELT_LABEL_VERSION

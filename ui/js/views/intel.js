@@ -547,7 +547,8 @@ export async function render(root, params = {}) {
           main.appendChild(h("div", { class: "li-sub", text: `${it.country || it.place || "location unstated"} · ${fmt.date(it.time, false)} · ${deaths ? `${deaths} reported killed` : "no confirmed deaths recorded"} · ${it.event_type || "armed violence"}` }));
           if (it.source_headline) main.appendChild(h("div", { class: "li-sub", text: it.source_headline }));
         } else if (kind === "live") {
-          main.appendChild(h("div", { class: "li-sub", text: `${it.source || "GDELT"} · ${it.place || "location approximate"} · ${it.precision || "reported location"}${it.mentions ? ` · ${it.mentions} mentions` : ""}` }));
+          const conf = it.confidence ? ` · ${String(it.confidence).toUpperCase()} confidence` : "";
+          main.appendChild(h("div", { class: "li-sub", text: `${it.source || "GDELT"} · ${it.place || "location approximate"} · ${it.precision || "reported location"}${it.mentions ? ` · ${it.mentions} mentions` : ""}${conf}` }));
         } else {
           main.appendChild(h("div", { class: "li-sub", text: `${it.source || ""}${it.age_hours != null ? ` · ${fmt.ago(it.time)}` : " · age unknown"}` }));
         }
@@ -555,7 +556,7 @@ export async function render(root, params = {}) {
         const tools = h("div", { class: "row gap-6 mt-6 wrap" });
         tools.appendChild(badge(it.age_hours != null ? fmt.ago(it.time) : "AGE UNKNOWN", ageTone));
         if (kind === "verified") tools.appendChild(badge("UCDP VERIFIED", "cyan"));
-        if (kind === "live") tools.appendChild(badge("LIVE MEDIA", "amber"));
+        if (kind === "live") tools.appendChild(badge("UNVERIFIED MEDIA", "amber"));
         if (it.severity === "CRITICAL") tools.appendChild(severityBadge("CRITICAL"));
         if (it.url) tools.appendChild(h("a", { class: "badge cyan", href: it.url, target: "_blank", rel: "noopener noreferrer", text: "SOURCE" }));
         row.appendChild(tools);
@@ -566,7 +567,7 @@ export async function render(root, params = {}) {
     }
 
     if (live.length) {
-      wrap.appendChild(section("LIVE MEDIA REPORTS // GDELT", "Automated geocoded coding of current news. Locations and actor/event labels can be wrong.", live.slice(0, 12), "live"));
+      wrap.appendChild(section("UNVERIFIED MEDIA REPORTS // GDELT", "Source article headlines, not verified events. GDELT code labels, actors and geocoding are automated and can be wrong.", live.slice(0, 12), "live"));
     }
     if (verified.length) {
       wrap.appendChild(section("VERIFIED EVENTS // UCDP CANDIDATE", "Monthly verified release with a lag of weeks, not a live warning.", verified.slice(0, 12), "verified"));

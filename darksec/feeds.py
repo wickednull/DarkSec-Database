@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import requests
 
@@ -811,6 +812,7 @@ def _merge_items(*groups, limit: int = 120) -> list[dict]:
 
 
 GDELT_LASTUPDATE = "https://data.gdeltproject.org/gdeltv2/lastupdate.txt"
+GDELT_LABEL_VERSION = 3
 GDELT_EVENT_LABELS = {
     "180": "Armed clash", "181": "Abduction", "182": "Assault",
     "183": "Bombing / explosion", "184": "Human shield", "185": "Assassination attempt",
@@ -826,6 +828,97 @@ _ARMED_ACTOR = re.compile(
     r"WAGNER|HEZBOLLAH|HAMAS|JANJAWEED|RSF|M23|BOKO HARAM",
     re.I,
 )
+
+# GDELT's CAMEO coding is automated and frequently wrong. Before presenting a
+# media-derived conflict item, require evidence in the article's own URL slug
+# (a proxy for its headline). This is what stops an article about wildfire
+# funding from being displayed as an "Air / missile strike".
+_GDELT_CONFLICT_TERMS = re.compile(
+    r"\b(?:missiles?|rockets?|air[- ]?strikes?|airstrikes?|drones?|shelling|"
+    r"artillery|attacks?|clashes?|bomb(?:ings?|s)?|explosions?|killed|"
+    r"killings?|strikes?|combat|gunfire|ambush(?:es)?|ceasefire|offensive|"
+    r"invasions?|casualties|wounded|raids?|kidnappings?|hostages?|"
+    r"assassinations?|intercepted?|firing)\b",
+    re.I,
+)
+_GDELT_STRONG_CONFLICT = re.compile(
+    r"\b(?:attacks?|clashes?|airstrikes?|air[- ]?strikes?|bomb(?:ings?|s)?|"
+    r"shelling|gunfire|ambush(?:es)?|assassinations?|"
+    r"kidnappings?|hostages?|raids?|missiles?|rockets?)\b",
+    re.I,
+)
+_GDELT_HAZARD_TERMS = re.compile(
+    r"\b(?:wildfires?|fires?|floods?|storms?|hurricanes?|typhoons?|tornadoes?|"
+    r"earthquakes?|volcanoes?|volcanic|tsunamis?|droughts?|heatwaves?|"
+    r"heat waves?|landslides?|avalanches?|smoke|evacuations?|evacuated)\b",
+    re.I,
+)
+_GDELT_NON_CONFLICT_CONTEXT = re.compile(
+    r"\b(?:memorial|veterans?|refugees?|museum|anniversar(?:y|ies)|history|"
+    r"historical|film|book|exhibition|festival|election|legislature|"
+    r"parliament|court|trial|prison|sentence|sentenced|lawsuit|policy|"
+    r"budget|funding|labor|workers?|union|pay|sports?|weather)\b",
+    re.I,
+)
+_GDELT_ACCIDENT_CONTEXT = re.compile(
+    r"\b(?:lumber|mill|factory|plant|refinery|pipeline|mine|gas leak|"
+    r"chemical leak|ems|firefighter|fire station|house fire|wildfire|"
+    r"firecracker|fireworks|collapse|tragedy)\b",
+    re.I,
+)
+_GDELT_HARD_NON_CONFLICT = re.compile(
+    r"\b(?:memorial|veterans?|museum|anniversar(?:y|ies)|history|historical|"
+    r"film|book|exhibition|festival|photo|remains|indicted|charged|charges|"
+    r"plotting|plot|conspiracy|sentenced|accused|remember(?:s|ing|ed)?|"
+    r"commemorat(?:e|es|ing|ion)|no new|rejects?|denies|denied|rules? out|"
+    r"unlikely|peace (?:terms?|talks?)|negotiat(?:e|es|ion|ions)|talks?|"
+    r"inside|what it reveals|explainer|analysis|opinion|preview|outlook|"
+    r"explained|protect(?:s|ion)?|defensive|push(?:es|ed|ing)? for|"
+    r"condemns?|condemn|calls? for|urges?|unveils?|reveals?|"
+    r"preparing for|what to know)\b",
+    re.I,
+)
+
+
+def _slug_headline(url: str | None) -> str:
+    """Recover a readable headline from a news URL slug.
+
+    GDELT does not carry the article title in its event export. The URL slug
+    still gives us the source's own wording often enough to catch a mismatch
+    between the automated code and the article.
+    """
+    if not url:
+        return ""
+    try:
+        path = unquote(urlsplit(url).path)
+    except Exception:
+        return ""
+    parts = [part for part in path.split("/") if part]
+    for part in reversed(parts[-3:]):
+        slug = re.sub(r"\.(?:html?|php|aspx?|amp)$", "", part, flags=re.I)
+        words = re.findall(r"[A-Za-z]{2,}", slug.replace("-", " ").replace("_", " "))
+        if len(words) >= 3:
+            text = " ".join(words)[:180]
+            return text[0].upper() + text[1:]
+    return ""
+
+
+def _gdelt_article_evidence(url: str | None, actors: str, place: str) -> tuple[str, bool, bool]:
+    """Return (headline, conflict_evidence, hazard_evidence)."""
+    headline = _slug_headline(url)
+    text = f"{headline} {actors} {place}"
+    conflict = bool(_GDELT_CONFLICT_TERMS.search(text))
+    strong = bool(_GDELT_STRONG_CONFLICT.search(text))
+    if _GDELT_HARD_NON_CONFLICT.search(text):
+        conflict = False
+    elif conflict and not strong and (
+        _GDELT_NON_CONFLICT_CONTEXT.search(text) or _GDELT_ACCIDENT_CONTEXT.search(text)
+    ):
+        conflict = False
+    if conflict and _GDELT_ACCIDENT_CONTEXT.search(text) and not strong:
+        conflict = False
+    hazard = bool(_GDELT_HAZARD_TERMS.search(text)) and not conflict
+    return headline, conflict, hazard
 
 
 def _as_float(value) -> float | None:
@@ -886,16 +979,41 @@ def _gdelt_conflict_items(rows: list[list[str]]) -> list[dict]:
         reported = parse_time(row[59]) or parse_time(row[1]) or now
         event_date = parse_time(row[1])
         place = str(row[52] or "").strip()
+        url = str(row[60] or "").strip() or None
         label = GDELT_EVENT_LABELS.get(code) or {
             "18": "Assault", "19": "Armed clash", "20": "Mass violence",
         }.get(root, "Conflict event")
-        if actor1 and actor2 and actor1.upper() != actor2.upper():
-            title = f"{label}: {actor1} vs {actor2}"
+        headline, conflict_evidence, hazard_evidence = _gdelt_article_evidence(
+            url, f"{actor1} {actor2}", place,
+        )
+        # Never turn an automated code into a headline. If the article slug
+        # points at a hazard, drop it. If a headline exists but has no conflict
+        # wording, the article is about something else and does not belong in
+        # the conflict layer. Without a headline, require an armed actor.
+        if hazard_evidence:
+            continue
+        if headline:
+            if not conflict_evidence:
+                continue
+            title = headline
+            severity = "ALERT"
+            basis = "article headline"
+            confidence = "low"
+        elif armed:
+            title = f"Unverified media report — {place}" if place else "Unverified media report"
+            severity = "INFO"
+            basis = "armed actor + automated code"
+            confidence = "very low"
         else:
-            title = label
-        if place:
-            title = f"{title} — {place}"
-        severity = "CRITICAL" if root == "20" or code in ("183", "194", "195", "200", "201", "202") else "ALERT"
+            continue
+        actors = f"{actor1} vs {actor2}" if actor1 and actor2 and actor1.upper() != actor2.upper() else (actor1 or actor2)
+        summary = (
+            f"GDELT automated coding: {label}. "
+            + (f"Article headline: {headline}. " if headline else "No article headline available. ")
+            + (f"Actors: {actors}. " if actors else "")
+            + f"{mentions} mention(s). Media-derived and unverified; event coding and geocoding can be wrong. "
+              "Verify the linked report before acting."
+        )
         out.append({
             "id": f"gdelt:{row[0]}",
             "title": title,
@@ -909,14 +1027,65 @@ def _gdelt_conflict_items(rows: list[list[str]]) -> list[dict]:
             "verified": False,
             "source": "GDELT (media-derived)",
             "event_code": code, "event_root": root,
+            "event_type": label,
+            "article_headline": headline or None,
+            "label_basis": basis,
+            "confidence": confidence,
+            "label_version": GDELT_LABEL_VERSION,
             "mentions": mentions,
             "goldstein": _as_float(row[30]),
             "fatalities": None,
-            "url": str(row[60] or "").strip() or None,
-            "summary": (f"Automated GDELT coding of a media report ({label}). "
-                        f"{mentions} mention(s). Actor and event coding can be wrong; "
-                        "verify against the linked report before acting."),
+            "url": url,
+            "summary": summary,
         })
+    # One article can produce many CAMEO rows (different actors/locations).
+    # Keep a single, best-supported item per source URL.
+    deduped: dict[str, dict] = {}
+    for item in out:
+        key = _gdelt_dedupe_key(item)
+        prev = deduped.get(key)
+        if prev is None or (item.get("mentions") or 0) > (prev.get("mentions") or 0):
+            deduped[key] = item
+    return list(deduped.values())
+
+
+def _gdelt_dedupe_key(item: dict) -> str:
+    title = re.sub(r"[^a-z0-9]+", " ", str(item.get("title") or "").lower()).strip()
+    return title or str(item.get("url") or item.get("id") or "")
+
+
+def _revalidate_cached_gdelt_item(item: dict) -> dict | None:
+    """Re-label a pre-upgrade GDELT cache item from its source slug.
+
+    Older items used the automated CAMEO code as the headline. Keep only items
+    whose article slug contains conflict wording, and replace the code label
+    with the article headline.
+    """
+    if item.get("label_version") == GDELT_LABEL_VERSION:
+        return item
+    headline, conflict, hazard = _gdelt_article_evidence(
+        item.get("url"), "", str(item.get("place") or ""),
+    )
+    if hazard or not headline or not conflict:
+        return None
+    out = dict(item)
+    label = out.get("event_type") or GDELT_EVENT_LABELS.get(
+        str(out.get("event_code") or ""), "Conflict event")
+    out.update({
+        "title": headline,
+        "severity": "ALERT",
+        "event_type": label,
+        "article_headline": headline,
+        "label_basis": "article headline (revalidated)",
+        "confidence": "low",
+        "label_version": GDELT_LABEL_VERSION,
+        "source": "GDELT (media-derived)",
+        "summary": (
+            f"GDELT automated coding: {label}. Article headline: {headline}. "
+            "Media-derived and unverified; event coding and geocoding can be wrong. "
+            "Verify the linked report before acting."
+        ),
+    })
     return out
 
 
@@ -953,28 +1122,40 @@ def _refresh_gdelt(db: Database, row) -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=36)
     for item in previous:
         parsed = parse_time(item.get("time"))
-        if parsed is not None and parsed >= cutoff and item.get("id"):
-            kept.append(item)
+        if parsed is None or parsed < cutoff or not item.get("id"):
+            continue
+        revalidated = _revalidate_cached_gdelt_item(item)
+        if revalidated is not None:
+            kept.append(revalidated)
     # Build a useful window on first run; afterwards the 15-minute slices are
     # merged into the existing cache so the map does not blink empty.
     slices = 4 if not kept else 2
     fresh: list[dict] = []
     errors = []
+    downloaded = 0
     for url in _gdelt_export_urls(slices):
         try:
             resp = requests.get(url, headers=UA, timeout=TIMEOUT)
             resp.raise_for_status()
             with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
                 raw = archive.read(archive.namelist()[0]).decode("utf-8", "replace")
+            downloaded += 1
             fresh.extend(_gdelt_conflict_items(list(csv.reader(io.StringIO(raw), delimiter="\t"))))
         except Exception as exc:
             errors.append(str(exc)[:120])
-    if not fresh:
-        raise RuntimeError("GDELT export unavailable: " + ("; ".join(errors[:2]) or "no matching conflict rows"))
+    if not fresh and not downloaded:
+        raise RuntimeError("GDELT export unavailable: " + ("; ".join(errors[:2]) or "download failed"))
     merged = {item["id"]: item for item in kept}
     for item in fresh:
         merged[item["id"]] = item
-    items = sorted(merged.values(), key=lambda item: item.get("time") or "", reverse=True)
+    # Collapse duplicate rows that point at the same source article.
+    deduped: dict[str, dict] = {}
+    for item in merged.values():
+        key = _gdelt_dedupe_key(item)
+        prev = deduped.get(key)
+        if prev is None or (item.get("mentions") or 0) > (prev.get("mentions") or 0):
+            deduped[key] = item
+    items = sorted(deduped.values(), key=lambda item: item.get("time") or "", reverse=True)
     return items[:2500]
 
 
