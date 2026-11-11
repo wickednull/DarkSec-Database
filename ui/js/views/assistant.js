@@ -666,11 +666,11 @@ export async function render(root) {
           if (pendingTicker) { clearInterval(pendingTicker); pendingTicker = null; }
           try { pending?.remove(); } catch {}
           pending = null;
-          const ui = createAssistantBox(`${model} · streaming…`);
+          const ui = createAssistantBox("streaming…");
           transcript.appendChild(ui.box); transcript.scrollTop = transcript.scrollHeight;
           const reader = resp.body.getReader();
           const decoder = new TextDecoder();
-          let buf = "", content = "", thinking = "", finalModel = model, hadError = null, doneData = null, toolEvents = [];
+          let buf = "", content = "", thinking = "", hadError = null, doneData = null, toolEvents = [];
           while (true) {
             const { value, done } = await reader.read();
             if (done) break;
@@ -679,21 +679,20 @@ export async function render(root) {
             for (const line of lines) {
               if (!line.trim()) continue;
               let evt; try { evt = JSON.parse(line); } catch { continue; }
-              if (evt.model) finalModel = evt.model;
               if (evt.type === "delta") {
                 if (evt.channel === "thinking") thinking += evt.delta || "";
                 else { content += evt.delta || ""; ui.body.textContent = content; }
                 const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-                ui.meta.textContent = `${finalModel} · streaming · ${content.length} chars · ${secs}s`;
+                ui.meta.textContent = `streaming · ${content.length} chars · ${secs}s`;
                 transcript.scrollTop = transcript.scrollHeight;
               } else if (evt.type === "error") {
                 hadError = evt.error || "Streaming error";
               } else if (evt.type === "tool") {
                 toolEvents.push({ name: evt.name, result: evt.result });
                 const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-                ui.meta.textContent = `${finalModel} · running ${evt.name || "tool"} · ${secs}s`;
+                ui.meta.textContent = `running ${evt.name || "tool"} · ${secs}s`;
               } else if (evt.type === "done") {
-                doneData = evt; content = evt.content || content; thinking = evt.thinking || thinking; finalModel = evt.model || finalModel;
+                doneData = evt; content = evt.content || content; thinking = evt.thinking || thinking;
                 if (Array.isArray(evt.tools) && evt.tools.length) toolEvents = evt.tools;
               }
             }
@@ -706,7 +705,7 @@ export async function render(root) {
             if (typeof html === "string") ui.body.innerHTML = html;
             else ui.body.textContent = finalContent;
           } catch { ui.body.textContent = finalContent; }
-          ui.meta.textContent = `${finalModel} · ${nowTs()}${truncNote}`;
+          ui.meta.textContent = `${nowTs()}${truncNote}`;
           state.messages.push({ role: "assistant", content: finalContent, meta: ui.meta.textContent, images: [] });
           if (state.messages.length > 200) state.messages = state.messages.slice(-160);
           if (thinking && String(thinking).trim()) {
@@ -740,7 +739,7 @@ export async function render(root) {
         const truncNote = (res?.truncated || res?.done_reason === "length") ? " · truncated (increase Max reply tokens)" : "";
         try { pending?.remove(); } catch {}
         pending = null;
-        addMsg("assistant", content, res?.model ? `${res.model} · ${nowTs()}${truncNote}` : `${nowTs()}${truncNote}`, [], { record: true });
+        addMsg("assistant", content, `${nowTs()}${truncNote}`, [], { record: true });
         if (res?.thinking && String(res.thinking).trim()) {
           const details = h("details", { class: "small", style: { marginTop: "8px" } },
             h("summary", { style: { cursor: "pointer", color: "var(--muted)" }, text: "Model thinking/reasoning" }),
