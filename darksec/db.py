@@ -598,6 +598,15 @@ class Database:
             self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('feeds_v5',?)",
                          (utcnow(),))
 
+        # Vault auto-lock was removed: keep the key until an explicit lock or
+        # process exit, and drop the obsolete timeout setting on upgrade.
+        if self.one("SELECT 1 FROM meta WHERE key='vault_no_autolock_v1'") is None:
+            try:
+                self.execute("DELETE FROM settings WHERE key='vault_timeout_min'")
+            except Exception:
+                pass
+            self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('vault_no_autolock_v1',?)",
+                         (utcnow(),))
         # The old CCTV radius default (50 km) made Overpass refreshes slow and
         # timeout-prone in dense cities. Move untouched defaults to 15 km;
         # operators can still raise it explicitly in Settings.

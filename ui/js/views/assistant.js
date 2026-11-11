@@ -1,4 +1,4 @@
-import { api } from "../api.js";
+import { api, promptVaultUnlock } from "../api.js";
 import { store } from "../store.js";
 import { h, pageHead, panel, btn, input, textarea, field, select, badge, alertStrip, loading, toast, toggle, renderMarkdown, fmt } from "../components.js";
 
@@ -404,6 +404,35 @@ export async function render(root) {
     );
   }
 
+  function needsVaultUnlock(events) {
+    return (events || []).some((e) => /vault is (locked|not configured)/i.test(String(e?.result?.error || "")));
+  }
+
+  async function recoverVaultSave(events) {
+    const failed = (events || []).find((e) => e?.name === "save_note"
+      && /vault is (locked|not configured)/i.test(String(e?.result?.error || "")));
+    if (!failed) return false;
+    const unlocked = await promptVaultUnlock(
+      "Delamain tried to save to the encrypted vault, but it is locked. Unlock it here and the note will be saved automatically.");
+    if (!unlocked) return false;
+    const args = failed.args || {};
+    const title = String(args.title || "Delamain note");
+    const body = String(args.body || "");
+    if (!body) {
+      toast("Vault unlocked. Ask Delamain to retry the save.", "warn");
+      return true;
+    }
+    try {
+      await api.post("/api/assistant/vault-note", {
+        title, content: body, tags: args.tags || "delamain",
+      });
+      toast(`Saved to encrypted vault: ${title.slice(0, 60)}`, "ok");
+    } catch (err) {
+      toast(err.message || "Vault unlocked, but the note could not be saved", "warn");
+    }
+    return true;
+  }
+
   async function loadConversations() {
     try {
       const res = await api.get("/api/assistant/conversations");
@@ -689,6 +718,9 @@ export async function render(root) {
           }
           const toolNode = renderToolEvents(toolEvents);
           if (toolNode) ui.box.appendChild(toolNode);
+          if (needsVaultUnlock(toolEvents)) {
+            recoverVaultSave(toolEvents);
+          }
           if (hadError) toast(`Stream warning: ${hadError}`, "warn");
           transcript.scrollTop = transcript.scrollHeight;
         } else if (resp.status !== 404 && resp.status !== 405) {
@@ -718,6 +750,9 @@ export async function render(root) {
         }
         const toolNode = renderToolEvents(res?.tools);
         if (toolNode) { try { transcript.lastChild?.appendChild(toolNode); } catch {} }
+        if (needsVaultUnlock(res?.tools)) {
+          recoverVaultSave(res?.tools);
+        }
       }
     } catch (e) {
       try { pending?.remove(); } catch {}

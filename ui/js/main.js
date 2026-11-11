@@ -246,6 +246,13 @@ function bindChrome() {
   window.addEventListener("online", () => { pollSync(); toast("Network online — automatic sync resumes"); });
   window.addEventListener("offline", () => { netDown = false; touchNet(); toast("Network offline — cached data remains available", "warn"); });
   window.addEventListener("darksec:auth", authLost);
+  window.addEventListener("darksec:vault-unlocked", async () => {
+    try {
+      lastStatus = await store.loadStatus();
+      updateStatusUI(lastStatus);
+      updateBadges(lastStatus);
+    } catch {}
+  });
   window.addEventListener("beforeunload", () => { if (cleanupCurrent) try { cleanupCurrent(); } catch {} });
 }
 

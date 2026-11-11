@@ -56,7 +56,7 @@ database.
   weighted threat index, solar/day-night state and live event logging into the
   mission log. Auto-sync pauses offline and in OPSEC mode.
 - **Settings** — identity, position, grid format, radio limits, map tiles,
-  appearance, feed source health/editing, vault timeout, diagnostics and data
+  appearance, feed source health/editing, vault custody, diagnostics and data
   custody.
 - **Local AI assistant (Delamain)** — optional chat backed by a local Ollama
   instance. Detects installed models, can include cached intelligence context,

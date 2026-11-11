@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Optional
 
 from . import astro, feeds, geo, intel, library, sitrep
 from .db import Database
@@ -10,7 +11,7 @@ from .trips import trip_items
 
 
 
-def build_brief(db: Database) -> str:
+def build_brief(db: Database, vault: Optional[dict] = None) -> str:
     s = db.all_settings()
     r = readiness(db)
     now = datetime.now(timezone.utc)
@@ -70,7 +71,7 @@ def build_brief(db: Database) -> str:
     try:
         sit = sitrep.situational_brief(db, lat_f, lon_f, elevation_m=elevation, ready=r,
                                     inventory=[dict(x) for x in db.query("SELECT * FROM inventory ORDER BY name LIMIT 24")],
-                                    sun=almanac, threat=local_threat)
+                                    sun=almanac, threat=local_threat, vault=vault)
     except Exception:
         sit = {"stance": "UNKNOWN", "stance_reason": "Synthesis unavailable", "critical_near": 0, "events_within_radius": 0, "top_events": [], "actions": []}
     actions = sit.get("actions") or []

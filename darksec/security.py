@@ -2,7 +2,7 @@
 
 Notes are encrypted with AES-256-GCM using a key derived from the operator
 passphrase (PBKDF2-HMAC-SHA256, 600k iterations). The key lives only in RAM
-and is dropped on lock, timeout, or shutdown.
+and is dropped on manual lock or shutdown.
 """
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import base64
 import json
 import os
 import shutil
-import time
 from pathlib import Path
 
 from cryptography.exceptions import InvalidTag
@@ -36,24 +35,18 @@ class Vault:
     def __init__(self, db):
         self.db = db
         self._key: bytes | None = None
-        self._unlocked_at: float | None = None
 
     # ------------------------------------------------------------------ state
     def configured(self) -> bool:
         return bool(self.db.get_setting("vault_check"))
 
     def unlocked(self) -> bool:
-        if not self._key:
-            return False
-        timeout = float(self.db.get_setting("vault_timeout_min", 15) or 15)
-        if timeout > 0 and self._unlocked_at and time.time() - self._unlocked_at > timeout * 60:
-            self.lock()
-            return False
-        return True
+        # No idle auto-lock: the vault stays open until the operator locks it
+        # or the process exits.
+        return bool(self._key)
 
     def status(self) -> dict:
-        return {"configured": self.configured(), "unlocked": self.unlocked(),
-                "timeout_min": self.db.get_setting("vault_timeout_min", 15)}
+        return {"configured": self.configured(), "unlocked": self.unlocked()}
 
     def _derive(self, passphrase: str, salt: bytes) -> bytes:
         kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt,
@@ -74,7 +67,6 @@ class Vault:
         self.db.set_setting("vault_check", _b64(nonce + ct))
         self.db.set_setting("vault_kdf", f"pbkdf2-sha256-{KDF_ITERATIONS}")
         self._key = key
-        self._unlocked_at = time.time()
         self.db.audit("VAULT_SETUP", "Encrypted vault created")
         return self.status()
 
@@ -90,13 +82,11 @@ class Vault:
             self.db.audit("VAULT_UNLOCK_FAIL", "Bad passphrase")
             raise ValueError("Invalid passphrase")
         self._key = key
-        self._unlocked_at = time.time()
         self.db.audit("VAULT_UNLOCK", "Vault unlocked")
         return self.status()
 
     def lock(self) -> dict:
         self._key = None
-        self._unlocked_at = None
         return self.status()
 
     def change_passphrase(self, old: str, new: str) -> dict:
@@ -138,7 +128,6 @@ class Vault:
             for cipher, note_id in reencrypted:
                 conn.execute("UPDATE notes SET cipher=? WHERE id=?", (cipher, note_id))
         self._key = key
-        self._unlocked_at = time.time()
         self.db.audit("VAULT_PASSCHANGE", f"Vault passphrase changed; notes rekeyed={len(reencrypted)}")
         return self.status()
 

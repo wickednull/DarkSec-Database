@@ -61,7 +61,7 @@ export async function render(root, params = {}) {
 
   const stats = h("div", { class: "grid grid-4 mt-14" });
   stats.appendChild(stat("Vault", !vault.configured ? "NOT SET" : vault.unlocked ? "UNLOCKED" : "LOCKED",
-    vault.configured ? `${vault.timeout_min ?? "—"} min idle timeout` : "AES-256-GCM not yet configured",
+    vault.configured ? "manual lock only — no idle auto-lock" : "AES-256-GCM not yet configured",
     vault.unlocked ? "warn" : ""));
   stats.appendChild(stat("Encrypted notes", String(notes.length).padStart(2, "0"), vault.unlocked ? "decrypted in memory" : "ciphertext at rest"));
   stats.appendChild(stat("Open incidents", String(openIncidents.length).padStart(2, "0"), "unresolved local reports", openIncidents.length ? "warn" : ""));
@@ -93,7 +93,12 @@ export async function render(root, params = {}) {
     ], { empty: "No audit events", emptyIcon: "terminal" }),
   }));
 
-  return () => {};
+  const onVaultUnlocked = () => { try { rerender(lastTab); } catch {} };
+  window.addEventListener("darksec:vault-unlocked", onVaultUnlocked);
+
+  return () => {
+    window.removeEventListener("darksec:vault-unlocked", onVaultUnlocked);
+  };
 }
 
 /* ------------------------------------------------------------------ vault */
@@ -137,7 +142,7 @@ function vaultSection(root, vault, notes) {
   }
   side.appendChild(list);
   side.appendChild(h("div", { class: "hint mt-10",
-    text: "Notes are encrypted with AES-256-GCM. The key exists only in the backend process memory and is discarded on lock, timeout or shutdown." }));
+    text: "Notes are encrypted with AES-256-GCM. The key exists only in the backend process memory and is discarded on manual lock or shutdown." }));
   grid.appendChild(panel({ title: "Encrypted notes", sub: `${notes.length} stored`, icon: "lock", body: side }));
 
   const current = notes.find((n) => n.id === selectedNoteId) || null;
@@ -209,7 +214,7 @@ function setupVault(root) {
   info.appendChild(kv([
     ["Cipher", "AES-256-GCM"],
     ["KDF", "PBKDF2-HMAC-SHA256 · 600,000 iterations"],
-    ["Key lifetime", "RAM only; dropped on lock/timeout/shutdown"],
+    ["Key lifetime", "RAM only; dropped on manual lock or shutdown"],
     ["Threat model", "Data at rest on a powered-off or locked machine"],
     ["Not covered", "Compromised OS, keyloggers, screen capture, memory forensics, weak passphrase"],
   ]));
@@ -240,14 +245,14 @@ function unlockVault(root, vault) {
       pass.focus();
     } finally { go.disabled = false; }
   }
-  grid.appendChild(panel({ title: "Unlock vault", sub: `${vault.timeout_min ?? "—"} min idle timeout`, icon: "lock", body }));
+  grid.appendChild(panel({ title: "Unlock vault", sub: "Manual unlock — stays open until you lock it", icon: "lock", body }));
 
   const info = h("div", { class: "col" });
-  info.appendChild(h("div", { class: "callout small", text: "Failed attempts are written to the audit log. The vault stays locked until the correct passphrase is entered." }));
+  info.appendChild(h("div", { class: "callout small", text: "Failed attempts are written to the audit log. The vault stays open after unlock until you manually lock it or the app exits." }));
   info.appendChild(kv([
     ["Status", "LOCKED"],
     ["Notes", "ciphertext only"],
-    ["Timeout", `${vault.timeout_min ?? "—"} minutes of inactivity`],
+    ["Locking", "Manual only — no idle auto-lock"],
     ["Recovery", "None — passphrase is the only key"],
   ]));
   grid.appendChild(panel({ title: "Vault state", icon: "shield", body: info }));

@@ -312,7 +312,7 @@ def _hour_ago() -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
 
 
-def assistant_live_status(d: Database) -> dict:
+def assistant_live_status(d: Database, vault_obj=None) -> dict:
     """Compact, read-only operational snapshot for Delamain's live-status tool.
 
     Reads only local caches (no network fetches) and includes ages so the model
@@ -373,6 +373,7 @@ def assistant_live_status(d: Database) -> dict:
         ready = readiness(d, include_pizzint=False)
     except Exception:
         ready = {}
+    vault_state = vault_obj.status() if vault_obj is not None else None
     sit = {}
     if have_pos:
         try:
@@ -386,6 +387,7 @@ def assistant_live_status(d: Database) -> dict:
                 d, lat, lon,
                 elevation_m=float(s.get("elevation_m") or 0),
                 ready=ready, inventory=inventory, threat=threat,
+                vault=vault_state,
             )
         except Exception:
             sit = {}
@@ -447,6 +449,7 @@ def assistant_live_status(d: Database) -> dict:
         "time": utcnow(),
         "online": online,
         "opsec": opsec,
+        "vault": vault_state,
         "position": position,
         "sync": {
             "enabled": sync.get("enabled"), "running": sync.get("running"),
@@ -849,7 +852,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             sit = sitrep.situational_brief(d, lat, lon, elevation_m=elevation,
                                          ready=r,
                                          inventory=[dict(x) for x in d.query("SELECT * FROM inventory ORDER BY name LIMIT 24")],
-                                         sun=almanac, threat=local_threat)
+                                         sun=almanac, threat=local_threat,
+                                         vault=vault(request).status())
         except Exception:
             sit = {"stance": "UNKNOWN", "stance_reason": "Synthesis unavailable", "critical_near": 0,
                    "events_within_radius": 0, "top_events": [], "actions": []}
@@ -880,7 +884,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
 
     @app.get("/api/brief", response_class=PlainTextResponse)
     def brief(request: Request):
-        return PlainTextResponse(build_brief(db(request)), media_type="text/plain; charset=utf-8")
+        return PlainTextResponse(build_brief(db(request), vault=vault(request).status()), media_type="text/plain; charset=utf-8")
 
     @app.get("/api/system")
     def system(request: Request):
@@ -907,7 +911,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             name = str(name or "").strip()
             try:
                 if name == "get_live_status":
-                    return assistant_live_status(d)
+                    return assistant_live_status(d, v)
                 if name == "get_library_document":
                     title = str(args.get("title") or args.get("name") or "").strip()
                     if not title:
@@ -1168,7 +1172,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 raise HTTPException(status_code=400, detail=f'Transmit acknowledgement required: send tx_ack="{TX_ACK}"')
         numeric = {"lat": (-90, 90), "lon": (-180, 180), "elevation_m": (-500, 9000),
                    "declination": (-180, 180), "sdr_rx_gain": (0, 62), "sdr_lna_gain": (0, 40),
-                   "vault_timeout_min": (0, 240), "position_accuracy_m": (0, 100000),
+                   "position_accuracy_m": (0, 100000),
                    "position_mode": (0, 3)}
         for key, value in payload.items():
             if key in numeric:

@@ -2,7 +2,7 @@ import { api, download } from "../api.js";
 import { store } from "../store.js";
 import {
   h, panel, pageHead, btn, field, input, select, checkbox, badge, toast,
-  modal, alertStrip, fmt, loading, emptyState,
+  modal, fmt, loading, emptyState,
 } from "../components.js";
 import {
   kv, progressBar, statusTone, positionConfidence, manualPositionMetadata, gpsPositionMetadata,
@@ -38,10 +38,6 @@ export async function render(root) {
       btn("BACKUP DATA", { icon: "save", tone: "primary", onClick: backupNow }),
     ],
   }));
-
-  if (!settings.vault_timeout_min) {
-    root.appendChild(alertStrip("Vault timeout is unset. Set a short auto-lock window before carrying this device.", ""));
-  }
 
   const grid = h("div", { class: "panel-grid grid-2 mt-14" });
   root.appendChild(grid);
@@ -398,14 +394,12 @@ export async function render(root) {
   loadCctvCatalog(cctvCatalogBox);
 
   /* ------------------------------------------------------------ security */
-  const vaultTimeout = input({ type: "number", min: 0, max: 240, value: settings.vault_timeout_min ?? 15 });
   const secPanel = panel({
     title: "Data custody",
     icon: "shield",
     body: h("div", { class: "col" },
-      field("Vault auto-lock (minutes)", vaultTimeout, "0 disables auto-lock. Shorter is safer."),
+      h("div", { class: "callout small", text: "The vault remains unlocked until you manually lock it or the app exits. Lock it when you finish handling sensitive notes." }),
       h("div", { class: "row wrap mt-10" },
-        btn("SAVE", { icon: "save", onClick: () => saveSimple({ vault_timeout_min: vaultTimeout.value }, "Vault timeout saved") }),
         btn("VAULT & NOTES", { icon: "lock", onClick: () => { location.hash = "#/security?tab=vault"; } }),
         btn("EXPORT JSON", { icon: "download", onClick: () => download("/api/logistics/export?fmt=json", "darksec-export.json") }),
         btn("EXPORT CSV", { icon: "download", onClick: () => download("/api/logistics/export?fmt=csv", "darksec-export.csv") })),

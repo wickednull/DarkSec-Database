@@ -94,7 +94,6 @@ def default_settings() -> dict:
         "auto_deep_index": True,
         "feed_auto_refresh": True,
         "feed_refresh_min": 10,
-        "vault_timeout_min": 15,
         "cctv_radius_km": 15,
         "cctv_catalog_refresh_hours": 0,
         "cctv_stream_host_allowlist": "[]",

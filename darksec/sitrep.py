@@ -225,6 +225,12 @@ def _rules_environmental_intel(db: Database, lat: float, lon: float) -> list[dic
     return actions
 
 
+def _rules_vault(vault: Optional[dict]) -> list[dict]:
+    if isinstance(vault, dict) and vault.get("unlocked"):
+        return [{"text": "Encrypted vault is open. Lock it when finished handling sensitive notes.", "urgency": 1}]
+    return []
+
+
 def _rules_intel_quality(db: Database) -> list[dict]:
     actions = []
     try:
@@ -376,6 +382,7 @@ def synthesize_actions(db: Database, lat: float, lon: float,
     if sun:
         actions.extend(_rules_sun(sun, lat, lon))
     actions.extend(_rules_intel_quality(db))
+    actions.extend(_rules_vault(kwargs.get("vault")))
 
     threat = kwargs.get("threat") or {}
     try:
@@ -400,11 +407,12 @@ def situational_brief(db: Database, lat: float, lon: float,
                       sun: Optional[dict] = None,
                       radius_km: float = 500.0,
                       threat: Optional[dict] = None,
+                      vault: Optional[dict] = None,
                       **kwargs) -> dict:
     """Produce the full situational brief for the dashboard."""
     nearby = events_near(db, lat, lon, radius_km=radius_km, limit=40)
     actions = synthesize_actions(db, lat, lon, ready=ready, inventory=inventory, sun=sun,
-                                 threat=threat, radius_km=radius_km)
+                                 threat=threat, radius_km=radius_km, vault=vault)
 
     # Location-aware threat context (fallback if caller didn't provide it)
     if threat is None:

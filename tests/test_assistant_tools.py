@@ -124,3 +124,19 @@ def test_assistant_live_status_offline_shape(tmpdb, monkeypatch):
     assert isinstance(out["feeds"], dict) and "problems" in out["feeds"]
     assert "readiness" in out and "signals" in out["readiness"]
     assert "Local cache only" in out["note"]
+
+
+def test_vault_has_no_idle_autolock(tmpdb):
+    vault = Vault(tmpdb)
+    vault.setup("correct horse battery staple")
+    assert vault.unlocked() is True
+    assert "timeout_min" not in vault.status()
+
+
+def test_sitrep_warns_when_vault_is_open(tmpdb):
+    from darksec import sitrep
+
+    open_actions = sitrep.synthesize_actions(tmpdb, 39.8, -98.5, vault={"unlocked": True})
+    assert any("vault is open" in a["text"].lower() for a in open_actions)
+    locked_actions = sitrep.synthesize_actions(tmpdb, 39.8, -98.5, vault={"unlocked": False})
+    assert not any("vault is open" in a["text"].lower() for a in locked_actions)
