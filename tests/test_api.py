@@ -631,3 +631,39 @@ def test_osm_camera_page_is_not_a_snapshot(client):
     # The OSM node page must not be fetched as an image snapshot.
     r = client.get("/api/cctv/frame", params={"id": "cctv_catalog:osm-page-1"})
     assert r.status_code == 404
+
+
+def test_assistant_chat_log_saves_to_vault(client):
+    from darksec import config
+    from darksec.db import Database
+
+    marker = _unique("secret-chat-body")
+    chat_body = ("operator: check the water filter\nDelamain: noted.\n" * 400) + marker
+    status = client.get("/api/vault/status").json()
+    if not status.get("configured"):
+        client.post("/api/vault/setup", json={"passphrase": "correct horse battery"})
+    else:
+        client.post("/api/vault/unlock", json={"passphrase": "correct horse battery"})
+    client.post("/api/vault/lock")
+
+    locked = client.post("/api/assistant/vault-note", json={"title": "Chat", "content": chat_body})
+    assert locked.status_code == 403
+
+    client.post("/api/vault/unlock", json={"passphrase": "correct horse battery"})
+    out = client.post("/api/assistant/vault-note", json={
+        "title": "Chat archive", "content": chat_body, "tags": "delamain,chat-log",
+    })
+    assert out.status_code == 200
+    note_id = out.json()["id"]
+
+    notes = client.get("/api/notes").json()["items"]
+    item = next(n for n in notes if n["id"] == note_id)
+    assert item["title"] == "Chat archive"
+    assert item["body"] == chat_body
+
+    db = Database(config.DB_PATH)
+    stored = db.one("SELECT cipher FROM notes WHERE id=?", (note_id,))
+    assert marker not in stored["cipher"]
+    leaked = db.one("SELECT count(*) c FROM log_entries WHERE body LIKE ?", (f"%{marker}%",))
+    assert leaked["c"] == 0
+    client.post("/api/vault/lock")

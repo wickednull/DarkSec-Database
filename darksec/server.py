@@ -303,6 +303,9 @@ AI_NOTE_MAX_PER_HOUR = 10
 AI_NOTE_TOTAL_CAP = 200
 AI_LOG_MAX_CHARS = 20_000
 AI_NOTE_MAX_CHARS = 10_000
+# Explicit operator-initiated chat archives can be much larger than a model
+# tool note; vault notes allow up to 2M chars, so keep a generous bound here.
+AI_CHAT_MAX_CHARS = 500_000
 
 
 def _hour_ago() -> str:
@@ -332,11 +335,12 @@ def ai_log_save(d: Database, title: str, body: str, category: str = "GENERAL") -
             "limit_note": f"Saved to mission log (AI category). Max {AI_LOG_MAX_PER_HOUR}/hour, {AI_LOG_TOTAL_CAP} total."}
 
 
-def ai_note_save(d: Database, v, title: str, body: str, tags: str = "") -> dict:
+def ai_note_save(d: Database, v, title: str, body: str, tags: str = "",
+                 max_chars: int = AI_NOTE_MAX_CHARS) -> dict:
     """Insert an AI-authored encrypted note with hourly and total caps."""
     if not v.unlocked():
         raise ValueError("Vault is locked. Unlock it before asking Delamain to save a note.")
-    content = str(body or "").strip()[:AI_NOTE_MAX_CHARS]
+    content = str(body or "").strip()[:max_chars]
     if not content:
         raise ValueError("body is required")
     heading = str(title or "Delamain note").strip()[:300] or "Delamain note"
@@ -897,15 +901,32 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         from fastapi.responses import FileResponse
         return FileResponse(path)
 
+    @app.post("/api/assistant/vault-note")
+    def assistant_vault_note(request: Request, payload: dict = Body(...)):
+        """Save a Delamain chat log as an encrypted vault note."""
+        d = db(request)
+        v = vault(request)
+        if not v.configured():
+            raise HTTPException(status_code=403,
+                                detail="Vault is not configured. Set up the encrypted vault in SECURITY before saving chat logs.")
+        try:
+            return ai_note_save(d, v,
+                                payload.get("title") or "Delamain note",
+                                payload.get("content") or payload.get("body") or "",
+                                payload.get("tags") or "delamain,chat-log",
+                                max_chars=AI_CHAT_MAX_CHARS)
+        except ValueError as e:
+            msg = str(e)
+            if "Vault is locked" in msg:
+                msg = "Vault is locked. Unlock it in SECURITY, then save this chat."
+                raise HTTPException(status_code=403, detail=msg)
+            raise HTTPException(status_code=400, detail=msg)
+
     @app.post("/api/assistant/log")
     def assistant_log(request: Request, payload: dict = Body(...)):
-        d = db(request)
-        try:
-            return ai_log_save(d, payload.get("title") or "Delamain note",
-                               payload.get("content") or payload.get("body") or "",
-                               payload.get("category") or "GENERAL")
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        # Chat-log saves are encrypted at rest: keep the legacy path as an
+        # alias so older clients cannot accidentally write plaintext logs.
+        return assistant_vault_note(request, payload)
 
     # ------------------------------------------------------------ settings
     @app.get("/api/settings")

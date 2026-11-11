@@ -138,9 +138,29 @@ export async function render(root) {
   const convBar = h("div", { class: "row wrap gap-8", style: { alignItems: "center" } });
   const convSelect = select([{ value: "", label: "Select conversation…" }], state.conversationId ? String(state.conversationId) : "");
   const newConvBtn = btn("NEW CHAT", { size: "sm", icon: "plus", onClick: createConversation });
+  const saveChatBtn = btn("SAVE CHAT TO VAULT", { size: "sm", tone: "ghost", icon: "lock", onClick: saveChatToVault });
   const delConvBtn = btn("DELETE", { size: "sm", tone: "danger", icon: "trash", onClick: deleteConversation });
-  convBar.append(convSelect, newConvBtn, delConvBtn);
+  convBar.append(convSelect, newConvBtn, saveChatBtn, delConvBtn);
   main.appendChild(panel({ title: "Conversations", icon: "cpu", body: convBar }));
+
+  async function saveChatToVault() {
+    const msgs = (state.messages || []).filter((m) => m && (m.role === "user" || m.role === "assistant") && String(m.content || "").trim());
+    if (!msgs.length) { toast("No chat messages to save", "warn"); return; }
+    const option = convSelect?.selectedOptions?.[0]?.textContent || "";
+    const label = option.replace(/\s*\(\d+\)\s*$/, "").trim();
+    const fallback = `Delamain chat ${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
+    const title = (label && label !== "Select conversation…" ? label : fallback).slice(0, 300);
+    const body = msgs.map((m) => {
+      const who = m.role === "user" ? "OPERATOR" : "DELAMAIN";
+      return `${who}${m.meta ? ` [${m.meta}]` : ""}\n${String(m.content || "").trim()}`;
+    }).join("\n\n");
+    try {
+      const res = await api.post("/api/assistant/vault-note", { title, content: body, tags: "delamain,chat-log" });
+      toast(`Chat saved to encrypted vault (#${res.id})`, "ok");
+    } catch (e) {
+      toast(e.message || "Unlock the vault to save chat history", "error");
+    }
+  }
 
   const transcript = h("div", { class: "col gap-10", style: { minHeight: "320px", maxHeight: "56vh", overflow: "auto", padding: "4px 2px" } });
   const intro = h("div", { class: "callout" },
@@ -343,12 +363,12 @@ export async function render(root) {
         body.textContent = String(content || "(failed to render response)");
       }
       box.appendChild(body);
-      const saveBtn = btn("SAVE AS LOG", { size: "sm", tone: "ghost", icon: "save", onClick: async () => {
+      const saveBtn = btn("SAVE TO VAULT", { size: "sm", tone: "ghost", icon: "lock", onClick: async () => {
         try {
           const title = String(content || "").split("\n")[0].slice(0, 120) || "Delamain note";
-          const res = await api.post("/api/assistant/log", { title, content: String(content || "") });
-          toast(`Saved to mission log (#${res.id})`, "ok");
-        } catch (e) { toast(e.message, "error"); }
+          const res = await api.post("/api/assistant/vault-note", { title, content: String(content || ""), tags: "delamain,chat-log" });
+          toast(`Saved to encrypted vault (#${res.id})`, "ok");
+        } catch (e) { toast(e.message || "Unlock the vault to save chat logs", "error"); }
       } });
       box.appendChild(h("div", { class: "row wrap gap-6 mt-6" }, saveBtn));
     }
