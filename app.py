@@ -8,7 +8,7 @@ import subprocess # Import subprocess for xdg-open
 import shutil # Import shutil for file copying
 import tempfile # Import tempfile for creating temporary files
 
-# Define the QSS for the cyberpunk/hacker theme
+# Define the QSS for the theme
 CYBERPUNK_QSS = """
 QWidget {
     background-color: #0d1117; /* Deep dark background */
