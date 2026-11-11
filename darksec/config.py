@@ -123,5 +123,8 @@ def default_settings() -> dict:
         "assistant_think": False,
         "assistant_history_filter": True,
         "assistant_tools": True,
+        "assistant_tools_auto": True,
+        "assistant_library_context": True,
+        "assistant_keep_alive": "30m",
         "lan_access_enabled": False,
     }

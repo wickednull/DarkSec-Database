@@ -23,15 +23,15 @@ async function buildContext() {
   const ctx = { generated_at: new Date().toISOString(), view: location.hash || "#/assistant", note: "Cached/partial app context. Do not treat as live sensor truth." };
   try {
     const [status, settings, intel, dashboard, cbrn, sync, feeds, checklists, incidents] = await Promise.all([
-      timedGet("/api/status", 6000),
-      timedGet("/api/settings", 6000),
-      timedGet("/api/intel/overview", 8000),
-      timedGet("/api/dashboard", 8000),
-      timedGet("/api/cbrn/status", 6000),
-      timedGet("/api/sync/status", 5000),
-      timedGet("/api/feeds", 5000),
-      timedGet("/api/checklists", 6000),
-      timedGet("/api/records/incidents", 6000),
+      timedGet("/api/status", 4000),
+      timedGet("/api/settings", 3000),
+      timedGet("/api/intel/overview", 5000),
+      timedGet("/api/dashboard", 5000),
+      timedGet("/api/cbrn/status", 4000),
+      timedGet("/api/sync/status", 3000),
+      timedGet("/api/feeds", 3000),
+      timedGet("/api/checklists", 3000),
+      timedGet("/api/records/incidents", 3000),
     ]);
     if (status) ctx.status = { ok: status.ok, online: status.online, sync: status.sync ? { running: status.sync.running, phase: status.sync.phase, last_error: status.sync.last_error } : null };
     if (settings) ctx.settings = { units: settings.units, callsign: settings.callsign, opsec_mode: settings.opsec_mode, lat: settings.opsec_mode ? null : settings.lat, lon: settings.opsec_mode ? null : settings.lon, grid_format: settings.grid_format, timezone: settings.timezone };
@@ -92,22 +92,19 @@ function imageUrl(p) {
 
 export async function render(root) {
   root.replaceChildren(loading("Loading survival AI…"));
-  let status = null, modelsResp = null;
+  let status = null;
   try {
-    [status, modelsResp] = await Promise.all([
-      api.get("/api/assistant/status").catch(e => ({ error: e.message })),
-      api.get("/api/assistant/models").catch(e => ({ error: e.message })),
-    ]);
+    status = await api.get("/api/assistant/status").catch(e => ({ error: e.message }));
   } catch (e) {
     root.replaceChildren(h("div", { class: "callout danger", text: e.message }));
     return;
   }
 
   function modelNames() {
-    const list = (status?.models || modelsResp?.models || []).map(m => (typeof m === "string" ? m : m?.name)).filter(Boolean);
+    const list = (status?.models || []).map(m => (typeof m === "string" ? m : m?.name)).filter(Boolean);
     return [...new Set(list)];
   }
-  const initialModel = (store.settings?.ollama_model || status?.model || modelsResp?.configured_model || "").trim();
+  const initialModel = (store.settings?.ollama_model || status?.model || "").trim();
   if (!chatSession.selectedModel && initialModel) chatSession.selectedModel = initialModel;
   if (chatSession.think === null) chatSession.think = false;
   const state = chatSession;
@@ -286,7 +283,7 @@ export async function render(root) {
       ? [{ value: "", label: "Select installed model…" }, ...names.map(n => ({ value: n, label: n }))]
       : [{ value: "", label: "No installed models detected" }];
     const sel = select(opts, state.selectedModel || "");
-    sel.addEventListener("change", () => { state.selectedModel = sel.value; renderStatus(); });
+    sel.addEventListener("change", () => { state.selectedModel = sel.value; warmModel(sel.value); renderStatus(); });
     modelBox.replaceChildren(
       field("INSTALLED MODEL", sel, names.length ? "Detected from local Ollama (`/api/tags`). Select a model to use for chat." : "Start Ollama and pull a model (e.g. `ollama pull llama3.2`), then click Detect Models."),
       h("div", { class: "row wrap gap-8" },
@@ -304,6 +301,7 @@ export async function render(root) {
       h("div", { class: "tiny muted", style: { overflowWrap: "anywhere" }, text: status?.base_url || "—" }),
       h("div", { class: "tiny muted", text: `Active chat model: ${state.selectedModel || status?.model || "(none selected)"}` }),
       h("div", { class: "tiny muted", text: `Default (settings): ${store.settings?.ollama_model || status?.model || "(none)"}` }),
+      h("div", { class: "tiny muted", text: `Timeout: ${status?.timeout_sec || store.settings?.assistant_timeout_sec || 300}s · keep-alive: ${status?.keep_alive || "30m"}` }),
       status?.warning ? h("div", { class: "tiny amber", text: status.warning }) : null,
       h("div", { class: "tiny muted", text: `Installed models detected: ${names.length}${names.length ? ` — ${names.slice(0, 5).join(", ")}${names.length > 5 ? "…" : ""}` : ""}` })
     );
@@ -311,23 +309,28 @@ export async function render(root) {
   async function refreshModels() {
     toast("Detecting Ollama models…", "warn");
     try {
-      [status, modelsResp] = await Promise.all([
-        api.get("/api/assistant/status"),
-        api.get("/api/assistant/models"),
-      ]);
+      status = await api.get("/api/assistant/status?fresh=1");
       const names = modelNames();
       if (!state.selectedModel || !names.includes(state.selectedModel)) {
         state.selectedModel = (store.settings?.ollama_model && names.includes(store.settings.ollama_model) ? store.settings.ollama_model : (status?.model && names.includes(status.model) ? status.model : (names[0] || state.selectedModel)));
       }
       renderStatus();
       renderModelPicker();
-      const alert2 = root.querySelector(".alert-strip, .callout.alert, .alert");
       if (status?.reachable) toast(`Detected ${names.length} installed model(s)`, names.length ? "ok" : "warn");
       else toast(status?.error || "Ollama not reachable", "error");
     } catch (e) { toast(e.message, "error"); }
   }
   renderStatus();
   renderModelPicker();
+
+  // Preload the configured model in the background. Ollama keeps it in memory
+  // for 30 minutes, so the first message does not pay the cold-load cost while
+  // the operator is still typing.
+  function warmModel(model) {
+    if (!status?.reachable || !model) return;
+    api.post("/api/assistant/warm", { model }).catch(() => {});
+  }
+  warmModel(state.selectedModel || status?.model);
 
   function renderImages(images) {
     const arr = Array.isArray(images) ? images : [];
@@ -619,6 +622,20 @@ export async function render(root) {
     const startedAt = Date.now();
     const controller = new AbortController();
     state.abortController = controller;
+    // Match the backend: assistant_timeout_sec is the per-request Ollama read
+    // timeout. Abort only when the stream has been silent for that long, so a
+    // configured 900s timeout is not cut short by a hardcoded client value.
+    const timeoutSec = Math.max(30, Number(status?.timeout_sec || store.settings?.assistant_timeout_sec || 300));
+    const stallMs = timeoutSec * 1000;
+    let stallLimit = stallMs;
+    let lastActivity = Date.now();
+    const touch = () => { lastActivity = Date.now(); };
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastActivity > stallLimit) {
+        try { controller.abort(new DOMException(`No activity from Ollama for ${timeoutSec}s`, "TimeoutError")); }
+        catch { try { controller.abort(); } catch {} }
+      }
+    }, 2000);
     setSending(true);
     try {
       const priorHistory = (state.messages || []).slice(-12).map(m => ({ role: m.role, content: m.content }));
@@ -643,23 +660,19 @@ export async function render(root) {
         payload.context = await buildContext();
       }
       if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
-      stage = "Connecting to local AI (first words can take 10–30s on CPU)…"; paintWait();
+      touch();
+      stage = "Model is reading the prompt (first words can take 10–40s on CPU)…"; paintWait();
 
       let usedStream = false;
       try {
         const headers = { "Content-Type": "application/json", "Accept": "application/x-ndjson" };
         const token = csrfToken(); if (token) headers["X-DarkSec-CSRF"] = token;
-        // Do not abort too early: background tabs and slow CPU models can take
-        // a while before the first token arrives. Rely on the user's cancel
-        // button and the backend assistant timeout instead.
-        const headerTimeout = setTimeout(() => { try { controller.abort(); } catch {} }, 300000);
         let resp;
-        try {
-          resp = await fetch("/api/assistant/chat/stream", {
-            method: "POST", credentials: "same-origin", headers, signal: controller.signal,
-            body: JSON.stringify(payload),
-          });
-        } finally { clearTimeout(headerTimeout); }
+        resp = await fetch("/api/assistant/chat/stream", {
+          method: "POST", credentials: "same-origin", headers, signal: controller.signal,
+          body: JSON.stringify(payload),
+        });
+        touch();
         if (resp.status === 401) { window.dispatchEvent(new CustomEvent("darksec:auth")); throw new Error("Session expired. Relaunch from the DarkSec application."); }
         if (resp.ok && resp.body) {
           usedStream = true;
@@ -673,6 +686,7 @@ export async function render(root) {
           let buf = "", content = "", thinking = "", hadError = null, doneData = null, toolEvents = [];
           while (true) {
             const { value, done } = await reader.read();
+            touch();
             if (done) break;
             buf += decoder.decode(value, { stream: true });
             const lines = buf.split("\n"); buf = lines.pop() || "";
@@ -680,13 +694,22 @@ export async function render(root) {
               if (!line.trim()) continue;
               let evt; try { evt = JSON.parse(line); } catch { continue; }
               if (evt.type === "delta") {
-                if (evt.channel === "thinking") thinking += evt.delta || "";
-                else { content += evt.delta || ""; ui.body.textContent = content; }
-                const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-                ui.meta.textContent = `streaming · ${content.length} chars · ${secs}s`;
-                transcript.scrollTop = transcript.scrollHeight;
+                if (evt.channel === "thinking") {
+                  thinking += evt.delta || "";
+                  const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+                  ui.meta.textContent = `reasoning · ${thinking.length} chars · ${secs}s`;
+                  transcript.scrollTop = transcript.scrollHeight;
+                } else {
+                  content += evt.delta || ""; ui.body.textContent = content;
+                  const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+                  ui.meta.textContent = `streaming · ${content.length} chars · ${secs}s`;
+                  transcript.scrollTop = transcript.scrollHeight;
+                }
               } else if (evt.type === "error") {
                 hadError = evt.error || "Streaming error";
+              } else if (evt.type === "tool_start") {
+                const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+                ui.meta.textContent = `running ${evt.name || "tool"} · ${secs}s`;
               } else if (evt.type === "tool") {
                 toolEvents.push({ name: evt.name, result: evt.result });
                 const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
@@ -728,12 +751,17 @@ export async function render(root) {
           if (detail) throw new Error(detail);
         }
       } catch (streamErr) {
-        if (streamErr?.name === "AbortError") throw streamErr;
+        if (streamErr?.name === "AbortError" || streamErr?.name === "TimeoutError") throw streamErr;
         if (usedStream) throw streamErr;
         console.warn("assistant stream fallback", streamErr);
       }
 
       if (!usedStream) {
+        // Non-stream requests produce no bytes until the end, and tool rounds
+        // can legitimately take several backend timeout windows. Give the
+        // fallback a wider budget while the user can still cancel manually.
+        stallLimit = stallMs * 4 + 30000;
+        touch();
         const res = await api.post("/api/assistant/chat", payload, { signal: controller.signal });
         const content = (res?.content || "").trim() || "(model returned empty content)";
         const truncNote = (res?.truncated || res?.done_reason === "length") ? " · truncated (increase Max reply tokens)" : "";
@@ -755,7 +783,11 @@ export async function render(root) {
       }
     } catch (e) {
       try { pending?.remove(); } catch {}
-      if (e?.name === "AbortError" || /aborted|AbortError/i.test(String(e?.message || e || ""))) {
+      if (e?.name === "TimeoutError") {
+        const msg = `No activity from Ollama for ${timeoutSec}s. The model may still be loading or the prompt may be too large. Raise Timeout in Settings if CPU inference is slow.`;
+        try { addMsg("assistant", `**Timeout:** ${msg}`, "", [], { record: false }); } catch {}
+        toast(msg, "error");
+      } else if (e?.name === "AbortError" || /aborted|AbortError/i.test(String(e?.message || e || ""))) {
         addMsg("assistant", "_Request cancelled._", nowTs(), [], { record: false });
         toast("Cancelled", "warn");
       } else {
@@ -767,6 +799,7 @@ export async function render(root) {
         toast(msg, "error");
       }
     } finally {
+      clearInterval(watchdog);
       if (pendingTicker) { clearInterval(pendingTicker); pendingTicker = null; }
       if (state.abortController === controller) state.abortController = null;
       setSending(false);

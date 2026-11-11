@@ -411,6 +411,8 @@ export async function render(root) {
   const assistantEnabled = checkbox("Enable Delamain (local AI / Ollama)", !!settings.assistant_enabled);
   const assistantThink = checkbox("Enable model thinking/reasoning", !!settings.assistant_think);
   const assistantTools = checkbox("Allow Delamain tools (live status, library lookup, notes/logs)", settings.assistant_tools !== false);
+  const assistantToolsAuto = checkbox("Load tools only when needed (faster)", settings.assistant_tools_auto !== false);
+  const assistantLibrary = checkbox("Auto-include library excerpts for manual/document questions", settings.assistant_library_context !== false);
   const assistantHistoryFilter = checkbox("Filter risky/refused topics from chat history", settings.assistant_history_filter !== false);
   const ollamaBase = input({ value: settings.ollama_base_url || "http://127.0.0.1:11434", placeholder: "http://127.0.0.1:11434" });
   const ollamaModel = input({ value: settings.ollama_model || "", placeholder: "e.g. llama3.2, mistral, qwen2.5:7b" });
@@ -425,12 +427,12 @@ export async function render(root) {
     sub: "Local AI model integration for assistant chat and field support",
     icon: "cpu",
     body: h("div", { class: "col gap-8" },
-      h("div", { class: "row wrap gap-16" }, assistantEnabled, assistantThink, assistantTools, assistantHistoryFilter),
+      h("div", { class: "row wrap gap-16" }, assistantEnabled, assistantThink, assistantTools, assistantToolsAuto, assistantLibrary, assistantHistoryFilter),
       h("div", { class: "form-grid" },
         field("Ollama base URL", ollamaBase, "Local endpoint. Default: http://127.0.0.1:11434"),
         field("Model", ollamaModel, "Must be pulled in Ollama (e.g. `ollama pull llama3.2`).")),
       h("div", { class: "form-grid cols-3" },
-        field("Temperature", assistantTemp), field("Timeout (sec)", assistantTimeout, "CPU inference can be slow; 300–900s may be needed."), field("Context tokens", assistantCtx),
+        field("Temperature", assistantTemp), field("Timeout (sec)", assistantTimeout, "Per-request Ollama read timeout. The chat waits this long for activity before reporting a stall."), field("Context tokens", assistantCtx),
         field("Max reply tokens", assistantMaxTokens, "Raise for long guides. 2048 is the default; higher is slower on CPU. If answers stop mid-sentence, increase this.")),
       field("System prompt", assistantPrompt, "Guides behavior/safety. Keep it practical; avoid secrets."),
       h("div", { class: "row wrap gap-8" },
@@ -447,6 +449,8 @@ export async function render(root) {
       assistant_enabled: assistantEnabled.querySelector("input").checked,
       assistant_think: assistantThink.querySelector("input").checked,
       assistant_tools: assistantTools.querySelector("input").checked,
+      assistant_tools_auto: assistantToolsAuto.querySelector("input").checked,
+      assistant_library_context: assistantLibrary.querySelector("input").checked,
       assistant_history_filter: assistantHistoryFilter.querySelector("input").checked,
       ollama_base_url: ollamaBase.value.trim(),
       ollama_model: ollamaModel.value.trim(),

@@ -111,6 +111,22 @@ search the indexed document library. These tools are rate-limited server-side
 a misbehaving model cannot fill the disk. Turn the tools off entirely in
 **Settings → Assistant → Allow Delamain to save notes/logs**.
 
+Latency notes:
+
+- The configured model is preloaded when the assistant opens and kept in memory
+  for 30 minutes (`assistant_keep_alive`), so the first message does not pay the
+  cold-load cost.
+- **Timeout (sec)** is the per-request Ollama read timeout. The chat view reports
+  a stall only after that many seconds pass with no streamed activity, so the UI
+  and backend timeouts stay aligned even if you raise it to 900s.
+- Tool definitions cost a large chunk of prompt tokens on CPU. They are attached
+  only when the message asks for live conditions, a library lookup, or a save
+  action; disable **Load tools only when needed** to always send them.
+- Retrieved library excerpts are injected only for manual/document questions.
+  Keep the system prompt and context-token setting stable during a chat so
+  Ollama can reuse its cached prompt prefix; changing them forces a full
+  re-evaluation of the conversation.
+
 
 ### Desktop shell (Electron)
 

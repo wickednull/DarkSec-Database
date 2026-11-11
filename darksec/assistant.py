@@ -10,6 +10,8 @@ import json
 import re
 import shutil
 import subprocess
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -21,7 +23,15 @@ import requests
 from .db import Database, utcnow
 from . import library as _library
 DEFAULT_BASE = "http://127.0.0.1:11434"
+DEFAULT_KEEP_ALIVE = "30m"
 UA = {"User-Agent": "DarkSecNightwatch/2.0", "Accept": "application/json", "Content-Type": "application/json"}
+
+# Ollama is a local daemon; /api/tags is cheap but the assistant screen asks
+# twice (status + models) and every settings test asks again. A very short
+# cache keeps the UI snappy without hiding a daemon that just started.
+_TAGS_TTL = 5.0
+_TAGS_CACHE: dict[str, tuple[float, dict]] = {}
+_TAGS_LOCK = threading.Lock()
 
 
 def _settings(db: Database) -> dict:
@@ -42,13 +52,46 @@ def _settings(db: Database) -> dict:
         "think": bool(s.get("assistant_think", False)),
         "history_filter": bool(s.get("assistant_history_filter", True)),
         "tools": bool(s.get("assistant_tools", True)),
+        "tools_auto": bool(s.get("assistant_tools_auto", True)),
+        "library_context": bool(s.get("assistant_library_context", True)),
+        "keep_alive": str(s.get("assistant_keep_alive") or DEFAULT_KEEP_ALIVE).strip() or DEFAULT_KEEP_ALIVE,
         "opsec_mode": bool(s.get("opsec_mode", False)),
         "units": s.get("units") or "metric",
         "callsign": s.get("callsign") or "",
     }
 
 
-def status(db: Database) -> dict:
+def _tags(base_url: str, timeout: float, fresh: bool = False) -> tuple[list[dict] | None, str | None]:
+    """Return (models, error) for an Ollama daemon, with a small TTL cache."""
+    now = time.monotonic()
+    if not fresh:
+        with _TAGS_LOCK:
+            hit = _TAGS_CACHE.get(base_url)
+            if hit and now - hit[0] < _TAGS_TTL:
+                entry = hit[1]
+                return list(entry.get("models") or []), entry.get("error")
+    try:
+        resp = requests.get(f"{base_url}/api/tags", headers={"User-Agent": UA["User-Agent"], "Accept": "application/json"}, timeout=max(1.0, min(6.0, timeout)))
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        models = []
+        for m in (data.get("models") or []):
+            if isinstance(m, dict) and m.get("name"):
+                models.append({"name": m.get("name"), "size": m.get("size"), "modified_at": m.get("modified_at"), "details": m.get("details") or {}})
+        entry = {"models": models, "error": None}
+        with _TAGS_LOCK:
+            _TAGS_CACHE[base_url] = (now, entry)
+        return models, None
+    except Exception as e:
+        entry = {"models": [], "error": f"Ollama unreachable at {base_url}: {e}"[:400]}
+        with _TAGS_LOCK:
+            # Cache failures briefly too: a stopped daemon should not cost the
+            # UI a full TCP timeout on every page render.
+            _TAGS_CACHE[base_url] = (now, entry)
+        return None, entry["error"]
+
+
+def status(db: Database, fresh: bool = False) -> dict:
     cfg = _settings(db)
     out = {
         "enabled": cfg["enabled"],
@@ -58,34 +101,60 @@ def status(db: Database) -> dict:
         "reachable": False,
         "models": [],
         "error": None,
+        "warning": None,
+        "timeout_sec": cfg["timeout"],
+        "keep_alive": cfg["keep_alive"],
         "checked_at": utcnow(),
         "local_only_hint": cfg["base_url"].startswith(("http://127.0.0.1", "http://localhost", "http://[::1]")),
     }
     if not cfg["enabled"]:
         out["error"] = "Assistant disabled in settings."
         return out
-    try:
-        resp = requests.get(f"{cfg['base_url']}/api/tags", headers={"User-Agent": UA["User-Agent"], "Accept": "application/json"}, timeout=min(8, cfg["timeout"]))
-        resp.raise_for_status()
-        data = resp.json() if resp.content else {}
-        models = []
-        for m in (data.get("models") or []):
-            if isinstance(m, dict) and m.get("name"):
-                models.append({"name": m.get("name"), "size": m.get("size"), "modified_at": m.get("modified_at"), "details": m.get("details") or {}})
-        out["reachable"] = True
-        out["models"] = models
-        names = {m["name"] for m in models}
-        if cfg["model"] and cfg["model"] not in names:
-            # keep configured, but warn
-            out["warning"] = f"Configured model '{cfg['model']}' not found in Ollama tags."
-    except Exception as e:
-        out["error"] = f"Ollama unreachable at {cfg['base_url']}: {e}"[:400]
+    models, error = _tags(cfg["base_url"], cfg["timeout"], fresh=fresh)
+    if error:
+        out["error"] = error
+        return out
+    out["reachable"] = True
+    out["models"] = models or []
+    names = {m["name"] for m in out["models"]}
+    if cfg["model"] and cfg["model"] not in names:
+        # keep configured, but warn
+        out["warning"] = f"Configured model '{cfg['model']}' not found in Ollama tags."
     return out
 
 
-def list_models(db: Database) -> dict:
-    st = status(db)
+def list_models(db: Database, fresh: bool = False) -> dict:
+    st = status(db, fresh=fresh)
     return {"ok": st.get("reachable", False), "models": st.get("models", []), "base_url": st.get("base_url"), "configured_model": st.get("model"), "error": st.get("error"), "warning": st.get("warning")}
+
+
+def warm(db: Database, model: str | None = None) -> dict:
+    """Load a model into memory so the first chat is not cold.
+
+    Uses an empty /api/chat request, which Ollama answers with done_reason
+    "load" without running prompt evaluation. Safe to call repeatedly.
+    """
+    cfg = _settings(db)
+    use_model = (model or cfg["model"]).strip()
+    if not cfg["enabled"] or not use_model:
+        return {"ok": False, "error": "No model configured."}
+    try:
+        resp = requests.post(
+            f"{cfg['base_url']}/api/chat",
+            headers=UA,
+            data=json.dumps({
+                "model": use_model,
+                "messages": [],
+                "stream": False,
+                "keep_alive": cfg["keep_alive"],
+                "options": {"num_ctx": cfg["num_ctx"]},
+            }),
+            timeout=max(5.0, min(120.0, float(cfg["timeout"]))),
+        )
+        resp.raise_for_status()
+        return {"ok": True, "model": use_model, "keep_alive": cfg["keep_alive"]}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
 
 
 def _safe_context(ctx: Any) -> str:
@@ -95,7 +164,7 @@ def _safe_context(ctx: Any) -> str:
         text = json.dumps(ctx, ensure_ascii=False, default=str)
     except Exception:
         text = str(ctx)
-    return text[:16000]
+    return text[:6000]
 
 
 # History filtering prevents small local models from carrying a prior refusal or
@@ -153,10 +222,13 @@ def _history_is_poisoned(m: dict) -> bool:
     return False
 
 
-def _quick_extract(path_str: str, max_chars: int = 1500) -> str:
+def _quick_extract(path_str: str, max_chars: int = 1500, allow_ocr: bool = False) -> str:
     """Best-effort, short text extraction for a single document.
 
-    Used when a library hit has no indexed text yet. Never raises.
+    Used when a library hit has no indexed text yet. Never raises. OCR is off by
+    default because it can take minutes per page on CPU and this runs on the
+    critical path before an assistant reply; explicit document lookups use the
+    library tool instead.
     """
     if not path_str:
         return ""
@@ -167,8 +239,8 @@ def _quick_extract(path_str: str, max_chars: int = 1500) -> str:
     if ext == ".pdf" and shutil.which("pdftotext"):
         try:
             proc = subprocess.run(
-                ["pdftotext", "-q", "-layout", "-f", "1", "-l", "5", str(p), "-"],
-                capture_output=True, timeout=10, check=False,
+                ["pdftotext", "-q", "-layout", "-f", "1", "-l", "3", str(p), "-"],
+                capture_output=True, timeout=3, check=False,
             )
             text = proc.stdout.decode("utf-8", errors="ignore")[:max_chars]
             if text.strip():
@@ -182,7 +254,7 @@ def _quick_extract(path_str: str, max_chars: int = 1500) -> str:
                 from pypdf import PdfReader
                 reader = PdfReader(str(p))
                 chunks = []
-                for i in range(min(5, len(reader.pages))):
+                for i in range(min(3, len(reader.pages))):
                     try:
                         chunks.append(reader.pages[i].extract_text() or "")
                     except Exception:
@@ -192,22 +264,23 @@ def _quick_extract(path_str: str, max_chars: int = 1500) -> str:
                     return text.strip()
         except Exception:
             pass
-        # OCR fallback for scanned/image PDFs (requires tesseract + pdf2image)
-        try:
-            from pdf2image import convert_from_path
-            import pytesseract
-            images = convert_from_path(str(p), dpi=150, first_page=1, last_page=2)
-            ocr_chunks = []
-            for img in images:
-                try:
-                    ocr_chunks.append(pytesseract.image_to_string(img))
-                except Exception:
-                    continue
-            text = "\n".join(ocr_chunks)[:max_chars]
-            if text.strip():
-                return text.strip()
-        except Exception:
-            pass
+        if allow_ocr:
+            # OCR fallback for scanned/image PDFs (requires tesseract + pdf2image)
+            try:
+                from pdf2image import convert_from_path
+                import pytesseract
+                images = convert_from_path(str(p), dpi=150, first_page=1, last_page=2)
+                ocr_chunks = []
+                for img in images:
+                    try:
+                        ocr_chunks.append(pytesseract.image_to_string(img))
+                    except Exception:
+                        continue
+                text = "\n".join(ocr_chunks)[:max_chars]
+                if text.strip():
+                    return text.strip()
+            except Exception:
+                pass
     if ext in (".txt", ".md"):
         try:
             return p.read_text(encoding="utf-8", errors="ignore")[:max_chars].strip()
@@ -287,8 +360,29 @@ def _to_base64_image(value: Any) -> str | None:
         return None
 
 
-def _library_context(db: Database, query: str, limit: int = 5, max_chars: int = 6000) -> str:
-    """Retrieve relevant snippets from the indexed document library (PDFs etc.).
+_LIBRARY_HINTS = re.compile(
+    r"\b(manual|manuals|document|documents|pdf|library|handbook|book|guide|chapter|page|"
+    r"reference|field guide|tm |fm |according to)\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_library_context(query: str) -> bool:
+    """Cheap intent gate for automatic document retrieval.
+
+    Retrieval adds prompt tokens (and therefore prefill time) to the turn and
+    interrupts prefix caching, so only inject passages when the question
+    actually points at the library. Topic search remains available through the
+    search_library tool.
+    """
+    text = (query or "").strip()
+    if len(text) < 12:
+        return False
+    return bool(_LIBRARY_HINTS.search(text))
+
+
+def _library_context(db: Database, query: str, limit: int = 4, max_chars: int = 3000) -> str:
+    """Retrieve a few relevant snippets from the indexed document library.
 
     Best-effort: returns "" on empty index, bad query or any error. Never raises.
     """
@@ -308,11 +402,11 @@ def _library_context(db: Database, query: str, limit: int = 5, max_chars: int = 
         tokens = [t for t in re.findall(r"[\w]+", q, flags=re.UNICODE) if len(t) >= 4]
         if not tokens:
             tokens = [t for t in re.findall(r"[\w]+", q, flags=re.UNICODE) if len(t) >= 3]
-        for tok in tokens[:6]:
+        for tok in tokens[:3]:
             if len(collected) >= limit:
                 break
             try:
-                for h in (_library.search(db, tok, None, 3) or []):
+                for h in (_library.search(db, tok, None, 2) or []):
                     if not isinstance(h, dict):
                         continue
                     if h.get("id") in seen:
@@ -387,38 +481,71 @@ def _library_context(db: Database, query: str, limit: int = 5, max_chars: int = 
     )
 
 
-def build_messages(db: Database, user_text: str, history: list[dict] | None = None, context: Any = None, images: list | None = None) -> list[dict]:
+_TOOL_HINTS = re.compile(
+    r"\b(live|current|currently|right now|now|today|tonight|status|sitrep|brief|"
+    r"weather|forecast|temperature|wind|windy|rain|raining|snow|snowing|storm|hurricane|"
+    r"wildfire|flood|earthquake|smoke|fog|humidity|uv index|"
+    r"alert|alerts|warning|air quality|aqi|radiation|space weather|readiness|"
+    r"feeds?|sensors?|conditions|outage|sync|online|offline|trip)\b",
+    re.IGNORECASE,
+)
+_TOOL_ACTIONS = re.compile(
+    r"\b(save|record|log|remember|write (?:this|it|that) down|make a note|note this|vault|"
+    r"store this|look ?up|find (?:the |a )?(?:manual|document|pdf|guide|handbook|book)|"
+    r"search (?:the )?(?:library|manuals?|documents?)|manual|document|pdf|library|handbook)\b",
+    re.IGNORECASE,
+)
+
+
+def tools_relevant(query: str) -> bool:
+    """Whether a turn is likely to need a tool call.
+
+    Tool definitions cost roughly 900 prompt tokens, which dominates
+    first-token latency on CPU-only systems. Only attach them when the operator
+    asks for live conditions, a library lookup, or a save action.
+    """
+    text = str(query or "")
+    return bool(_TOOL_HINTS.search(text) or _TOOL_ACTIONS.search(text))
+
+
+_TIME_HINTS = re.compile(
+    r"\b(what time|the time|current time|time is it|what(?:'s| is) the date|today's date|"
+    r"what day|utc|zulu|clock|local time|timestamp)\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_time_context(query: str) -> bool:
+    return bool(_TIME_HINTS.search(str(query or "")))
+
+
+def build_messages(db: Database, user_text: str, history: list[dict] | None = None, context: Any = None, images: list | None = None, include_tools: bool | None = None) -> list[dict]:
     cfg = _settings(db)
-    msgs = []
+    if include_tools is None:
+        include_tools = bool(cfg.get("tools", True))
+    # Keep this message byte-for-byte stable between turns: Ollama caches the
+    # common prompt prefix, so a changing timestamp here would force a full
+    # prompt re-evaluation every request (tens of seconds on CPU).
     sys = cfg["system_prompt"] or "Your name is Delamain, a local survival assistant."
     sys += (
-        f"\nYou are Delamain. Always identify as Delamain, never as NIGHTWATCH. "
-        f"Current UTC time: {utcnow()}. Units: {cfg['units']}. "
-        f"Operator callsign: {cfg['callsign'] or 'unknown'} (the person using the console, not you). "
-        f"OPSEC mode: {'on' if cfg['opsec_mode'] else 'off'}."
+        f"\nYou are Delamain; always identify as Delamain, never as NIGHTWATCH. "
+        f"Units: {cfg['units']}. Operator callsign: {cfg['callsign'] or 'unknown'} "
+        f"(the person using the console, not you). OPSEC mode: {'on' if cfg['opsec_mode'] else 'off'}."
     )
-    ctx = _safe_context(context)
-    if ctx:
-        sys += "\nApplication context (may be partial/cached; do not treat as live sensor truth):\n" + ctx
-    lib_ctx = _library_context(db, user_text)
-    if lib_ctx:
-        sys += lib_ctx
-        sys += "\nWhen you use the retrieved library passages above, cite the document name(s) you relied on."
-    if cfg.get("tools", True):
+    if include_tools:
         sys += (
             "\nYou can act on the operator's system with these tools: "
-            "get_live_status (current cached feeds, weather, air quality, alerts, readiness, "
-            "sync/online state and cache ages), get_library_document (find a named manual by "
-            "title, tolerates misspellings, returns excerpts), search_library (topic search), "
-            "save_log_entry (plaintext mission log) and save_note (encrypted vault note; "
-            "requires the vault to be unlocked). Use get_live_status before answering questions "
-            "about current conditions, and state how old cached data is. Use get_library_document "
-            "when the operator names a specific manual instead of guessing search keywords. "
-            "Call write tools only when the operator asks you to save/record something; do not "
-            "invent saves. Writes are rate-limited by the server."
+            "get_live_status, get_library_document (find a named manual by title), "
+            "search_library (topic search), save_log_entry (plaintext mission log) and "
+            "save_note (encrypted vault note; requires an unlocked vault). Use "
+            "get_live_status before answering questions about current conditions and say "
+            "how old cached data is. Call write tools only when the operator asks you to "
+            "save/record something. Writes are rate-limited by the server."
         )
-    msgs.append({"role": "system", "content": sys})
-    kept = 0
+    msgs = [{"role": "system", "content": sys}]
+
+    kept: list[dict] = []
+    budget = 6000
     for m in reversed((history or [])[-20:]):
         if not isinstance(m, dict):
             continue
@@ -428,13 +555,38 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
             continue
         if cfg.get("history_filter", True) and _history_is_poisoned(m):
             continue
-        msgs.append({"role": role, "content": content[:8000]})
-        kept += 1
-        if kept >= 12:
+        content = content[:2000]
+        if budget - len(content) < 0:
             break
-    # restore chronological order for the kept history
-    body = msgs[1:]
-    msgs = msgs[:1] + list(reversed(body))
+        budget -= len(content)
+        kept.append({"role": role, "content": content})
+        if len(kept) >= 8:
+            break
+    msgs.extend(reversed(kept))
+
+    # Volatile context is injected only when it can help. When it is absent
+    # (the common case) the whole prior conversation remains a cacheable
+    # prefix, so a new turn only evaluates the latest question.
+    context_parts: list[str] = []
+    if _wants_time_context(user_text):
+        context_parts.append(f"Current UTC time: {utcnow()}.")
+    ctx = _safe_context(context)
+    if ctx:
+        context_parts.append("Application context (may be partial/cached; do not treat as live sensor truth):\n" + ctx)
+    lib_ctx = ""
+    if cfg.get("library_context", True) and _wants_library_context(user_text):
+        lib_ctx = _library_context(db, user_text)
+    if lib_ctx:
+        context_parts.append(lib_ctx + "\nWhen you use the retrieved library passages above, cite the document name(s) you relied on.")
+    if context_parts:
+        msgs.append({
+            "role": "system",
+            "content": (
+                "[Reference context for this turn — not part of the operator's message]\n"
+                + "\n".join(context_parts)
+                + "\n[End reference context]"
+            ),
+        })
     user_msg = {"role": "user", "content": str(user_text or "")[:8000]}
     b64s = []
     for img in (images or []):
@@ -448,18 +600,20 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
 
 
 def tool_specs() -> list[dict]:
-    """Local tools Delamain may call. Write tools are rate-limited server-side."""
+    """Local tools Delamain may call. Write tools are rate-limited server-side.
+
+    Descriptions are intentionally short: tool schemas are sent with the prompt
+    and cost prefill time on CPU. Keep just enough for the model to choose well.
+    """
     return [
         {
             "type": "function",
             "function": {
                 "name": "get_live_status",
                 "description": (
-                    "Read the current cached operational picture: feed health and ages, "
-                    "weather, air quality, space weather, severe alerts, readiness, trips, "
-                    "sync/online state and situational actions. Use this before answering "
-                    "questions about current conditions. Cached data may be stale; report "
-                    "its age and never present it as live sensor truth."
+                    "Cached operational picture: feeds, weather, air quality, space "
+                    "weather, alerts, readiness, sync. Use before current-condition "
+                    "questions and report how old the data is."
                 ),
                 "parameters": {"type": "object", "properties": {}, "required": []},
             },
@@ -469,17 +623,15 @@ def tool_specs() -> list[dict]:
             "function": {
                 "name": "get_library_document",
                 "description": (
-                    "Find a specific manual/document by title and return extracted text. "
-                    "Handles misspellings and partial names (e.g. 'Grizzly Wood Lathe Manual' "
-                    "matches 'GRIZZLEY WOOD LATHE MANUAL'). Use this instead of guessing "
-                    "search keywords when the operator names a document."
+                    "Find a manual/document by title and return an excerpt. Tolerates "
+                    "partial or misspelled titles."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "title": {"type": "string", "description": "Document title or distinctive filename."},
-                        "query": {"type": "string", "description": "Optional topic terms to focus the excerpt on."},
-                        "max_chars": {"type": "integer", "description": "Max excerpt characters (default 6000, max 20000)."},
+                        "title": {"type": "string", "description": "Document title or filename."},
+                        "query": {"type": "string", "description": "Optional topic to focus the excerpt."},
+                        "max_chars": {"type": "integer", "description": "Max excerpt characters (default 6000)."},
                     },
                     "required": ["title"],
                 },
@@ -489,12 +641,12 @@ def tool_specs() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "search_library",
-                "description": "Search the indexed offline document library for passages matching a topic query.",
+                "description": "Search the indexed offline document library for a topic.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search terms."},
-                        "category": {"type": "string", "description": "Optional library category, e.g. MANUALS, MEDICAL, ENGINEERING."},
+                        "category": {"type": "string", "description": "Optional category, e.g. MANUALS, MEDICAL."},
                     },
                     "required": ["query"],
                 },
@@ -504,16 +656,13 @@ def tool_specs() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "save_log_entry",
-                "description": (
-                    "Save a short note to the operator's plaintext mission log. Use this when the operator asks you to "
-                    "record, log, remember, or write something down for later. Keep it concise."
-                ),
+                "description": "Save a short note to the plaintext mission log when asked to record/log something.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "title": {"type": "string", "description": "Short title, max 200 characters."},
-                        "body": {"type": "string", "description": "Note body. Max 20000 characters."},
-                        "category": {"type": "string", "description": "Optional category label, e.g. GENERAL, MEDICAL, WATER, COMMS, SECURITY."},
+                        "title": {"type": "string", "description": "Short title."},
+                        "body": {"type": "string", "description": "Note body."},
+                        "category": {"type": "string", "description": "Optional category, e.g. GENERAL, MEDICAL, WATER."},
                     },
                     "required": ["title", "body"],
                 },
@@ -523,15 +672,12 @@ def tool_specs() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "save_note",
-                "description": (
-                    "Save an encrypted note to the operator's vault. Use only when the operator explicitly asks "
-                    "you to save a note (the vault must be unlocked). Keep it concise."
-                ),
+                "description": "Save an encrypted vault note when explicitly asked (vault must be unlocked).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "title": {"type": "string", "description": "Short title, max 300 characters."},
-                        "body": {"type": "string", "description": "Note body. Max 10000 characters."},
+                        "title": {"type": "string", "description": "Short title."},
+                        "body": {"type": "string", "description": "Note body."},
                         "tags": {"type": "string", "description": "Optional comma-separated tags."},
                     },
                     "required": ["title", "body"],
@@ -563,6 +709,15 @@ def _tool_result_text(result: Any) -> str:
     return text[:6000]
 
 
+def _tools_for_turn(cfg: dict, prompt: str, tool_executor) -> list[dict] | None:
+    """Decide whether this turn gets the (expensive) tool definitions."""
+    if not tool_executor or not cfg.get("tools", True):
+        return None
+    if cfg.get("tools_auto", True) and not tools_relevant(prompt):
+        return None
+    return tool_specs()
+
+
 def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, stream: bool = False, images: list | None = None, tools: list | None = None):
     cfg = _settings(db)
     if not cfg["enabled"]:
@@ -570,14 +725,14 @@ def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, 
     use_model = (model or cfg["model"]).strip()
     if not use_model:
         raise ValueError("No Ollama model configured. Set assistant/ollama model in Settings.")
-    messages = build_messages(db, prompt, history=history, context=context, images=images)
+    messages = build_messages(db, prompt, history=history, context=context, images=images, include_tools=bool(tools))
     use_think = bool(cfg.get("think", False)) if think is None else bool(think)
     payload = {
         "model": use_model,
         "messages": messages,
         "stream": bool(stream),
         "think": use_think,
-        "keep_alive": "10m",
+        "keep_alive": cfg["keep_alive"],
         "options": {"temperature": cfg["temperature"], "num_ctx": cfg["num_ctx"], "num_predict": cfg["max_tokens"]},
     }
     if tools and cfg.get("tools", True):
@@ -586,8 +741,11 @@ def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, 
 
 
 def chat(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None, tool_executor=None) -> dict:
-    use_tools = bool(tool_executor)
-    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=False, images=images, tools=tool_specs() if use_tools else None)
+    cfg = _settings(db)
+    tools = _tools_for_turn(cfg, prompt, tool_executor)
+    use_tools = bool(tools)
+    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=False, images=images, tools=tools)
+
     messages = payload["messages"]
     tool_events: list[dict] = []
     data: dict = {}
@@ -651,8 +809,10 @@ def chat(db: Database, prompt: str, history: list[dict] | None = None, context: 
 
 def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None, tool_executor=None):
     """Yield NDJSON-friendly dicts for streaming UI updates."""
-    use_tools = bool(tool_executor)
-    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=True, images=images, tools=tool_specs() if use_tools else None)
+    cfg = _settings(db)
+    tools = _tools_for_turn(cfg, prompt, tool_executor)
+    use_tools = bool(tools)
+    cfg, use_model, payload = _chat_request(db, prompt, history=history, context=context, model=model, think=think, stream=True, images=images, tools=tools)
     messages = payload["messages"]
     tool_events: list[dict] = []
     final_model = use_model
@@ -706,6 +866,7 @@ def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, co
                 messages.append({"role": "assistant", "content": str(content_acc or ""), "tool_calls": calls})
                 for tc in list(calls)[:4]:
                     name, args = _tool_call_args(tc)
+                    yield {"type": "tool_start", "name": name, "model": final_model}
                     try:
                         out = tool_executor(name, args)
                     except Exception as e:

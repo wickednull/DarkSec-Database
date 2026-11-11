@@ -507,6 +507,73 @@ def assistant_live_status(d: Database, vault_obj=None) -> dict:
     }
 
 
+def assistant_live_status_compact(d: Database, vault_obj=None) -> dict:
+    """Token-efficient live status for the model's tool result.
+
+    The full snapshot is useful for the UI but JSON-heavy (several thousand
+    characters ~= 45s of prompt prefill on a CPU-only box). Keep the actionable
+    fields and drop long alert summaries and duplicate age fields.
+    """
+    out = assistant_live_status(d, vault_obj)
+    feeds = out.get("feeds") or {}
+    weather = out.get("weather") or None
+    air = out.get("air_quality") or None
+    space = out.get("space_weather") or {}
+    ready = out.get("readiness") or {}
+    sit = out.get("sitrep") or None
+    return {
+        "time": out.get("time"),
+        "online": out.get("online"),
+        "opsec": out.get("opsec"),
+        "position": out.get("position"),
+        "sync": out.get("sync"),
+        "readiness": {"score": ready.get("score"), "band": ready.get("band"),
+                      "signals": (ready.get("signals") or [])[:3]},
+        "feeds": {
+            "total": feeds.get("total"), "ok": feeds.get("ok"),
+            "stale": feeds.get("stale"), "error": feeds.get("error"),
+            "problems": [
+                {"id": p.get("id"), "status": p.get("status"), "age_seconds": p.get("age_seconds")}
+                for p in (feeds.get("problems") or [])[:4]
+            ],
+        },
+        "alerts": [
+            {"title": str(a.get("title") or "")[:110], "severity": a.get("severity"),
+             "source": a.get("source"), "time": a.get("time")}
+            for a in (out.get("alerts") or [])[:6]
+        ],
+        "weather": ({
+            "age_seconds": weather.get("feed_age_seconds"),
+            "time": weather.get("time"), "temp_c": weather.get("temp_c"),
+            "apparent_c": weather.get("apparent_c"), "condition": weather.get("condition"),
+            "wind_kmh": weather.get("wind_kmh"), "gust_kmh": weather.get("gust_kmh"),
+            "precip_mm": weather.get("precip_mm"),
+            "forecast": (weather.get("forecast") or [])[:2],
+        } if weather else None),
+        "air_quality": ({
+            "age_seconds": air.get("feed_age_seconds"),
+            "aqi": air.get("aqi"), "category": air.get("category"),
+            "pm2_5": air.get("pm2_5"),
+        } if air else None),
+        "space_weather": {
+            "age_seconds": space.get("feed_age_seconds"),
+            "kp": space.get("kp"),
+            "scales": [
+                {"title": s.get("title"), "severity": s.get("severity")}
+                for s in (space.get("scales") or [])[:2]
+            ],
+        },
+        "water": out.get("water"),
+        "trip_alerts": out.get("trip_alerts"),
+        "sitrep": ({
+            "stance": sit.get("stance"), "stance_reason": sit.get("stance_reason"),
+            "critical_near": sit.get("critical_near"),
+            "actions": [a.get("text") for a in (sit.get("actions") or [])[:4]],
+        } if sit else None),
+        "note": "Cached local data only; report ages and never claim STALE data is current.",
+    }
+
+
 def ai_log_save(d: Database, title: str, body: str, category: str = "GENERAL") -> dict:
     """Insert an AI-authored mission-log entry with hourly and total caps."""
     content = str(body or "").strip()[:AI_LOG_MAX_CHARS]
@@ -911,7 +978,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             name = str(name or "").strip()
             try:
                 if name == "get_live_status":
-                    return assistant_live_status(d, v)
+                    return assistant_live_status_compact(d, v)
                 if name == "get_library_document":
                     title = str(args.get("title") or args.get("name") or "").strip()
                     if not title:
@@ -924,7 +991,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     excerpt = library.document_excerpt(
                         d, int(doc["id"]),
                         query=str(args.get("query") or ""),
-                        max_chars=args.get("max_chars") or 6000,
+                        max_chars=args.get("max_chars") or 4000,
                     )
                     return {"ok": True, "document": doc, "matches": matches,
                             "excerpt": excerpt.get("text") or "",
@@ -941,11 +1008,11 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     if not q:
                         return {"ok": False, "error": "query is required"}
                     category = str(args.get("category") or "").strip() or None
-                    rows = library.search(d, q, category, limit=5)
+                    rows = library.search(d, q, category, limit=4)
                     return {"ok": True, "results": [
                         {"id": r.get("id"), "name": r.get("name"), "category": r.get("category"),
-                         "path": r.get("rel_path"), "snippet": (r.get("snippet") or "")[:1200]}
-                        for r in rows[:5]
+                         "path": r.get("rel_path"), "snippet": (r.get("snippet") or "")[:800]}
+                        for r in rows[:4]
                     ]}
             except ValueError as e:
                 return {"ok": False, "error": str(e)}
@@ -955,12 +1022,18 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         return execute
 
     @app.get("/api/assistant/status")
-    async def assistant_status(request: Request):
-        return await run_in_threadpool(assistant.status, db(request))
+    async def assistant_status(request: Request, fresh: bool = False):
+        return await run_in_threadpool(assistant.status, db(request), fresh)
 
     @app.get("/api/assistant/models")
-    async def assistant_models(request: Request):
-        return await run_in_threadpool(assistant.list_models, db(request))
+    async def assistant_models(request: Request, fresh: bool = False):
+        return await run_in_threadpool(assistant.list_models, db(request), fresh)
+
+    @app.post("/api/assistant/warm")
+    async def assistant_warm(request: Request, payload: dict = Body(default={})):
+        """Preload a model so the first chat does not wait for the cold load."""
+        model = str(payload.get("model") or "").strip() or None
+        return await run_in_threadpool(assistant.warm, db(request), model)
 
     @app.post("/api/assistant/chat")
     async def assistant_chat(request: Request, payload: dict = Body(...)):
@@ -1188,12 +1261,12 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     raise HTTPException(status_code=400, detail=f"{key} out of range")
                 value = f
             if key in ("sdr_tx_enabled", "sdr_tx_attested", "sdr_amp", "scanlines", "sound",
-                       "map_vector", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_history_filter"):
+                       "map_vector", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter"):
                 value = bool(value)
             if key in ("callsign", "team", "operator", "timezone", "units", "date_format",
                        "grid_format", "accent", "tile_source", "mbtiles_path", "dem_mbtiles_path",
                        "dem_encoding", "epoch", "position_source", "position_updated_at", "position_fix_at",
-                       "ollama_base_url", "ollama_model"):
+                       "ollama_base_url", "ollama_model", "assistant_keep_alive"):
                 value = str(value)[:500]
             if key == "assistant_system_prompt":
                 value = str(value or "")[:8000]

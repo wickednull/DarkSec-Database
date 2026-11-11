@@ -140,3 +140,31 @@ def test_sitrep_warns_when_vault_is_open(tmpdb):
     assert any("vault is open" in a["text"].lower() for a in open_actions)
     locked_actions = sitrep.synthesize_actions(tmpdb, 39.8, -98.5, vault={"unlocked": False})
     assert not any("vault is open" in a["text"].lower() for a in locked_actions)
+
+
+def test_tool_schemas_are_gated_by_intent():
+    # Tool schemas cost roughly 900 prompt tokens, so they are only attached
+    # when the turn plausibly needs one.
+    assert assistant.tools_relevant("help me plan 72 hours of water and food") is False
+    assert assistant.tools_relevant("what is the current weather?") is True
+    assert assistant.tools_relevant("save a note that the filter is fixed") is True
+    assert assistant.tools_relevant("search the library for pump specs") is True
+
+
+def test_system_prompt_is_stable_and_volatile_context_is_separate(tmpdb):
+    a = assistant.build_messages(tmpdb, "how much water per day?", include_tools=False)
+    b = assistant.build_messages(tmpdb, "how much food per day?", include_tools=False)
+    # The first system message must stay byte-identical so Ollama can reuse its
+    # cached prompt prefix between turns.
+    assert a[0] == b[0]
+    assert "Current UTC time" not in a[0]["content"]
+    assert a[-1]["role"] == "user"
+
+    timed = assistant.build_messages(tmpdb, "what time is it in UTC?", include_tools=False)
+    assert any("Current UTC time" in m["content"] for m in timed)
+    assert timed[-1]["role"] == "user"
+
+
+def test_library_context_is_only_injected_for_document_questions(tmpdb):
+    assert assistant._wants_library_context("how much water per day?") is False
+    assert assistant._wants_library_context("according to the water manual, which filter?") is True
