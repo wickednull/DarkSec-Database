@@ -807,7 +807,7 @@ def chat(db: Database, prompt: str, history: list[dict] | None = None, context: 
     }
 
 
-def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None, tool_executor=None):
+def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None, tool_executor=None, tool_preflight=None):
     """Yield NDJSON-friendly dicts for streaming UI updates."""
     cfg = _settings(db)
     tools = _tools_for_turn(cfg, prompt, tool_executor)
@@ -867,6 +867,14 @@ def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, co
                 for tc in list(calls)[:4]:
                     name, args = _tool_call_args(tc)
                     yield {"type": "tool_start", "name": name, "model": final_model}
+                    if tool_preflight is not None:
+                        try:
+                            events = tool_preflight(name, args)
+                        except Exception:
+                            events = None
+                        if events:
+                            for evt in events:
+                                yield evt
                     try:
                         out = tool_executor(name, args)
                     except Exception as e:

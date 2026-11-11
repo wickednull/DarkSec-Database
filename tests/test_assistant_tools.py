@@ -50,8 +50,12 @@ def test_ai_log_save_prunes_total_cap(tmpdb, monkeypatch):
     assert tmpdb.one("SELECT count(*) c FROM log_entries WHERE category='AI'")["c"] == 2
 
 
-def test_ai_note_save_requires_unlocked_vault(tmpdb):
+def test_ai_note_save_requires_configured_and_unlocked_vault(tmpdb):
     vault = Vault(tmpdb)
+    with pytest.raises(ValueError, match="not configured"):
+        server.ai_note_save(tmpdb, vault, "t", "b")
+    vault.setup("correct horse battery staple")
+    vault.lock()
     with pytest.raises(ValueError, match="Vault is locked"):
         server.ai_note_save(tmpdb, vault, "t", "b")
 
@@ -168,3 +172,34 @@ def test_system_prompt_is_stable_and_volatile_context_is_separate(tmpdb):
 def test_library_context_is_only_injected_for_document_questions(tmpdb):
     assert assistant._wants_library_context("how much water per day?") is False
     assert assistant._wants_library_context("according to the water manual, which filter?") is True
+
+
+def test_vault_preflight_prompts_before_save_note(tmpdb):
+    vault = Vault(tmpdb)
+    vault.setup("correct horse battery staple")
+    vault.lock()
+    preflight = server.assistant_vault_preflight(vault)
+    events = preflight("save_note", {"title": "Pending", "body": "secret"})
+    assert events is not None
+    first = next(events)
+    assert first["type"] == "vault_unlock_required"
+    events.close()
+    assert preflight("save_log_entry", {"title": "x", "body": "y"}) is None
+
+    vault.unlock("correct horse battery staple")
+    assert preflight("save_note", {"title": "Pending", "body": "secret"}) is None
+
+
+def test_vault_preflight_releases_after_unlock(monkeypatch):
+    class FakeVault:
+        checks = 0
+        def configured(self):
+            return True
+        def unlocked(self):
+            self.checks += 1
+            return self.checks > 2
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+    events = list(server.assistant_vault_preflight(FakeVault())(
+        "save_note", {"title": "Pending", "body": "secret"}))
+    assert events[0]["type"] == "vault_unlock_required"
+    assert events[-1] == {"type": "vault_unlock_result", "tool": "save_note", "unlocked": True}

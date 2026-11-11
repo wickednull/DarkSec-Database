@@ -600,6 +600,8 @@ def ai_log_save(d: Database, title: str, body: str, category: str = "GENERAL") -
 def ai_note_save(d: Database, v, title: str, body: str, tags: str = "",
                  max_chars: int = AI_NOTE_MAX_CHARS) -> dict:
     """Insert an AI-authored encrypted note with hourly and total caps."""
+    if not v.configured():
+        raise ValueError("Vault is not configured. Set it up in SECURITY before saving notes.")
     if not v.unlocked():
         raise ValueError("Vault is locked. Unlock it before asking Delamain to save a note.")
     content = str(body or "").strip()[:max_chars]
@@ -623,6 +625,36 @@ def ai_note_save(d: Database, v, title: str, body: str, tags: str = "",
     return {"ok": True, "id": new_id, "title": heading,
             "limit_note": f"Saved encrypted vault note. Max {AI_NOTE_MAX_PER_HOUR}/hour, {AI_NOTE_TOTAL_CAP} total."}
 
+
+
+def assistant_vault_preflight(v):
+    """Pause a save_note tool call until the operator unlocks the vault.
+
+    Returns a generator for assistant.chat_stream: the first event asks the UI
+    to open the unlock modal, then the generator waits for the shared Vault
+    instance to become unlocked before the tool is allowed to run.
+    """
+    def preflight(name: str, args: dict):
+        if name != "save_note" or not v.configured() or v.unlocked():
+            return None
+        args = args if isinstance(args, dict) else {}
+        title = str(args.get("title") or "Delamain note")[:200]
+
+        def events():
+            yield {
+                "type": "vault_unlock_required",
+                "tool": name,
+                "title": title,
+                "detail": "Delamain needs to save an encrypted note. Unlock the vault to continue; the save runs automatically after unlock.",
+            }
+            deadline = time.time() + 120.0
+            while time.time() < deadline and not v.unlocked():
+                time.sleep(0.4)
+            yield {"type": "vault_unlock_result", "tool": name,
+                   "unlocked": bool(v.unlocked())}
+
+        return events()
+    return preflight
 
 
 # --------------------------------------------------------------------------
@@ -1109,8 +1141,11 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         def generate():
             final_content = ""
             final_model = use_model
+            v = vault(request)
             try:
-                for chunk in assistant.chat_stream(d, prompt, history, context, model, think, image_paths, assistant_tool_executor(d, vault(request))):
+                for chunk in assistant.chat_stream(d, prompt, history, context, model, think, image_paths,
+                                                   assistant_tool_executor(d, v),
+                                                   assistant_vault_preflight(v)):
                     yield json.dumps(chunk, ensure_ascii=False, default=str) + "\n"
                     if isinstance(chunk, dict) and chunk.get("type") == "done":
                         final_content = chunk.get("content") or final_content

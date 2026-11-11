@@ -707,6 +707,15 @@ export async function render(root) {
                 }
               } else if (evt.type === "error") {
                 hadError = evt.error || "Streaming error";
+              } else if (evt.type === "vault_unlock_required") {
+                ui.meta.textContent = "vault locked — unlock to save";
+                const unlocked = await promptVaultUnlock(evt.detail || "Delamain needs to save an encrypted note. Unlock the vault to continue.");
+                if (!unlocked) {
+                  hadError = "Vault unlock cancelled";
+                  try { controller.abort(); } catch {}
+                }
+              } else if (evt.type === "vault_unlock_result") {
+                if (evt.unlocked) ui.meta.textContent = "vault unlocked · saving…";
               } else if (evt.type === "tool_start") {
                 const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
                 ui.meta.textContent = `running ${evt.name || "tool"} · ${secs}s`;
