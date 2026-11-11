@@ -511,6 +511,7 @@ export async function render(root) {
   }));
 
   const quick = [
+    ["Live status", "Use get_live_status to give me a current operational brief: feed freshness, weather, air quality, space weather, severe alerts, readiness and top actions. State how old cached data is."],
     ["Draft SITREP", "Draft a concise SITREP from the included app context. Mark unknowns, stale data, and assumptions clearly."],
     ["Intel summary", "Summarize the included intel/dashboard context into immediate risks, watch items, and next checks. Separate confirmed cached data from inference."],
     ["72-hour priorities", "Give a practical 72-hour survival priority checklist (life safety, shelter, water, medical, comms, security, logistics). Ask 2-3 clarifying questions only if essential."],

@@ -20,10 +20,11 @@ def tmpdb(tmp_path):
 
 def test_tool_specs_shape():
     names = [t["function"]["name"] for t in assistant.tool_specs()]
-    assert names == ["save_log_entry", "save_note", "search_library"]
+    assert set(names) == {"get_live_status", "get_library_document", "search_library",
+                          "save_log_entry", "save_note"}
     for spec in assistant.tool_specs():
         assert spec["type"] == "function"
-        assert spec["function"]["parameters"]["required"]
+        assert spec["function"]["parameters"]["required"] is not None
 
 
 def test_tool_call_args_parses_json_strings():
@@ -69,3 +70,57 @@ def test_ai_note_save_encrypts_and_caps(tmpdb, monkeypatch):
     assert payload["title"] == "Title" and payload["body"] == "Body"
     with pytest.raises(ValueError, match="limit reached"):
         server.ai_note_save(tmpdb, vault, "Another", "Body")
+
+
+def _add_doc(db, name, text, category="MANUALS"):
+    return db.insert("library_docs", {
+        "path": f"/tmp/{name}", "name": name, "category": category,
+        "rel_path": f"manuals/{name}", "size": len(text), "mtime": 1.0,
+        "pages": 1, "chars": len(text), "text": text,
+        "indexed_ts": "2026-01-01T00:00:00+00:00",
+        "text_ts": "2026-01-01T00:00:00+00:00",
+    })
+
+
+def test_library_find_document_tolerates_misspelled_titles(tmpdb):
+    from darksec import library
+
+    lathe = _add_doc(
+        tmpdb, "GRIZZLEY WOOD LATHE MANUAL.pdf",
+        "Wood lathe safety. Set spindle speed before turning. Grizzly machine.",
+    )
+    heli = _add_doc(
+        tmpdb, "THE ELECTRIC HELICOPTER BEGINEERS GUIDE VOL 16.pdf",
+        "Electric helicopter beginner guide. Rotor tracking and battery care.",
+    )
+    _add_doc(tmpdb, "UNRELATED WATER FILTER NOTES.pdf", "Filter media replacement.")
+
+    lathe_hits = library.find_document(tmpdb, "Grizzly Wood Lathe Manual")
+    assert lathe_hits and lathe_hits[0]["id"] == lathe
+    heli_hits = library.find_document(tmpdb, "Electric Helicopter Beginner's Guide")
+    assert heli_hits and heli_hits[0]["id"] == heli
+    assert library.find_document(tmpdb, "nuclear submarine reactor") == []
+
+
+def test_library_document_excerpt_focuses_on_query(tmpdb):
+    from darksec import library
+
+    doc = _add_doc(
+        tmpdb, "GRIZZLEY WOOD LATHE MANUAL.pdf",
+        ("Introduction. " * 200) + "Spindle speed must be set before turning. " + ("Appendix. " * 200),
+    )
+    out = library.document_excerpt(tmpdb, doc, query="spindle speed", max_chars=800)
+    assert "spindle speed" in out["text"].lower()
+    assert out["focus"] is True
+    assert out["chars"] > 1000
+    assert out["truncated"] is True
+
+
+def test_assistant_live_status_offline_shape(tmpdb, monkeypatch):
+    monkeypatch.setattr(server.tilecache, "is_online", lambda: False)
+    out = server.assistant_live_status(tmpdb)
+    assert out["online"] is False
+    assert out["position"].get("lat") is not None or out["position"].get("missing") is True
+    assert isinstance(out["feeds"], dict) and "problems" in out["feeds"]
+    assert "readiness" in out and "signals" in out["readiness"]
+    assert "Local cache only" in out["note"]

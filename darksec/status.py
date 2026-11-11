@@ -76,7 +76,7 @@ def system_info() -> dict:
 # SITREP
 # --------------------------------------------------------------------------
 
-def readiness(db: Database) -> dict:
+def readiness(db: Database, include_pizzint: bool = True) -> dict:
     """Automated operational readiness derived from local state and cached intel.
 
     Readiness is scored as 100 minus capped operational risk across:
@@ -133,11 +133,13 @@ def readiness(db: Database) -> dict:
     feed_coverage = (cached_feeds / len(feed_rows)) if feed_rows else 1.0
 
     # PizzINT: advisory OSINT readiness signal from public pizza activity.
+    # Callers that must avoid network I/O (assistant tools) can skip it.
     pizzint_data = {}
-    try:
-        pizzint_data = pizzint.fetch() or {}
-    except Exception:
-        pizzint_data = {}
+    if include_pizzint:
+        try:
+            pizzint_data = pizzint.fetch() or {}
+        except Exception:
+            pizzint_data = {}
 
     # Count critical cached events within 2000 km of the operator so distant
     # global headlines do not inflate the dashboard alert strip.

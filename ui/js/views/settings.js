@@ -416,7 +416,7 @@ export async function render(root) {
   /* ---------------------------------------------------------- assistant */
   const assistantEnabled = checkbox("Enable Delamain (local AI / Ollama)", !!settings.assistant_enabled);
   const assistantThink = checkbox("Enable model thinking/reasoning", !!settings.assistant_think);
-  const assistantTools = checkbox("Allow Delamain to save notes/logs", settings.assistant_tools !== false);
+  const assistantTools = checkbox("Allow Delamain tools (live status, library lookup, notes/logs)", settings.assistant_tools !== false);
   const assistantHistoryFilter = checkbox("Filter risky/refused topics from chat history", settings.assistant_history_filter !== false);
   const ollamaBase = input({ value: settings.ollama_base_url || "http://127.0.0.1:11434", placeholder: "http://127.0.0.1:11434" });
   const ollamaModel = input({ value: settings.ollama_model || "", placeholder: "e.g. llama3.2, mistral, qwen2.5:7b" });

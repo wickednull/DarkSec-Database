@@ -406,10 +406,16 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
         sys += "\nWhen you use the retrieved library passages above, cite the document name(s) you relied on."
     if cfg.get("tools", True):
         sys += (
-            "\nYou can act on the operator's system with these tools: save_log_entry (mission log), "
-            "save_note (encrypted vault note; requires the vault to be unlocked), and search_library. "
-            "Call them only when the operator asks you to save/record something or to search the library. "
-            "Do not invent saves; report exactly what you saved. Writes are rate-limited by the server."
+            "\nYou can act on the operator's system with these tools: "
+            "get_live_status (current cached feeds, weather, air quality, alerts, readiness, "
+            "sync/online state and cache ages), get_library_document (find a named manual by "
+            "title, tolerates misspellings, returns excerpts), search_library (topic search), "
+            "save_log_entry (plaintext mission log) and save_note (encrypted vault note; "
+            "requires the vault to be unlocked). Use get_live_status before answering questions "
+            "about current conditions, and state how old cached data is. Use get_library_document "
+            "when the operator names a specific manual instead of guessing search keywords. "
+            "Call write tools only when the operator asks you to save/record something; do not "
+            "invent saves. Writes are rate-limited by the server."
         )
     msgs.append({"role": "system", "content": sys})
     kept = 0
@@ -447,9 +453,59 @@ def tool_specs() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "get_live_status",
+                "description": (
+                    "Read the current cached operational picture: feed health and ages, "
+                    "weather, air quality, space weather, severe alerts, readiness, trips, "
+                    "sync/online state and situational actions. Use this before answering "
+                    "questions about current conditions. Cached data may be stale; report "
+                    "its age and never present it as live sensor truth."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_library_document",
+                "description": (
+                    "Find a specific manual/document by title and return extracted text. "
+                    "Handles misspellings and partial names (e.g. 'Grizzly Wood Lathe Manual' "
+                    "matches 'GRIZZLEY WOOD LATHE MANUAL'). Use this instead of guessing "
+                    "search keywords when the operator names a document."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Document title or distinctive filename."},
+                        "query": {"type": "string", "description": "Optional topic terms to focus the excerpt on."},
+                        "max_chars": {"type": "integer", "description": "Max excerpt characters (default 6000, max 20000)."},
+                    },
+                    "required": ["title"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_library",
+                "description": "Search the indexed offline document library for passages matching a topic query.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search terms."},
+                        "category": {"type": "string", "description": "Optional library category, e.g. MANUALS, MEDICAL, ENGINEERING."},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "save_log_entry",
                 "description": (
-                    "Save a short note to the operator's mission log. Use this when the operator asks you to "
+                    "Save a short note to the operator's plaintext mission log. Use this when the operator asks you to "
                     "record, log, remember, or write something down for later. Keep it concise."
                 ),
                 "parameters": {
@@ -479,18 +535,6 @@ def tool_specs() -> list[dict]:
                         "tags": {"type": "string", "description": "Optional comma-separated tags."},
                     },
                     "required": ["title", "body"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_library",
-                "description": "Search the indexed offline document library for passages matching a query.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"query": {"type": "string", "description": "Search terms."}},
-                    "required": ["query"],
                 },
             },
         },

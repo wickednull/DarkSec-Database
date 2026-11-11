@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from . import config
@@ -296,6 +297,131 @@ def search(db: Database, q: str, category: str | None = None, limit: int = 40) -
         d.pop("snip", None)
         out.append(d)
     return out
+
+
+def _norm_title(value: str) -> str:
+    """Lowercase and strip punctuation/extensions for fuzzy title matching."""
+    text = re.sub(r"\.(pdf|epub|cbz|txt|md|html?|docx?|djvu)$", "",
+                  str(value or "").strip(), flags=re.I)
+    text = text.lower().replace("&", " and ")
+    return " ".join(re.findall(r"[a-z0-9]+", text))
+
+
+def find_document(db: Database, query: str, limit: int = 6) -> list[dict]:
+    """Find documents by title, tolerating misspellings and partial names.
+
+    FTS keyword search fails on names like "GRIZZLEY WOOD LATHE MANUAL" when
+    the operator types "Grizzly" or on "BEGINEERS" when they type "Beginners".
+    This scores normalized titles with token overlap and edit similarity.
+    """
+    q = _norm_title(query)
+    if not q:
+        return []
+    q_set = set(q.split())
+    out = []
+    for row in db.query(
+        "SELECT id,name,rel_path,category,size,chars,text_ts FROM library_docs"
+    ):
+        name = _norm_title(row["name"])
+        if not name:
+            continue
+        n_set = set(name.split())
+        exact = q == name
+        contains = q in name or (len(name) >= 4 and name in q)
+        overlap = len(q_set & n_set) / max(1, len(q_set))
+        ratio = SequenceMatcher(None, q, name).ratio()
+        hits = 0
+        for token in q_set:
+            if token in n_set or any(
+                SequenceMatcher(None, token, nt).ratio() >= 0.82 for nt in n_set
+            ):
+                hits += 1
+        token_ratio = hits / max(1, len(q_set))
+        score = 1.0 if exact else 0.94 if contains else max(
+            ratio * 0.82, overlap * 0.8, token_ratio * 0.92
+        )
+        if score < 0.34:
+            continue
+        out.append({
+            "id": row["id"],
+            "name": row["name"],
+            "category": row["category"],
+            "rel_path": row["rel_path"],
+            "size": row["size"],
+            "chars": row["chars"],
+            "text_ts": row["text_ts"],
+            "score": round(score, 3),
+        })
+    out.sort(key=lambda item: (-item["score"], item["name"]))
+    return out[:limit]
+
+
+def document_excerpt(db: Database, doc_id: int, query: str = "",
+                     max_chars: int = 6000) -> dict:
+    """Return extracted text, optionally focused around query terms."""
+    try:
+        budget = max(500, min(int(max_chars or 6000), 20_000))
+    except (TypeError, ValueError):
+        budget = 6000
+    row = db.one(
+        "SELECT id,name,rel_path,category,chars,text FROM library_docs WHERE id=?",
+        (doc_id,),
+    )
+    if not row:
+        raise ValueError("Document not found")
+    text = str(row["text"] or "")
+    if not text.strip() and row["rel_path"]:
+        path = resolve_doc(str(row["rel_path"]))
+        if path and path.is_file():
+            text = extract_text(path, path.suffix.lower())[0]
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if not text:
+        return {"text": "", "chars": 0, "truncated": False, "focus": False,
+                "note": "No extractable text (scanned/image PDF or not yet indexed)."}
+
+    q = str(query or "").strip()
+    if q:
+        tokens = [t for t in re.findall(r"[\w]+", q, flags=re.UNICODE) if len(t) >= 3][:6]
+        windows: list[tuple[int, int]] = []
+        lower = text.lower()
+        for token in tokens:
+            start = 0
+            while len(windows) < 12:
+                idx = lower.find(token.lower(), start)
+                if idx < 0:
+                    break
+                windows.append((max(0, idx - 350), min(len(text), idx + 650)))
+                start = idx + len(token)
+            if len(windows) >= 12:
+                break
+        if windows:
+            merged: list[tuple[int, int]] = []
+            for start, end in sorted(windows):
+                if merged and start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            parts = []
+            used = 0
+            for start, end in merged:
+                piece = text[start:end].strip()
+                if used + len(piece) > budget:
+                    piece = piece[:max(0, budget - used)]
+                if not piece:
+                    continue
+                parts.append(("…" if start > 0 else "") + piece
+                             + ("…" if end < len(text) else ""))
+                used += len(piece)
+                if used >= budget:
+                    break
+            excerpt = "\n\n".join(parts)
+            return {"text": excerpt, "chars": len(text),
+                    "truncated": used < len(text), "focus": True}
+
+    excerpt = text[:budget]
+    return {"text": excerpt, "chars": len(text),
+            "truncated": len(excerpt) < len(text), "focus": False}
 
 
 def resolve_doc(rel_path: str) -> Path | None:

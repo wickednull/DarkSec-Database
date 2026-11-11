@@ -312,6 +312,198 @@ def _hour_ago() -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
 
 
+def assistant_live_status(d: Database) -> dict:
+    """Compact, read-only operational snapshot for Delamain's live-status tool.
+
+    Reads only local caches (no network fetches) and includes ages so the model
+    can distinguish fresh data from an offline/stale snapshot.
+    """
+    s = d.all_settings()
+    online = tilecache.is_online()
+    opsec = bool(s.get("opsec_mode"))
+    try:
+        lat = float(s.get("lat")) if s.get("lat") is not None else None
+        lon = float(s.get("lon")) if s.get("lon") is not None else None
+    except (TypeError, ValueError):
+        lat = lon = None
+    have_pos = (lat is not None and lon is not None
+                and -90 <= lat <= 90 and -180 <= lon <= 180)
+    try:
+        # `summary()` returns display rows with zero items; fetch a bounded
+        # item list here so weather/air/space-weather snapshots are available.
+        rows = feeds.list_feeds(d, item_limit=30)
+        latest = (feeds.summary(d).get("latest") or [])
+    except Exception:
+        rows = []
+        latest = []
+    feeds_out = []
+    feed_counts = {"total": len(rows), "ok": 0, "stale": 0, "error": 0, "never": 0}
+    for f in rows:
+        if f.get("kind") in ("opensky", "celestrak"):
+            continue
+        status = str(f.get("status") or "NEVER")
+        key = status.lower() if status.lower() in ("ok", "stale", "error", "never") else "never"
+        feed_counts[key] = feed_counts.get(key, 0) + 1
+        if status != "OK" or f.get("error"):
+            feeds_out.append({
+                "id": f.get("id"), "status": status,
+                "age_seconds": f.get("age_seconds"),
+                "data_age_seconds": f.get("data_age_seconds"),
+                "error": (str(f.get("error") or "")[:160] or None),
+            })
+    alerts = []
+    seen_alerts = set()
+    for item in latest:
+        sev = str(item.get("severity") or "INFO").upper()
+        if sev not in ("CRITICAL", "SEVERE", "EXTREME", "ALERT"):
+            continue
+        title = str(item.get("title") or "Event")
+        alert_key = re.sub(r"\s+", " ", title.lower())[:120]
+        if alert_key in seen_alerts:
+            continue
+        seen_alerts.add(alert_key)
+        alerts.append({
+            "title": title[:160], "severity": sev,
+            "time": item.get("time"), "source": item.get("source"),
+            "summary": str(item.get("summary") or "")[:180],
+        })
+        if len(alerts) >= 8:
+            break
+    try:
+        ready = readiness(d, include_pizzint=False)
+    except Exception:
+        ready = {}
+    sit = {}
+    if have_pos:
+        try:
+            threat = intel.threat_index(d, lat=lat, lon=lon)
+        except Exception:
+            threat = {}
+        try:
+            inventory = [dict(x) for x in d.query(
+                "SELECT * FROM inventory ORDER BY name LIMIT 24")]
+            sit = sitrep.situational_brief(
+                d, lat, lon,
+                elevation_m=float(s.get("elevation_m") or 0),
+                ready=ready, inventory=inventory, threat=threat,
+            )
+        except Exception:
+            sit = {}
+
+    by_id = {f.get("id"): f for f in rows}
+
+    def first_item(feed_id: str) -> dict | None:
+        items = (by_id.get(feed_id) or {}).get("items") or []
+        return items[0] if items else None
+
+    weather = first_item("open_meteo_weather")
+    air = first_item("open_meteo_air")
+    kp = first_item("swpc_kp")
+    scales = [
+        {"title": i.get("title"), "text": i.get("text"), "severity": i.get("severity")}
+        for i in ((by_id.get("swpc_scales") or {}).get("items") or [])[:4]
+    ]
+
+    water = d.one(
+        "SELECT ts, source, volume_l, method, chlorine_ppm, note "
+        "FROM water_log ORDER BY ts DESC LIMIT 1"
+    )
+    water_out = {"latest": dict(water) if water else None, "alert": None}
+    if water and water["chlorine_ppm"] is not None:
+        try:
+            ppm = float(water["chlorine_ppm"])
+            if ppm < 0.2:
+                water_out["alert"] = f"Free chlorine low ({ppm:g} ppm); verify treatment before drinking"
+            elif ppm > 4.0:
+                water_out["alert"] = f"Free chlorine high ({ppm:g} ppm); verify dosing and local guidance"
+        except (TypeError, ValueError):
+            pass
+
+    trips = [t for t in trip_items(d) if t.get("status") == "ACTIVE"]
+    try:
+        sync = autosync.engine.snapshot()
+    except Exception:
+        sync = {}
+
+    position = {"missing": True}
+    if opsec:
+        position = {"redacted": True, "reason": "OPSEC mode"}
+    elif have_pos:
+        fix_at = s.get("position_fix_at") or s.get("position_updated_at")
+        fix_age = None
+        if fix_at:
+            try:
+                dt = datetime.fromisoformat(str(fix_at).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                fix_age = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
+            except (TypeError, ValueError):
+                fix_age = None
+        position = {"lat": lat, "lon": lon,
+                    "source": s.get("position_source") or "unverified",
+                    "fix_age_seconds": fix_age}
+
+    return {
+        "time": utcnow(),
+        "online": online,
+        "opsec": opsec,
+        "position": position,
+        "sync": {
+            "enabled": sync.get("enabled"), "running": sync.get("running"),
+            "last_success": sync.get("last_success"), "last_error": sync.get("last_error"),
+            "refreshed": sync.get("refreshed"), "failed": sync.get("failed"),
+        },
+        "readiness": {
+            "score": ready.get("score"), "band": ready.get("band"),
+            "signals": [str(x.get("text") or "") for x in (ready.get("signals") or [])][:6],
+        },
+        "feeds": {**feed_counts, "problems": feeds_out[:12]},
+        "alerts": alerts[:10],
+        "weather": ({
+            "feed_age_seconds": (by_id.get("open_meteo_weather") or {}).get("age_seconds"),
+            "data_age_seconds": (by_id.get("open_meteo_weather") or {}).get("data_age_seconds"),
+            "time": weather.get("time"), "temp_c": weather.get("temperature_c"),
+            "apparent_c": weather.get("apparent_c"), "condition": weather.get("condition"),
+            "wind_kmh": weather.get("wind_kmh"), "gust_kmh": weather.get("gust_kmh"),
+            "precip_mm": weather.get("precip_mm"),
+            "forecast": (weather.get("forecast") or [])[:3],
+        } if weather else None),
+        "air_quality": ({
+            "feed_age_seconds": (by_id.get("open_meteo_air") or {}).get("age_seconds"),
+            "time": air.get("time"), "aqi": air.get("aqi"),
+            "category": air.get("category"), "pm2_5": air.get("pm2_5"),
+        } if air else None),
+        "space_weather": {
+            "feed_age_seconds": (by_id.get("swpc_kp") or {}).get("age_seconds"),
+            "kp": kp.get("kp") if kp else None,
+            "scales": scales,
+        },
+        "water": water_out,
+        "trip_alerts": [
+            {"name": t.get("name"), "alert": t.get("alert"),
+             "minutes_overdue": t.get("minutes_overdue"),
+             "return_minutes_overdue": t.get("return_minutes_overdue")}
+            for t in trips
+        ],
+        "sitrep": ({
+            "stance": sit.get("stance"), "stance_reason": sit.get("stance_reason"),
+            "critical_near": sit.get("critical_near"),
+            "actions": [
+                {"urgency": a.get("urgency"), "text": a.get("text")}
+                for a in (sit.get("actions") or [])[:6]
+            ],
+            "top_events": [
+                {"title": e.get("title"), "severity": e.get("severity"),
+                 "distance_km": e.get("distance_km"), "time": e.get("time"),
+                 "source": e.get("source"), "feed_id": e.get("feed_id")}
+                for e in (sit.get("top_events") or [])[:5]
+            ],
+        } if sit else None),
+        "note": ("Local cache only. age_seconds/data_age_seconds show freshness; "
+                 "do not present STALE feeds as current. Position is redacted in OPSEC mode."),
+    }
+
+
 def ai_log_save(d: Database, title: str, body: str, category: str = "GENERAL") -> dict:
     """Insert an AI-authored mission-log entry with hourly and total caps."""
     content = str(body or "").strip()[:AI_LOG_MAX_CHARS]
@@ -714,6 +906,28 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             args = args if isinstance(args, dict) else {}
             name = str(name or "").strip()
             try:
+                if name == "get_live_status":
+                    return assistant_live_status(d)
+                if name == "get_library_document":
+                    title = str(args.get("title") or args.get("name") or "").strip()
+                    if not title:
+                        return {"ok": False, "error": "title is required"}
+                    matches = library.find_document(d, title, limit=6)
+                    if not matches:
+                        return {"ok": False, "error": f"No document matched {title!r}",
+                                "matches": []}
+                    doc = matches[0]
+                    excerpt = library.document_excerpt(
+                        d, int(doc["id"]),
+                        query=str(args.get("query") or ""),
+                        max_chars=args.get("max_chars") or 6000,
+                    )
+                    return {"ok": True, "document": doc, "matches": matches,
+                            "excerpt": excerpt.get("text") or "",
+                            "chars": excerpt.get("chars"),
+                            "truncated": excerpt.get("truncated"),
+                            "focus": excerpt.get("focus"),
+                            "note": excerpt.get("note")}
                 if name == "save_log_entry":
                     return ai_log_save(d, args.get("title"), args.get("body"), args.get("category") or "GENERAL")
                 if name == "save_note":
@@ -722,9 +936,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     q = str(args.get("query") or "").strip()
                     if not q:
                         return {"ok": False, "error": "query is required"}
-                    rows = library.search(d, q, limit=5)
+                    category = str(args.get("category") or "").strip() or None
+                    rows = library.search(d, q, category, limit=5)
                     return {"ok": True, "results": [
-                        {"name": r.get("name"), "category": r.get("category"),
+                        {"id": r.get("id"), "name": r.get("name"), "category": r.get("category"),
                          "path": r.get("rel_path"), "snippet": (r.get("snippet") or "")[:1200]}
                         for r in rows[:5]
                     ]}
