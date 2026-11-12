@@ -20,7 +20,7 @@ import * as security from "./views/security.js?v=opsec-1";
 import * as logistics from "./views/logistics.js";
 import * as weather from "./views/weather.js?v=opsec-1";
 import * as intel from "./views/intel.js?v=better-12";
-import * as assistant from "./views/assistant.js?v=better-21";
+import * as assistant from "./views/assistant.js?v=better-22";
 import * as settings from "./views/settings.js?v=better-14";
 
 const ROUTES = {

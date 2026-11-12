@@ -110,11 +110,11 @@ export async function render(root) {
   const state = chatSession;
   root.replaceChildren();
 
-  const focusBtn = btn("FOCUS", { tone: "ghost", onClick: () => {
+  const focusBtn = btn("HIDE PANEL", { tone: "ghost", onClick: () => {
     const on = layout.classList.toggle("assistant-focus");
     const label = focusBtn.querySelector("span");
-    if (label) label.textContent = on ? "SHOW PANEL" : "FOCUS";
-    else focusBtn.textContent = on ? "SHOW PANEL" : "FOCUS";
+    if (label) label.textContent = on ? "SHOW PANEL" : "HIDE PANEL";
+    else focusBtn.textContent = on ? "SHOW PANEL" : "HIDE PANEL";
   } });
   focusBtn.id = "assistantFocusBtn";
 
