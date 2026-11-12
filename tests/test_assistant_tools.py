@@ -20,9 +20,14 @@ def tmpdb(tmp_path):
 
 def test_tool_specs_shape():
     names = [t["function"]["name"] for t in assistant.tool_specs()]
-    assert set(names) == {"get_live_status", "get_library_document", "search_library",
-                          "list_vault_notes", "get_vault_note", "edit_vault_note",
-                          "save_log_entry", "save_note"}
+    assert set(names) == {
+        "get_live_status", "get_library_document", "search_library",
+        "list_vault_notes", "get_vault_note", "edit_vault_note",
+        "search_mission_log", "list_tasks", "create_task", "complete_task",
+        "query_inventory", "adjust_inventory", "create_incident",
+        "resolve_incident", "read_checklist", "update_checklist",
+        "read_water_log", "log_water_test", "save_log_entry", "save_note",
+    }
     for spec in assistant.tool_specs():
         assert spec["type"] == "function"
         assert spec["function"]["parameters"]["required"] is not None
@@ -286,3 +291,55 @@ def test_vault_note_update_edits_without_creating(tmpdb):
     missing = server.ai_vault_note_update(tmpdb, vault, title="radio plan", body="x")
     assert missing["ok"] is False
     assert tmpdb.one("SELECT count(*) c FROM notes")["c"] == before
+
+
+def test_mission_log_and_task_tools(tmpdb):
+    server.ai_log_save(tmpdb, "Water filter check", "Changed the sediment filter.")
+    logs = server.ai_mission_log_search(tmpdb, query="sediment")
+    assert logs["ok"] and logs["count"] == 1
+    assert "sediment" in logs["items"][0]["body"].lower()
+
+    created = server.ai_task_create(tmpdb, "Inspect generator", priority="PRIORITY")
+    assert created["ok"]
+    task_id = created["task"]["id"]
+    listed = server.ai_tasks_list(tmpdb)
+    assert any(t["id"] == task_id for t in listed["tasks"])
+    done = server.ai_task_complete(tmpdb, title="Inspect generator")
+    assert done["ok"] and done["task"]["done"] == 1
+    assert not any(t["id"] == task_id for t in server.ai_tasks_list(tmpdb)["tasks"])
+
+
+def test_inventory_tools(tmpdb):
+    created = server.ai_inventory_adjust(tmpdb, name="Water filters", qty=3, unit="ea", min_qty=2)
+    assert created["ok"] and created["created"] and created["item"]["qty"] == 3
+    item_id = created["item"]["id"]
+
+    low = server.ai_inventory_query(tmpdb, low_only=True)
+    assert low["ok"]
+    adjusted = server.ai_inventory_adjust(tmpdb, item_id=item_id, delta=-2)
+    assert adjusted["ok"] and adjusted["new_qty"] == 1
+    low = server.ai_inventory_query(tmpdb, low_only=True)
+    assert any(i["id"] == item_id and i["status"] == "LOW" for i in low["items"])
+
+
+def test_incident_checklist_and_water_tools(tmpdb):
+    inc = server.ai_incident_create(tmpdb, "Gate sensor fault", severity="WARNING")
+    assert inc["ok"]
+    inc_id = inc["incident"]["id"]
+    resolved = server.ai_incident_resolve(tmpdb, incident_id=inc_id, resolution="Replaced battery.")
+    assert resolved["ok"] and resolved["incident"]["resolved"] == 1
+    assert "Replaced battery" in resolved["incident"]["detail"]
+
+    kit = server.CHECKLIST_DATA["kits"][0]
+    item = kit["items"][0]
+    read = server.ai_checklist_read(tmpdb, kit_id=kit["id"])
+    assert read["ok"] and read["kits"][0]["id"] == kit["id"]
+    updated = server.ai_checklist_update(tmpdb, kit_id=kit["id"], item_id=item["id"], checked=True)
+    assert updated["ok"] and updated["checked"] is True
+    read = server.ai_checklist_read(tmpdb, kit_id=kit["id"])
+    assert next(i for i in read["kits"][0]["items"] if i["id"] == item["id"])["checked"] is True
+
+    logged = server.ai_water_test_log(tmpdb, source="Well", volume_l=2, chlorine_ppm=0.1, method="DPD")
+    assert logged["ok"] and logged["item"]["chlorine_status"] == "LOW"
+    recent = server.ai_water_log_read(tmpdb)
+    assert recent["ok"] and recent["items"][0]["id"] == logged["item"]["id"]

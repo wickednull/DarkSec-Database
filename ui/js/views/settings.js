@@ -429,7 +429,7 @@ export async function render(root) {
   /* ---------------------------------------------------------- assistant */
   const assistantEnabled = checkbox("Enable Delamain (local AI / Ollama)", !!settings.assistant_enabled);
   const assistantThink = checkbox("Enable model thinking/reasoning", !!settings.assistant_think);
-  const assistantTools = checkbox("Allow Delamain tools (live status, library lookup, notes/logs)", settings.assistant_tools !== false);
+  const assistantTools = checkbox("Allow Delamain tools (live status, records, library, vault notes)", settings.assistant_tools !== false);
   const assistantToolsAuto = checkbox("Load tools only when needed (faster)", settings.assistant_tools_auto !== false);
   const assistantLibrary = checkbox("Auto-include library excerpts for manual/document questions", settings.assistant_library_context !== false);
   const assistantHistoryFilter = checkbox("Filter risky/refused topics from chat history", settings.assistant_history_filter !== false);

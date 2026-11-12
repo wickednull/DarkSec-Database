@@ -827,6 +827,473 @@ def ai_vault_read_reply(d: Database, v, prompt: str) -> str:
             + "\n\nNo new note was saved.")
 
 
+# ------------------------------------------------------------------ operator records
+def _ai_num(value):
+    try:
+        if value is None or str(value).strip() == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ai_row(row) -> dict:
+    return dict(row) if row is not None else {}
+
+
+def ai_mission_log_search(d: Database, query: str = "", category: str = "",
+                          limit: int = 10) -> dict:
+    try:
+        limit = max(1, min(int(limit or 10), 30))
+    except (TypeError, ValueError):
+        limit = 10
+    clauses, params = [], []
+    q = str(query or "").strip()
+    if q:
+        like = f"%{q}%"
+        clauses.append("(title LIKE ? OR body LIKE ? OR tags LIKE ? OR category LIKE ?)")
+        params.extend([like, like, like, like])
+    cat = str(category or "").strip().upper()
+    if cat:
+        clauses.append("category = ?")
+        params.append(cat)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = d.query(f"SELECT * FROM log_entries{where} ORDER BY ts DESC, id DESC LIMIT ?",
+                   (*params, limit))
+    items = []
+    for row in rows:
+        item = _ai_row(row)
+        items.append({
+            "id": item.get("id"), "ts": item.get("ts"), "category": item.get("category"),
+            "title": item.get("title"), "body": str(item.get("body") or "")[:400],
+            "tags": item.get("tags"),
+        })
+    return {"ok": True, "count": len(items), "items": items}
+
+
+_TASK_PRIORITIES = ("IMMEDIATE", "PRIORITY", "ROUTINE")
+
+
+def _find_task(d: Database, task_id=None, title: str | None = None):
+    if task_id not in (None, ""):
+        try:
+            row = d.one("SELECT * FROM tasks WHERE id=?", (int(task_id),))
+        except (TypeError, ValueError):
+            row = None
+        if row:
+            return row, None
+    q = str(title or "").strip()
+    if not q:
+        return None, {"ok": False, "error": "Provide a task id or title."}
+    rows = d.query("SELECT * FROM tasks WHERE title LIKE ? ORDER BY done ASC, ts DESC LIMIT 8",
+                   (f"%{q}%",))
+    if not rows:
+        return None, {"ok": False, "error": f"No task matched {q!r}.",
+                      "open_tasks": [dict(r) for r in d.query(
+                          "SELECT id,title,priority,due FROM tasks WHERE done=0 ORDER BY ts DESC LIMIT 12")]}
+    if len(rows) > 1:
+        exact = [r for r in rows if str(r["title"]).lower() == q.lower()]
+        if len(exact) == 1:
+            return exact[0], None
+        return None, {"ok": False, "ambiguous": True,
+                      "error": "Multiple tasks matched. Specify the id or exact title.",
+                      "matches": [dict(r) for r in rows[:8]]}
+    return rows[0], None
+
+
+def ai_tasks_list(d: Database, status: str = "open", limit: int = 15) -> dict:
+    try:
+        limit = max(1, min(int(limit or 15), 50))
+    except (TypeError, ValueError):
+        limit = 15
+    state = str(status or "open").lower()
+    where = " WHERE done=0" if state in ("open", "active", "pending") else (
+        " WHERE done=1" if state in ("done", "complete", "completed") else "")
+    rows = d.query(
+        "SELECT * FROM tasks" + where + " ORDER BY done ASC, CASE priority WHEN 'IMMEDIATE' "
+        "THEN 0 WHEN 'PRIORITY' THEN 1 WHEN 'ROUTINE' THEN 2 ELSE 3 END, ts DESC LIMIT ?",
+        (limit,),
+    )
+    tasks = []
+    for row in rows:
+        item = _ai_row(row)
+        tasks.append({
+            "id": item.get("id"), "title": item.get("title"),
+            "detail": str(item.get("detail") or "")[:200],
+            "priority": item.get("priority"), "due": item.get("due"),
+            "done": int(item.get("done") or 0), "category": item.get("category"),
+        })
+    return {"ok": True, "count": len(tasks), "tasks": tasks}
+
+
+def ai_task_create(d: Database, title: str, detail: str = "", priority: str = "ROUTINE",
+                   due: str | None = None, category: str = "GENERAL",
+                   recurrence: str = "") -> dict:
+    heading = str(title or "").strip()[:200]
+    if not heading:
+        return {"ok": False, "error": "A task title is required."}
+    prio = str(priority or "ROUTINE").strip().upper()
+    if prio not in _TASK_PRIORITIES:
+        prio = "ROUTINE"
+    task_id = d.insert("tasks", {
+        "ts": utcnow(), "title": heading, "detail": str(detail or "")[:4000],
+        "priority": prio, "due": str(due or "").strip()[:40] or None,
+        "done": 0, "category": str(category or "GENERAL").strip().upper()[:40] or "GENERAL",
+        "recurrence": str(recurrence or "").strip()[:120],
+    })
+    d.audit("ASSISTANT_TASK_CREATE", f"id={task_id} {heading[:100]}")
+    task = _ai_row(d.one("SELECT * FROM tasks WHERE id=?", (task_id,)))
+    task["detail"] = str(task.get("detail") or "")[:1000]
+    return {"ok": True, "task": task}
+
+
+def ai_task_complete(d: Database, task_id=None, title: str | None = None) -> dict:
+    row, error = _find_task(d, task_id, title)
+    if error:
+        return error
+    task_id = int(row["id"])
+    if int(row["done"] or 0):
+        return {"ok": True, "already_done": True, "task": _ai_row(row)}
+    d.execute("UPDATE tasks SET done=1 WHERE id=?", (task_id,))
+    d.audit("ASSISTANT_TASK_COMPLETE", f"id={task_id}")
+    return {"ok": True, "task": _ai_row(d.one("SELECT * FROM tasks WHERE id=?", (task_id,)))}
+
+
+def _inventory_status(item: dict) -> str:
+    qty = _ai_num(item.get("qty")) or 0.0
+    minimum = _ai_num(item.get("min_qty")) or 0.0
+    if minimum > 0 and qty <= minimum:
+        return "LOW"
+    return "OK"
+
+
+def ai_inventory_query(d: Database, query: str = "", low_only: bool = False,
+                       expiring_days=None, limit: int = 25) -> dict:
+    try:
+        limit = max(1, min(int(limit or 25), 100))
+    except (TypeError, ValueError):
+        limit = 25
+    clauses, params = [], []
+    q = str(query or "").strip()
+    if q:
+        like = f"%{q}%"
+        clauses.append("(name LIKE ? OR category LIKE ? OR location LIKE ? OR notes LIKE ?)")
+        params.extend([like, like, like, like])
+    if low_only:
+        clauses.append("min_qty > 0 AND qty <= min_qty")
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = d.query(f"SELECT * FROM inventory{where} ORDER BY name LIMIT ?", (*params, limit * 2))
+    out = []
+    now = datetime.now(timezone.utc)
+    try:
+        days = int(expiring_days) if expiring_days not in (None, "") else None
+    except (TypeError, ValueError):
+        days = None
+    for row in rows:
+        item = _ai_row(row)
+        item["status"] = _inventory_status(item)
+        item = {
+            "id": item.get("id"), "name": item.get("name"), "category": item.get("category"),
+            "qty": item.get("qty"), "unit": item.get("unit"),
+            "min_qty": item.get("min_qty"), "expires": item.get("expires"),
+            "location": item.get("location"), "status": item.get("status"),
+        }
+        if days is not None:
+            exp = str(item.get("expires") or "").strip()
+            if not exp:
+                continue
+            try:
+                parsed = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                remaining = (parsed - now).days
+                if remaining > days:
+                    continue
+                item["days_until_expiry"] = remaining
+            except ValueError:
+                continue
+        out.append(item)
+    return {"ok": True, "count": len(out[:limit]), "items": out[:limit]}
+
+
+def _find_inventory(d: Database, item_id=None, name: str | None = None):
+    if item_id not in (None, ""):
+        try:
+            row = d.one("SELECT * FROM inventory WHERE id=?", (int(item_id),))
+        except (TypeError, ValueError):
+            row = None
+        if row:
+            return row, None
+    q = str(name or "").strip()
+    if not q:
+        return None, {"ok": False, "error": "Provide an inventory item id or name."}
+    rows = d.query("SELECT * FROM inventory WHERE name LIKE ? ORDER BY name LIMIT 8", (f"%{q}%",))
+    if not rows:
+        return None, None
+    if len(rows) > 1:
+        exact = [r for r in rows if str(r["name"]).lower() == q.lower()]
+        if len(exact) == 1:
+            return exact[0], None
+        return None, {"ok": False, "ambiguous": True,
+                      "error": "Multiple inventory items matched. Specify the id or exact name.",
+                      "matches": [dict(r) for r in rows[:8]]}
+    return rows[0], None
+
+
+def ai_inventory_adjust(d: Database, item_id=None, name: str | None = None,
+                        delta=None, qty=None, unit: str | None = None,
+                        category: str | None = None, min_qty=None,
+                        location: str | None = None, notes: str | None = None,
+                        expires: str | None = None) -> dict:
+    row, error = _find_inventory(d, item_id, name)
+    if error:
+        return error
+    change = _ai_num(delta)
+    set_qty = _ai_num(qty)
+    if row is None:
+        heading = str(name or "").strip()[:200]
+        if not heading or (change is None and set_qty is None):
+            return {"ok": False, "error": "No matching inventory item. Provide a name and qty/delta to create one."}
+        new_qty = max(0.0, set_qty if set_qty is not None else (change or 0.0))
+        new_id = d.insert("inventory", {
+            "name": heading, "category": str(category or "GENERAL").strip().upper()[:40] or "GENERAL",
+            "qty": new_qty, "unit": str(unit or "ea").strip()[:20] or "ea",
+            "min_qty": _ai_num(min_qty) or 0.0, "expires": str(expires or "").strip() or None,
+            "location": str(location or "").strip()[:120], "notes": str(notes or "").strip()[:1000],
+            "updated": utcnow(),
+        })
+        d.audit("ASSISTANT_INVENTORY_CREATE", f"id={new_id} {heading[:100]} qty={new_qty:g}")
+        item = _ai_row(d.one("SELECT * FROM inventory WHERE id=?", (new_id,)))
+        item["status"] = _inventory_status(item)
+        return {"ok": True, "created": True, "item": item}
+    current = _ai_num(row["qty"]) or 0.0
+    new_qty = set_qty if set_qty is not None else current + (change or 0.0)
+    new_qty = max(0.0, new_qty)
+    fields = {"qty": new_qty, "updated": utcnow()}
+    if unit is not None:
+        fields["unit"] = str(unit).strip()[:20] or "ea"
+    if category is not None:
+        fields["category"] = str(category).strip().upper()[:40] or "GENERAL"
+    if min_qty is not None:
+        fields["min_qty"] = _ai_num(min_qty) or 0.0
+    if location is not None:
+        fields["location"] = str(location).strip()[:120]
+    if notes is not None:
+        fields["notes"] = str(notes).strip()[:1000]
+    if expires is not None:
+        fields["expires"] = str(expires).strip() or None
+    if new_qty == current and len(fields) == 2:
+        return {"ok": False, "error": "No inventory change was requested."}
+    sets = ", ".join(f"{k}=?" for k in fields)
+    d.execute(f"UPDATE inventory SET {sets} WHERE id=?", (*fields.values(), int(row["id"])))
+    d.audit("ASSISTANT_INVENTORY_ADJUST", f"id={row['id']} qty {current:g}->{new_qty:g}")
+    item = _ai_row(d.one("SELECT * FROM inventory WHERE id=?", (int(row["id"]),)))
+    item["status"] = _inventory_status(item)
+    return {"ok": True, "item": item, "previous_qty": current, "new_qty": new_qty}
+
+
+def ai_incident_create(d: Database, title: str, detail: str = "", severity: str = "INFO",
+                       category: str = "SECURITY", lat=None, lon=None) -> dict:
+    heading = str(title or "").strip()[:200]
+    if not heading:
+        return {"ok": False, "error": "An incident title is required."}
+    sev = str(severity or "INFO").strip().upper()
+    if sev not in ("CRITICAL", "WARNING", "ALERT", "INFO"):
+        sev = "INFO"
+    la, lo = _ai_num(lat), _ai_num(lon)
+    if la is not None and not (-90 <= la <= 90):
+        la = None
+    if lo is not None and not (-180 <= lo <= 180):
+        lo = None
+    inc_id = d.insert("incidents", {
+        "ts": utcnow(), "severity": sev, "category": str(category or "SECURITY").strip().upper()[:40] or "SECURITY",
+        "title": heading, "detail": str(detail or "")[:4000], "lat": la, "lon": lo, "resolved": 0,
+    })
+    d.audit("ASSISTANT_INCIDENT_CREATE", f"id={inc_id} severity={sev}")
+    incident = _ai_row(d.one("SELECT * FROM incidents WHERE id=?", (inc_id,)))
+    incident["detail"] = str(incident.get("detail") or "")[:2000]
+    return {"ok": True, "incident": incident}
+
+
+def ai_incident_resolve(d: Database, incident_id=None, title: str | None = None,
+                        resolution: str = "") -> dict:
+    row = None
+    if incident_id not in (None, ""):
+        try:
+            row = d.one("SELECT * FROM incidents WHERE id=?", (int(incident_id),))
+        except (TypeError, ValueError):
+            row = None
+    if row is None and str(title or "").strip():
+        q = str(title).strip()
+        rows = d.query("SELECT * FROM incidents WHERE resolved=0 AND title LIKE ? ORDER BY ts DESC LIMIT 8",
+                       (f"%{q}%",))
+        if len(rows) == 1:
+            row = rows[0]
+        elif len(rows) > 1:
+            return {"ok": False, "ambiguous": True,
+                    "error": "Multiple unresolved incidents matched. Specify the id or exact title.",
+                    "matches": [dict(r) for r in rows[:8]]}
+    if row is None:
+        return {"ok": False, "error": "No matching unresolved incident found.",
+                "open_incidents": [dict(r) for r in d.query(
+                    "SELECT id,title,severity,ts FROM incidents WHERE resolved=0 ORDER BY ts DESC LIMIT 12")]}
+    inc_id = int(row["id"])
+    detail = str(row["detail"] or "")
+    note = str(resolution or "").strip()
+    if note:
+        detail = (detail + "\n\nResolution: " + note).strip()
+    d.execute("UPDATE incidents SET resolved=1, detail=? WHERE id=?", (detail[:8000], inc_id))
+    d.audit("ASSISTANT_INCIDENT_RESOLVE", f"id={inc_id}")
+    incident = _ai_row(d.one("SELECT * FROM incidents WHERE id=?", (inc_id,)))
+    incident["detail"] = str(incident.get("detail") or "")[:2000]
+    return {"ok": True, "incident": incident}
+
+
+def _checklist_state(d: Database) -> dict:
+    return {f"{r['kit_id']}:{r['item_id']}": int(r["checked"] or 0)
+            for r in d.query("SELECT * FROM checklist_state")}
+
+
+def _find_checklist_kit(kit_id=None, kit_name=None):
+    kits = CHECKLIST_DATA.get("kits") or []
+    wanted = str(kit_id or kit_name or "").strip().lower()
+    if not wanted:
+        return None
+    for kit in kits:
+        if str(kit.get("id") or "").lower() == wanted or str(kit.get("name") or "").lower() == wanted:
+            return kit
+    for kit in kits:
+        if wanted in str(kit.get("name") or "").lower() or wanted in str(kit.get("id") or "").lower():
+            return kit
+    return None
+
+
+def ai_checklist_read(d: Database, kit_id=None, kit_name=None) -> dict:
+    state = _checklist_state(d)
+    kits = CHECKLIST_DATA.get("kits") or []
+    selected = _find_checklist_kit(kit_id, kit_name)
+    if (kit_id or kit_name) and selected is None:
+        return {"ok": False, "error": "Checklist kit not found.",
+                "kits": [{"id": k.get("id"), "name": k.get("name")} for k in kits]}
+    output = []
+    for kit in ([selected] if selected else kits):
+        items = []
+        checked = 0
+        for item in kit.get("items") or []:
+            is_checked = bool(state.get(f"{kit['id']}:{item['id']}", 0))
+            checked += 1 if is_checked else 0
+            items.append({"id": item.get("id"), "text": item.get("text"),
+                          "critical": bool(item.get("critical")), "checked": is_checked})
+        entry = {"id": kit.get("id"), "name": kit.get("name"),
+                 "description": kit.get("description"), "checked": checked,
+                 "total": len(items)}
+        if selected is not None:
+            entry["items"] = items
+        output.append(entry)
+    return {"ok": True, "kits": output, "note": CHECKLIST_DATA.get("note", "")}
+
+
+def ai_checklist_update(d: Database, kit_id=None, item_id=None, item_text=None,
+                        checked: bool = True) -> dict:
+    if not isinstance(checked, bool):
+        checked = str(checked).strip().lower() in ("1", "true", "yes", "checked", "on")
+    kit = _find_checklist_kit(kit_id, kit_id)
+    if kit is None:
+        return {"ok": False, "error": "Checklist kit not found.",
+                "kits": [{"id": k.get("id"), "name": k.get("name")}
+                         for k in (CHECKLIST_DATA.get("kits") or [])]}
+    item = None
+    if item_id not in (None, ""):
+        item = next((i for i in (kit.get("items") or [])
+                     if str(i.get("id")) == str(item_id)), None)
+    if item is None and str(item_text or "").strip():
+        q = str(item_text).strip().lower()
+        matches = [i for i in (kit.get("items") or [])
+                   if q in str(i.get("text") or "").lower()]
+        if len(matches) == 1:
+            item = matches[0]
+        elif len(matches) > 1:
+            return {"ok": False, "ambiguous": True,
+                    "error": "Multiple checklist items matched. Specify the item id.",
+                    "matches": [{"id": i.get("id"), "text": i.get("text")} for i in matches[:8]]}
+    if item is None:
+        return {"ok": False, "error": "Checklist item not found in that kit.",
+                "items": [{"id": i.get("id"), "text": i.get("text")}
+                          for i in (kit.get("items") or [])]}
+    d.execute("INSERT INTO checklist_state(kit_id,item_id,checked,updated) VALUES(?,?,?,?) "
+              "ON CONFLICT(kit_id,item_id) DO UPDATE SET checked=excluded.checked, updated=excluded.updated",
+              (kit["id"], item["id"], 1 if checked else 0, utcnow()))
+    d.audit("ASSISTANT_CHECKLIST_UPDATE", f"{kit['id']}:{item['id']} checked={bool(checked)}")
+    return {"ok": True, "kit": kit.get("name"), "item": item.get("text"),
+            "item_id": item.get("id"), "checked": bool(checked)}
+
+
+def _water_flag(row: dict) -> str | None:
+    ppm = _ai_num(row.get("chlorine_ppm"))
+    if ppm is None:
+        return None
+    if ppm < 0.2:
+        return "LOW"
+    if ppm > 4.0:
+        return "HIGH"
+    return "OK"
+
+
+def ai_water_log_read(d: Database, limit: int = 10, days=None) -> dict:
+    try:
+        limit = max(1, min(int(limit or 10), 50))
+    except (TypeError, ValueError):
+        limit = 10
+    rows = d.query("SELECT * FROM water_log ORDER BY ts DESC, id DESC LIMIT ?", (limit * 4,))
+    out = []
+    now = datetime.now(timezone.utc)
+    try:
+        cutoff = now - timedelta(days=int(days)) if days not in (None, "") else None
+    except (TypeError, ValueError):
+        cutoff = None
+    for row in rows:
+        item = _ai_row(row)
+        item["chlorine_status"] = _water_flag(item)
+        item = {
+            "id": item.get("id"), "ts": item.get("ts"), "source": item.get("source"),
+            "volume_l": item.get("volume_l"), "method": item.get("method"),
+            "chlorine_ppm": item.get("chlorine_ppm"),
+            "note": str(item.get("note") or "")[:300],
+            "chlorine_status": item.get("chlorine_status"),
+        }
+        if cutoff is not None:
+            try:
+                ts = datetime.fromisoformat(str(item.get("ts") or "").replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts < cutoff:
+                    continue
+            except ValueError:
+                continue
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return {"ok": True, "count": len(out), "items": out}
+
+
+def ai_water_test_log(d: Database, source: str = "", volume_l=None, method: str = "",
+                      chlorine_ppm=None, note: str = "") -> dict:
+    ppm = _ai_num(chlorine_ppm)
+    vol = _ai_num(volume_l)
+    if not (str(source or "").strip() or str(method or "").strip()
+            or ppm is not None or str(note or "").strip()):
+        return {"ok": False, "error": "Provide a source, method, chlorine reading or note."}
+    new_id = d.insert("water_log", {
+        "ts": utcnow(), "source": str(source or "").strip()[:120],
+        "volume_l": vol, "method": str(method or "").strip()[:120],
+        "chlorine_ppm": ppm, "note": str(note or "").strip()[:2000],
+    })
+    row = _ai_row(d.one("SELECT * FROM water_log WHERE id=?", (new_id,)))
+    row["chlorine_status"] = _water_flag(row)
+    d.audit("ASSISTANT_WATER_LOG", f"id={new_id} ppm={ppm if ppm is not None else '—'}")
+    return {"ok": True, "item": row}
+
+
 def vault_fast_events(d: Database, v, prompt: str):
     """Deterministic stream for simple vault read/list requests.
 
@@ -1247,6 +1714,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             try:
                 if read_only and name in ("save_note", "save_log_entry"):
                     return {"ok": False, "error": "Blocked: the operator asked to read/retrieve a vault note, not save one."}
+                if name in ("create_task", "complete_task", "adjust_inventory",
+                            "create_incident", "resolve_incident", "update_checklist",
+                            "log_water_test") and not assistant.record_write_intent(prompt):
+                    return {"ok": False, "error": "Blocked: the operator did not explicitly ask to modify records."}
                 if name == "get_live_status":
                     return assistant_live_status_compact(d, v)
                 if name == "get_library_document":
@@ -1280,6 +1751,52 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                         args.get("new_title"), args.get("body"), args.get("append"),
                         args.get("tags"),
                     )
+                if name == "search_mission_log":
+                    return ai_mission_log_search(d, args.get("query") or "",
+                                                 args.get("category") or "",
+                                                 args.get("limit") or 20)
+                if name == "list_tasks":
+                    return ai_tasks_list(d, args.get("status") or "open",
+                                         args.get("limit") or 30)
+                if name == "create_task":
+                    return ai_task_create(d, args.get("title"), args.get("detail") or "",
+                                          args.get("priority") or "ROUTINE",
+                                          args.get("due"), args.get("category") or "GENERAL",
+                                          args.get("recurrence") or "")
+                if name == "complete_task":
+                    return ai_task_complete(d, args.get("id"), args.get("title"))
+                if name == "query_inventory":
+                    return ai_inventory_query(d, args.get("query") or "",
+                                              bool(args.get("low_only")),
+                                              args.get("expiring_days"),
+                                              args.get("limit") or 50)
+                if name == "adjust_inventory":
+                    return ai_inventory_adjust(
+                        d, args.get("id"), args.get("name"), args.get("delta"),
+                        args.get("qty"), args.get("unit"), args.get("category"),
+                        args.get("min_qty"), args.get("location"), args.get("notes"),
+                        args.get("expires"),
+                    )
+                if name == "create_incident":
+                    return ai_incident_create(d, args.get("title"), args.get("detail") or "",
+                                              args.get("severity") or "INFO",
+                                              args.get("category") or "SECURITY",
+                                              args.get("lat"), args.get("lon"))
+                if name == "resolve_incident":
+                    return ai_incident_resolve(d, args.get("id"), args.get("title"),
+                                               args.get("resolution") or "")
+                if name == "read_checklist":
+                    return ai_checklist_read(d, args.get("kit_id"), args.get("kit_name"))
+                if name == "update_checklist":
+                    return ai_checklist_update(d, args.get("kit_id"), args.get("item_id"),
+                                               args.get("item_text"),
+                                               args.get("checked", True))
+                if name == "read_water_log":
+                    return ai_water_log_read(d, args.get("limit") or 10, args.get("days"))
+                if name == "log_water_test":
+                    return ai_water_test_log(d, args.get("source") or "",
+                                             args.get("volume_l"), args.get("method") or "",
+                                             args.get("chlorine_ppm"), args.get("note") or "")
                 if name == "save_log_entry":
                     return ai_log_save(d, args.get("title"), args.get("body"), args.get("category") or "GENERAL")
                 if name == "save_note":

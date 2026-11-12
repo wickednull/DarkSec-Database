@@ -550,6 +550,25 @@ def vault_direct_read_intent(query: str) -> bool:
             and not _VAULT_ANALYZE.search(str(query or "")))
 
 
+_RECORD_WRITE = re.compile(
+    r"\b(?:add|create|adjust|set|mark|complete|resolve|check|uncheck|tick|log|"
+    r"record|update|change|remove|delete|decrement|increment|consume|consume[ds]?|"
+    r"used?|reconcile|restock|remind|schedule)\b",
+    re.IGNORECASE,
+)
+
+
+def record_write_intent(query: str) -> bool:
+    return bool(_RECORD_WRITE.search(str(query or "")))
+
+
+_RECORD_HINTS = re.compile(
+    r"\b(tasks?|to-?do|inventory|stock|supplies|supply|incidents?|checklists?|"
+    r"kits?|gear list|water test|water log|chlorine|mission log|journal|log entr(?:y|ies))\b",
+    re.IGNORECASE,
+)
+
+
 def tools_relevant(query: str) -> bool:
     """Whether a turn is likely to need a tool call.
 
@@ -559,6 +578,7 @@ def tools_relevant(query: str) -> bool:
     """
     text = str(query or "")
     return bool(_TOOL_HINTS.search(text) or _TOOL_ACTIONS.search(text)
+                or _RECORD_HINTS.search(text)
                 or vault_read_intent(text) or vault_edit_intent(text))
 
 
@@ -597,7 +617,13 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
             "operator asks to read, retrieve, open, list or show a vault note. Use "
             "edit_vault_note whenever the operator asks to edit, update, append to, revise "
             "or change an existing note. Never call save_note for a read or edit request; "
-            "editing must never create a duplicate note. Use "
+            "editing must never create a duplicate note. Operator records are available "
+            "through search_mission_log, list_tasks/create_task/complete_task, "
+            "query_inventory/adjust_inventory, create_incident/resolve_incident, "
+            "read_checklist/update_checklist, and read_water_log/log_water_test. Use "
+            "read/list/query tools for questions; use create/complete/adjust/resolve/"
+            "update/log only when the operator explicitly asks, and report the exact "
+            "item and change. Use "
             "get_live_status before answering questions about current conditions and say "
             "how old cached data is. Call write tools only when the operator asks you to "
             "save/record something. Writes are rate-limited by the server."
@@ -739,6 +765,211 @@ def tool_specs() -> list[dict]:
                     "properties": {
                         "title": {"type": "string", "description": "Note title or distinctive words."},
                         "id": {"type": "integer", "description": "Note id if known."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_mission_log",
+                "description": "Search or list mission-log entries. Use for past logs, journals and events.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search text; omit to list recent entries."},
+                        "category": {"type": "string", "description": "Optional category filter."},
+                        "limit": {"type": "integer", "description": "Max entries (default 10, max 30)."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_tasks",
+                "description": "List open, completed or all tasks.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "description": "open, done or all (default open)."},
+                        "limit": {"type": "integer", "description": "Max tasks (default 15)."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_task",
+                "description": "Create a task when explicitly asked. Report the new task id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Task title."},
+                        "detail": {"type": "string", "description": "Optional details."},
+                        "priority": {"type": "string", "description": "IMMEDIATE, PRIORITY or ROUTINE."},
+                        "due": {"type": "string", "description": "Optional due date/time."},
+                        "category": {"type": "string", "description": "Optional category."},
+                        "recurrence": {"type": "string", "description": "Optional recurrence note."},
+                    },
+                    "required": ["title"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "complete_task",
+                "description": "Mark an existing task complete by id or title.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "Task id if known."},
+                        "title": {"type": "string", "description": "Task title or distinctive words."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_inventory",
+                "description": "Query inventory; filter low stock or items expiring soon.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Name/category/location search."},
+                        "low_only": {"type": "boolean", "description": "Only items at/below minimum."},
+                        "expiring_days": {"type": "integer", "description": "Only items expiring within N days."},
+                        "limit": {"type": "integer", "description": "Max items (default 25)."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "adjust_inventory",
+                "description": "Adjust stock quantity or fields; creates the item only when explicitly adding a new one.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "Inventory id if known."},
+                        "name": {"type": "string", "description": "Existing item name, or new item name."},
+                        "delta": {"type": "number", "description": "Change in quantity, e.g. -2 or 5."},
+                        "qty": {"type": "number", "description": "Set an absolute quantity."},
+                        "unit": {"type": "string", "description": "Optional unit."},
+                        "category": {"type": "string", "description": "Optional category."},
+                        "min_qty": {"type": "number", "description": "Optional minimum level."},
+                        "location": {"type": "string", "description": "Optional storage location."},
+                        "notes": {"type": "string", "description": "Optional notes."},
+                        "expires": {"type": "string", "description": "Optional expiry (YYYY-MM or YYYY-MM-DD)."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_incident",
+                "description": "Create an incident report when explicitly asked.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Incident title."},
+                        "detail": {"type": "string", "description": "Details."},
+                        "severity": {"type": "string", "description": "CRITICAL, WARNING, ALERT or INFO."},
+                        "category": {"type": "string", "description": "Optional category."},
+                        "lat": {"type": "number", "description": "Optional latitude."},
+                        "lon": {"type": "number", "description": "Optional longitude."},
+                    },
+                    "required": ["title"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "resolve_incident",
+                "description": "Resolve an open incident by id or title.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "Incident id if known."},
+                        "title": {"type": "string", "description": "Incident title or distinctive words."},
+                        "resolution": {"type": "string", "description": "Optional resolution note."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_checklist",
+                "description": "Read checklist kits and item completion state.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kit_id": {"type": "string", "description": "Kit id or name; omit for all kits."},
+                        "kit_name": {"type": "string", "description": "Kit name if id is unknown."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_checklist",
+                "description": "Check or uncheck a checklist item by kit and item id/text.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kit_id": {"type": "string", "description": "Kit id or name."},
+                        "item_id": {"type": "string", "description": "Item id if known."},
+                        "item_text": {"type": "string", "description": "Item text or distinctive words."},
+                        "checked": {"type": "boolean", "description": "True to check, false to uncheck."},
+                    },
+                    "required": ["kit_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_water_log",
+                "description": "Read recent water tests with chlorine status.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "description": "Max entries (default 10)."},
+                        "days": {"type": "integer", "description": "Only entries from the last N days."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "log_water_test",
+                "description": "Log a water test when explicitly asked.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string", "description": "Water source."},
+                        "volume_l": {"type": "number", "description": "Volume in litres."},
+                        "method": {"type": "string", "description": "Test or treatment method."},
+                        "chlorine_ppm": {"type": "number", "description": "Free chlorine ppm."},
+                        "note": {"type": "string", "description": "Optional note."},
                     },
                     "required": [],
                 },
