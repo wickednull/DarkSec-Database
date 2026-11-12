@@ -15,9 +15,7 @@ let weatherBusy = false;
 let weatherAutoAttempted = false;
 let rerender = () => {};
 
-const PINNED_WEATHER_FEEDS = [
-  "open_meteo_weather", "open_meteo_air", "nws_alerts", "swpc_kp", "swpc_scales", "usgs_quakes", "gdacs", "eonet",
-];
+const PINNED_WEATHER_FEEDS = ["open_meteo_weather", "open_meteo_air"];
 
 export async function render(root) {
   if (weatherTimer) { clearInterval(weatherTimer); weatherTimer = null; }
@@ -39,9 +37,6 @@ export async function render(root) {
   const feedById = Object.fromEntries(feeds.map((f) => [f.id, f]));
   const weatherFeed = feedById.open_meteo_weather || null;
   const airFeed = feedById.open_meteo_air || null;
-  const nwsFeed = feedById.nws_alerts || null;
-  const quakeFeed = feedById.usgs_quakes || null;
-  const kpFeed = feedById.swpc_kp || null;
 
   const needsInitialFetch = !weatherAutoAttempted && !store.settings?.opsec_mode
     && ((weatherFeed && weatherFeed.status === "NEVER") || (airFeed && airFeed.status === "NEVER"));
@@ -60,28 +55,20 @@ export async function render(root) {
   const byId = Object.fromEntries(feeds2.map((f) => [f.id, f]));
   const wx = byId.open_meteo_weather || weatherFeed;
   const aq = byId.open_meteo_air || airFeed;
-  const nws = byId.nws_alerts || nwsFeed;
-  const quakes = byId.usgs_quakes || quakeFeed;
-  const kp = byId.swpc_kp || kpFeed;
 
   const positionInfo = positionConfidence(store.settings || {});
   const observer = fmt.coord(store.settings?.lat, store.settings?.lon, 4);
   const latest = (logs.items || [])[0] || null;
   const wxItem = (wx?.items || [])[0] || null;
   const aqItem = (aq?.items || [])[0] || null;
-  const kpItem = [...(kp?.items || [])].reverse().find((i) => i.kp != null) || (kp?.items || []).slice(-1)[0] || null;
-  const nwsItems = nws?.items || [];
-  const quakeItems = quakes?.items || [];
-  const severeNws = nwsItems.some((i) => ["CRITICAL", "SEVERE", "EXTREME", "ALERT"].includes(String(i.severity || "").toUpperCase()));
 
   root.replaceChildren();
   root.appendChild(pageHead({
     kicker: "OPERATIONS // ENVIRONMENT",
     title: "Weather & Environment",
-    desc: `Open-Meteo model conditions and air quality for ${observer} (${positionInfo.mapLabel}), plus cached official alerts/space weather and local instrument observations. Model feeds are not observations; verify before life-safety decisions.`,
+    desc: `Open-Meteo model conditions and air quality for ${observer} (${positionInfo.mapLabel}), plus local instrument observations. Official alerts, earthquakes and space weather are in Global Threat & Live Intel. Model feeds are not observations; verify before life-safety decisions.`,
     actions: [
       btn("REFRESH CONDITIONS", { icon: "refresh", tone: "primary", onClick: () => refreshWeatherFeeds(true) }),
-      btn("REFRESH ALL FEEDS", { icon: "refresh", onClick: refreshAll }),
       btn("LOG OBSERVATION", { icon: "plus", onClick: () => addObs() }),
       btn("MANUAL", { icon: "book", onClick: () => { location.hash = "#/manual?doc=weather"; } }),
     ],
@@ -100,7 +87,7 @@ export async function render(root) {
   stats.appendChild(stat("Conditions", wxItem ? (wxItem.condition || "cached") : "—", wx ? `${wx.status} · ${fmt.ago(wx.fetched_at)}` : "no weather feed", wxItem && /thunder|freez|heavy|hail|violent/i.test(String(wxItem.condition || "")) ? "acc" : ""));
   stats.appendChild(stat("Temperature", wxItem?.temperature_c != null ? U.tempC(wxItem.temperature_c) : (latest?.temp_c != null ? U.tempC(latest.temp_c) : "—"), wxItem?.temperature_c != null ? "Open-Meteo model" : (latest ? `local obs ${fmt.ago(latest.ts)}` : "no data")));
   stats.appendChild(stat("Air Quality", aqItem?.aqi != null ? `AQI ${aqItem.aqi}` : "—", aqItem ? `${aqItem.category || "unknown"} · ${fmt.ago(aq?.fetched_at)}` : "no AQ snapshot", ["UNHEALTHY", "VERY UNHEALTHY", "HAZARDOUS", "CRITICAL", "SEVERE"].some((s) => String(aqItem?.category || aqItem?.severity || "").toUpperCase().includes(s)) ? "acc" : ""));
-  stats.appendChild(stat("Alerts / Kp", String(nwsItems.length).padStart(2, "0"), `NWS alerts · Kp ${kpItem?.kp != null ? kpItem.kp : "—"} · ${quakeItems.length} quake(s)`, severeNws ? "acc" : ""));
+  stats.appendChild(stat("Wind", wxItem?.wind_kmh != null ? U.speedKmh(wxItem.wind_kmh) : "—", wxItem?.gust_kmh != null ? `gust ${U.speedKmh(wxItem.gust_kmh)}` : "no model wind", wxItem?.gust_kmh != null && Number(wxItem.gust_kmh) >= 50 ? "acc" : ""));
   root.appendChild(stats);
 
   const grid = h("div", { class: "panel-grid grid-2 mt-14" });
@@ -151,27 +138,17 @@ export async function render(root) {
     body: buildAlmanac(almanac),
   }));
 
-  grid.appendChild(panel({
-    title: "Official Alerts & Space Weather",
-    sub: "Cached NWS, USGS and NOAA SWPC items",
-    icon: "warning",
-    body: buildAlerts(nws, kp, quakes),
-  }));
-
   const feedWrap = h("div", { class: "col gap-10" });
   const pinned = PINNED_WEATHER_FEEDS.map((id) => byId[id]).filter(Boolean);
-  const rest = feeds2.filter((f) => !PINNED_WEATHER_FEEDS.includes(f.id));
-  feedWrap.appendChild(h("div", { class: "side-label", text: "WEATHER & HAZARD FEEDS" }));
+  feedWrap.appendChild(h("div", { class: "side-label", text: "WEATHER FEEDS" }));
+  if (!pinned.length) feedWrap.appendChild(h("div", { class: "small muted", text: "No weather feeds cached." }));
   for (const feed of pinned) feedWrap.appendChild(feedCard(feed, () => refreshFeed(feed)));
-  feedWrap.appendChild(h("div", { class: "side-label mt-10", text: "ALL OTHER CACHED FEEDS" }));
-  if (!rest.length) feedWrap.appendChild(h("div", { class: "small muted", text: "No other feeds." }));
-  for (const feed of rest) feedWrap.appendChild(feedCard(feed, () => refreshFeed(feed)));
   grid.appendChild(panel({
-    title: "Cached Feeds",
-    sub: "Weather-relevant feeds first; verify at source",
-    icon: "globe",
+    title: "Weather Feeds",
+    sub: "Local conditions and air quality only; official alerts live in Global Threat & Live Intel",
+    icon: "cloud",
     cls: "span-2",
-    tools: [btn("REFRESH ALL", { size: "sm", icon: "refresh", onClick: refreshAll })],
+    tools: [btn("REFRESH WEATHER", { size: "sm", icon: "refresh", onClick: () => refreshWeatherFeeds(true) })],
     body: feedWrap,
   }));
 
@@ -217,16 +194,6 @@ export async function render(root) {
       if (showToast) toast("Conditions refresh requested");
       render(root);
     } catch (err) { if (showToast) toast(err.message || "Refresh failed", "error"); }
-  }
-
-  async function refreshAll() {
-    toast("Refreshing public feeds — network required", "warn");
-    try {
-      const out = await api.post("/api/feeds/refresh", {});
-      const ok = (out.results || []).filter((r) => r.status === "OK").length;
-      toast(`Feeds refreshed: ${ok}/${(out.results || []).length} OK`);
-      render(root);
-    } catch (err) { toast(err.message || "Feed refresh failed", "error"); }
   }
 
   async function refreshFeed(feed) {
@@ -402,29 +369,6 @@ function buildAlmanac(almanac) {
     alm.appendChild(h("div", { class: "v", text: v || "—" }));
   }
   return alm;
-}
-
-function buildAlerts(nws, kp, quakes) {
-  const wrap = h("div", { class: "col gap-10" });
-  const sections = [];
-  if (nws) sections.push(["NWS Alerts", nws, (nws.items || []).slice(0, 5).map((i) => ({ title: i.title, sub: `${i.severity || "INFO"} · ${i.area || ""} · ${fmt.ago(i.time)}`, sev: i.severity, url: i.url }))]);
-  if (kp) sections.push(["Space Weather (Kp)", kp, (kp.items || []).slice(-5).reverse().map((i) => ({ title: i.title || `Kp ${i.kp}`, sub: `${fmt.ago(i.time)} · ${i.source || "NOAA SWPC"}`, sev: i.severity, url: i.url }))]);
-  if (quakes) sections.push(["Recent Earthquakes", quakes, (quakes.items || []).slice(0, 5).map((i) => ({ title: i.title, sub: `${i.place || ""}${i.magnitude != null ? ` · M${i.magnitude}` : ""} · ${fmt.ago(i.time)}`, sev: i.severity, url: i.url }))]);
-  for (const [label, feed, rows] of sections) {
-    wrap.appendChild(h("div", { class: "row between items-center" }, h("div", { class: "side-label", text: label }), feedBadge(feed.status)));
-    if (!rows.length) wrap.appendChild(h("div", { class: "small muted", text: feed.status === "NEVER" ? "Never fetched." : "No cached items." }));
-    for (const row of rows) {
-      const li = h("div", { class: `list-item ${["CRITICAL", "EXTREME"].includes(String(row.sev || "").toUpperCase()) ? "alert" : ["ALERT", "SEVERE"].includes(String(row.sev || "").toUpperCase()) ? "warn" : ""}` });
-      li.appendChild(severityBadge(row.sev || "INFO"));
-      const main = h("div", { class: "li-main" });
-      main.appendChild(h("div", { class: "li-title truncate", text: row.title || "Item" }));
-      main.appendChild(h("div", { class: "li-sub truncate", text: row.sub || "" }));
-      li.appendChild(main);
-      if (row.url) li.appendChild(h("a", { class: "badge cyan", href: row.url, target: "_blank", rel: "noopener noreferrer", text: "OPEN" }));
-      wrap.appendChild(li);
-    }
-  }
-  return wrap;
 }
 
 async function computeDerived(latest, target) {

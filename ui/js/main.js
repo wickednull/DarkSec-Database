@@ -7,7 +7,7 @@ import { openRecordForm } from "./records.js";
 import { positionConfidence } from "./views/shared.js";
 
 import * as dashboard from "./views/dashboard.js";
-import * as mapView from "./views/map.js?v=map-upgrade-8";
+import * as mapView from "./views/map.js?v=map-upgrade-9";
 import * as library from "./views/library.js";
 import * as manual from "./views/manual.js";
 import * as navView from "./views/nav.js";
@@ -19,9 +19,9 @@ import * as cbrn from "./views/cbrn.js";
 import * as security from "./views/security.js";
 import * as logistics from "./views/logistics.js";
 import * as weather from "./views/weather.js";
-import * as intel from "./views/intel.js?v=better-7";
-import * as assistant from "./views/assistant.js?v=better-6";
-import * as settings from "./views/settings.js?v=better-7";
+import * as intel from "./views/intel.js?v=better-8";
+import * as assistant from "./views/assistant.js?v=better-7";
+import * as settings from "./views/settings.js?v=better-8";
 
 const ROUTES = {
   dashboard: { title: "Situation Report", group: "COMMAND", icon: "dashboard", view: dashboard },

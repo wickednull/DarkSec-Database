@@ -217,6 +217,17 @@ export async function render(root, params = {}) {
       body: buildConflictSnapshot(),
       tools: [btn("OPEN TAB", { size: "sm", tone: "ghost", onClick: () => { activeTab = "conflict"; render(root); } })],
     }));
+    const hazardFeeds = [feedById.nws_alerts, feedById.gdacs, feedById.usgs_quakes, feedById.eonet].filter(Boolean);
+    if (hazardFeeds.length) {
+      grid.appendChild(panel({
+        title: "Official Alerts & Hazards",
+        sub: "NWS alerts · GDACS disasters · USGS earthquakes · NASA EONET",
+        icon: "warning",
+        cls: "span-2",
+        tools: [btn("OPEN TAB", { size: "sm", tone: "ghost", onClick: () => { activeTab = "events"; render(root); } })],
+        body: h("div", { class: "grid grid-2 gap-10" }, ...hazardFeeds.map((f) => newsCard(f, 4))),
+      }));
+    }
   }
 
   function buildConflictSnapshot() {
@@ -331,6 +342,17 @@ export async function render(root, params = {}) {
       }));
     }
 
+    const officialHazards = [feedById.nws_alerts, feedById.usgs_quakes, feedById.gdacs, feedById.eonet].filter(Boolean);
+    if (officialHazards.length) {
+      grid.appendChild(panel({
+        title: "Official Alerts, Earthquakes & Disaster Hazards",
+        sub: "NWS · USGS · GDACS · NASA EONET — cached public feeds",
+        icon: "warning",
+        cls: "span-2",
+        body: h("div", { class: "grid grid-2 gap-10" }, ...officialHazards.map((f) => newsCard(f, 4))),
+      }));
+    }
+
     if (neoSummary) {
       grid.appendChild(panel({
         title: "Near-Earth Objects (NASA)",
@@ -389,6 +411,17 @@ export async function render(root, params = {}) {
       cls: "span-2",
       body: airBody,
     }));
+    const kpFeed = feedById.swpc_kp;
+    const scalesFeed = feedById.swpc_scales;
+    if (kpFeed || scalesFeed) {
+      grid.appendChild(panel({
+        title: "Space Weather (NOAA SWPC)",
+        sub: "Planetary K-index and NOAA space-weather scales",
+        icon: "sun",
+        cls: "span-2",
+        body: h("div", { class: "grid grid-2 gap-10" }, ...[kpFeed, scalesFeed].filter(Boolean).map((f) => newsCard(f, 5))),
+      }));
+    }
   }
 
   async function refreshIntel() {

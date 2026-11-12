@@ -861,7 +861,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; "
                 "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; "                "form-action 'self'",
             )
-        if path.startswith("/api/") or is_html:
+        if path.startswith("/api/") or path.startswith("/ui/") or is_html:
             resp.headers.setdefault("Cache-Control", "no-store")
         return resp
 
