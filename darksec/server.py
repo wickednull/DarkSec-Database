@@ -1639,6 +1639,43 @@ def assistant_vault_preflight(v):
 # App factory
 # --------------------------------------------------------------------------
 
+def _server_ready(port: int, use_https: bool = False, timeout: float = 60.0) -> bool:
+    import ssl
+    import time
+    import urllib.error
+    import urllib.request
+    scheme = "https" if use_https else "http"
+    context = ssl._create_unverified_context() if use_https else None
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(f"{scheme}://127.0.0.1:{port}/api/health",
+                                   timeout=1.5, context=context)
+            return True
+        except urllib.error.HTTPError:
+            # 401/403 still proves the HTTP listener is accepting connections.
+            return True
+        except Exception:
+            time.sleep(0.2)
+    return False
+
+
+def _announce_when_ready(port: int, token: str, handshake: bool, browser_url: str,
+                         use_https: bool = False) -> None:
+    if not _server_ready(port, use_https=use_https):
+        print("DarkSec: server did not become ready before the startup timeout.", flush=True)
+        return
+    if handshake:
+        print(json.dumps({"ready": True, "app": APP_NAME, "version": __version__,
+                          "port": port, "token": token}), flush=True)
+    if browser_url:
+        try:
+            import webbrowser
+            webbrowser.open(browser_url)
+        except Exception as exc:
+            print(f"DarkSec: could not open browser: {exc}", flush=True)
+
+
 def create_app(port: int = 0, token: str | None = None, open_browser: bool = False,
                handshake: bool = False, no_index: bool = False,
                lan: bool = False, lan_ip: str | None = None,
@@ -1711,12 +1748,19 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 db.audit("INDEX_AUTO", "Background library index started")
             except Exception as exc:
                 db.audit("INDEX_AUTO_FAIL", str(exc)[:300])
-        if handshake:
-            print(json.dumps({"ready": True, "app": APP_NAME, "version": __version__,
-                              "port": port, "token": token}), flush=True)
-        if open_browser:
-            import webbrowser
-            webbrowser.open(f"http://127.0.0.1:{port}/?token={token}")
+        if handshake or open_browser:
+            if lan:
+                browser_host = lan_ip or "127.0.0.1"
+                browser_url = f"https://{browser_host}:{port}/?token={token}"
+            else:
+                browser_url = f"http://127.0.0.1:{port}/?token={token}"
+            threading.Thread(
+                target=_announce_when_ready,
+                args=(port, token, handshake, browser_url if open_browser else "",
+                      bool(lan)),
+                name="darksec-ready-announcer",
+                daemon=True,
+            ).start()
         catalog_task = None
         if not os.environ.get("DARKSEC_NO_CATALOG_AUTOSYNC"):
             catalog_task = asyncio.create_task(_catalog_auto_refresh_loop(app))
