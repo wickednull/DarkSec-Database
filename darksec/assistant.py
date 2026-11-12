@@ -511,6 +511,13 @@ _VAULT_SAVE = re.compile(
     r"\b(?:note|notes|vault)\b.{0,50}\b(?:save|store|write|record|remember|add|create|update|put)\b",
     re.IGNORECASE | re.DOTALL,
 )
+_VAULT_EDIT = re.compile(
+    r"\b(?:edit|update|append|add to|revise|modify|rewrite|change|replace|"
+    r"insert|amend|correct|fix)\b.{0,50}\b(?:note|notes|vault)\b|"
+    r"\b(?:note|notes|vault)\b.{0,50}\b(?:edit|update|append|add to|revise|"
+    r"modify|rewrite|change|replace|insert|amend|correct|fix)\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def vault_read_intent(query: str) -> bool:
@@ -519,6 +526,10 @@ def vault_read_intent(query: str) -> bool:
 
 def vault_save_intent(query: str) -> bool:
     return bool(_VAULT_SAVE.search(str(query or "")))
+
+
+def vault_edit_intent(query: str) -> bool:
+    return bool(_VAULT_EDIT.search(str(query or "")))
 
 
 def vault_read_only_intent(query: str) -> bool:
@@ -534,7 +545,9 @@ _VAULT_ANALYZE = re.compile(
 
 def vault_direct_read_intent(query: str) -> bool:
     """True for simple read/list requests that can be answered without the model."""
-    return vault_read_only_intent(query) and not _VAULT_ANALYZE.search(str(query or ""))
+    return (vault_read_only_intent(query)
+            and not vault_edit_intent(query)
+            and not _VAULT_ANALYZE.search(str(query or "")))
 
 
 def tools_relevant(query: str) -> bool:
@@ -546,7 +559,7 @@ def tools_relevant(query: str) -> bool:
     """
     text = str(query or "")
     return bool(_TOOL_HINTS.search(text) or _TOOL_ACTIONS.search(text)
-                or vault_read_intent(text))
+                or vault_read_intent(text) or vault_edit_intent(text))
 
 
 _TIME_HINTS = re.compile(
@@ -577,12 +590,14 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
         sys += (
             "\nYou can act on the operator's system with these tools: "
             "get_live_status, get_library_document (find a named manual by title), "
-            "search_library (topic search), list_vault_notes and get_vault_note "
-            "(encrypted vault notes; require an unlocked vault), save_log_entry "
-            "(plaintext mission log) and save_note (encrypted vault note; requires an "
-            "unlocked vault). Use list_vault_notes/get_vault_note whenever the operator "
-            "asks to read, retrieve, open, list or show a vault note. Never call save_note "
-            "for a read request. Use "
+            "search_library (topic search), list_vault_notes, get_vault_note and "
+            "edit_vault_note (encrypted vault notes; require an unlocked vault), "
+            "save_log_entry (plaintext mission log) and save_note (encrypted vault note; "
+            "requires an unlocked vault). Use list_vault_notes/get_vault_note whenever the "
+            "operator asks to read, retrieve, open, list or show a vault note. Use "
+            "edit_vault_note whenever the operator asks to edit, update, append to, revise "
+            "or change an existing note. Never call save_note for a read or edit request; "
+            "editing must never create a duplicate note. Use "
             "get_live_status before answering questions about current conditions and say "
             "how old cached data is. Call write tools only when the operator asks you to "
             "save/record something. Writes are rate-limited by the server."
@@ -732,6 +747,28 @@ def tool_specs() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "edit_vault_note",
+                "description": (
+                    "Edit an existing encrypted vault note by id or title. Use when asked to "
+                    "edit, update, append to, revise or change a note. Never creates a new note."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "Existing note id if known."},
+                        "title": {"type": "string", "description": "Existing note title or distinctive words."},
+                        "new_title": {"type": "string", "description": "Optional replacement title."},
+                        "body": {"type": "string", "description": "Optional replacement body."},
+                        "append": {"type": "string", "description": "Optional text to append to the existing body."},
+                        "tags": {"type": "string", "description": "Optional replacement tags."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "save_log_entry",
                 "description": "Save a short note to the plaintext mission log when asked to record/log something.",
                 "parameters": {
@@ -822,7 +859,7 @@ def _tools_for_turn(cfg: dict, prompt: str, tool_executor) -> list[dict] | None:
     if cfg.get("tools_auto", True) and not tools_relevant(prompt):
         return None
     specs = tool_specs()
-    if vault_read_only_intent(prompt):
+    if vault_read_only_intent(prompt) or vault_edit_intent(prompt):
         specs = [spec for spec in specs
                  if spec["function"]["name"] not in ("save_note", "save_log_entry")]
     return specs

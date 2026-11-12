@@ -21,7 +21,7 @@ def tmpdb(tmp_path):
 def test_tool_specs_shape():
     names = [t["function"]["name"] for t in assistant.tool_specs()]
     assert set(names) == {"get_live_status", "get_library_document", "search_library",
-                          "list_vault_notes", "get_vault_note",
+                          "list_vault_notes", "get_vault_note", "edit_vault_note",
                           "save_log_entry", "save_note"}
     for spec in assistant.tool_specs():
         assert spec["type"] == "function"
@@ -243,8 +243,15 @@ def test_read_intent_does_not_expose_save_tools():
     save_names = {spec["function"]["name"] for spec in save_specs}
     assert "save_note" in save_names
 
+    edit_specs = assistant._tools_for_turn(cfg, "edit my water vault note", lambda name, args: {})
+    edit_names = {spec["function"]["name"] for spec in edit_specs}
+    assert "edit_vault_note" in edit_names
+    assert "save_note" not in edit_names and "save_log_entry" not in edit_names
+
     assert assistant.vault_direct_read_intent("read the water note") is True
     assert assistant.vault_direct_read_intent("summarize the water note") is False
+    assert assistant.vault_edit_intent("edit the water note") is True
+    assert assistant.vault_direct_read_intent("edit the water note") is False
 
 
 def test_vault_fast_events_returns_note_without_model(tmpdb):
@@ -255,3 +262,27 @@ def test_vault_fast_events_returns_note_without_model(tmpdb):
     assert events[-1]["type"] == "done"
     assert "Boil water" in events[-1]["content"]
     assert tmpdb.one("SELECT count(*) c FROM notes")["c"] == 1
+
+
+def test_vault_note_update_edits_without_creating(tmpdb):
+    vault = Vault(tmpdb)
+    vault.setup("correct horse battery staple")
+    server.ai_note_save(tmpdb, vault, "Water Plan", "Boil water for one minute.", "water")
+    before = tmpdb.one("SELECT count(*) c FROM notes")["c"]
+
+    out = server.ai_vault_note_update(tmpdb, vault, title="water plan",
+                                      new_title="Water Plan v2", body="Filter and boil.",
+                                      tags="water,updated")
+    assert out["ok"] and out["note"]["title"] == "Water Plan v2"
+    assert out["note"]["body"] == "Filter and boil."
+    assert tmpdb.one("SELECT count(*) c FROM notes")["c"] == before
+
+    appended = server.ai_vault_note_update(tmpdb, vault, title="Water Plan v2",
+                                           append="Store four litres per person.")
+    assert appended["ok"]
+    assert "Store four litres" in appended["note"]["body"]
+    assert tmpdb.one("SELECT count(*) c FROM notes")["c"] == before
+
+    missing = server.ai_vault_note_update(tmpdb, vault, title="radio plan", body="x")
+    assert missing["ok"] is False
+    assert tmpdb.one("SELECT count(*) c FROM notes")["c"] == before

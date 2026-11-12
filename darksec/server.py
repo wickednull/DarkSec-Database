@@ -677,11 +677,8 @@ def ai_vault_notes_list(d: Database, v, limit: int = 30) -> dict:
     }
 
 
-def ai_vault_note_get(d: Database, v, note_id=None, title: str | None = None,
-                      max_body: int = 4000) -> dict:
-    notes = _vault_note_records(d, v)
-    if not notes:
-        return {"ok": False, "error": "The encrypted vault has no notes."}
+def _resolve_vault_note(notes: list[dict], note_id=None,
+                        title: str | None = None) -> tuple[dict | None, dict | None]:
     if note_id not in (None, ""):
         try:
             wanted = int(note_id)
@@ -690,11 +687,11 @@ def ai_vault_note_get(d: Database, v, note_id=None, title: str | None = None,
         if wanted is not None:
             for note in notes:
                 if int(note["id"]) == wanted:
-                    return _vault_note_payload(note, max_body)
+                    return note, None
     query = _norm_note_text(title or "")
     if not query:
-        return {"ok": False, "error": "Provide a note title or id.",
-                "available": [n["title"] for n in notes[:12]]}
+        return None, {"ok": False, "error": "Provide a note title or id.",
+                      "available": [n["title"] for n in notes[:12]]}
     q_tokens = set(query.split())
     scored = []
     for note in notes:
@@ -710,23 +707,68 @@ def ai_vault_note_get(d: Database, v, note_id=None, title: str | None = None,
         else:
             overlap = len(q_tokens & n_tokens) / max(1, len(q_tokens))
             body_overlap = len(q_tokens & set(nb.split())) / max(1, len(q_tokens))
-            score = max(SequenceMatcher(None, query, nt).ratio() * 0.82,
-                        overlap * 0.9, body_overlap * 0.55)
+            ratio = SequenceMatcher(None, query, nt).ratio()
+            ratio_score = ratio * 0.82 if ratio >= 0.8 else 0.0
+            overlap_score = overlap * 0.9 if (overlap >= 0.6 or len(q_tokens) == 1) else 0.0
+            body_score = body_overlap * 0.55 if (body_overlap >= 0.6 or len(q_tokens) == 1) else 0.0
+            score = max(ratio_score, overlap_score, body_score)
         if score >= 0.28:
             scored.append((score, note))
     scored.sort(key=lambda item: item[0], reverse=True)
     if not scored:
-        return {"ok": False,
-                "error": f"No vault note matched {title!r}.",
-                "available": [n["title"] for n in notes[:12]]}
+        return None, {"ok": False,
+                      "error": f"No vault note matched {title!r}.",
+                      "available": [n["title"] for n in notes[:12]]}
     if len(scored) > 1 and scored[0][0] - scored[1][0] < 0.12 and scored[0][0] < 0.9:
-        return {"ok": False, "ambiguous": True,
-                "error": "Multiple vault notes matched. Specify the exact title or id.",
-                "matches": [
-                    {"id": n["id"], "title": n["title"], "updated": n["updated"]}
-                    for _, n in scored[:6]
-                ]}
-    return _vault_note_payload(scored[0][1], max_body)
+        return None, {"ok": False, "ambiguous": True,
+                      "error": "Multiple vault notes matched. Specify the exact title or id.",
+                      "matches": [
+                          {"id": n["id"], "title": n["title"], "updated": n["updated"]}
+                          for _, n in scored[:6]
+                      ]}
+    return scored[0][1], None
+
+
+def ai_vault_note_get(d: Database, v, note_id=None, title: str | None = None,
+                      max_body: int = 4000) -> dict:
+    notes = _vault_note_records(d, v)
+    if not notes:
+        return {"ok": False, "error": "The encrypted vault has no notes."}
+    note, error = _resolve_vault_note(notes, note_id, title)
+    if error:
+        return error
+    return _vault_note_payload(note, max_body)
+
+
+def ai_vault_note_update(d: Database, v, note_id=None, title: str | None = None,
+                         new_title: str | None = None, body: str | None = None,
+                         append: str | None = None, tags: str | None = None,
+                         max_body: int = 4000) -> dict:
+    """Edit an existing encrypted vault note. Never creates a new note."""
+    notes = _vault_note_records(d, v)
+    if not notes:
+        return {"ok": False, "error": "The encrypted vault has no notes."}
+    note, error = _resolve_vault_note(notes, note_id, title)
+    if error:
+        return error
+    old_title = str(note.get("title") or "UNTITLED")
+    old_body = str(note.get("body") or "")
+    old_tags = str(note.get("tags") or "")
+    heading = str(new_title).strip() if new_title not in (None, "") else old_title
+    content = old_body if body is None else str(body)
+    addition = str(append or "").strip()
+    if addition:
+        content = (content.rstrip() + "\n\n" + addition).strip() if content.strip() else addition
+    label = old_tags if tags is None else str(tags)
+    if heading == old_title and content == old_body and label == old_tags:
+        return {"ok": False, "error": "No changes were provided for this note.",
+                "note": {"id": note["id"], "title": old_title}}
+    cipher = v.encrypt(json.dumps({"title": heading, "body": content, "tags": label}))
+    now = utcnow()
+    d.execute("UPDATE notes SET cipher=?, updated=? WHERE id=?", (cipher, now, note["id"]))
+    d.audit("ASSISTANT_NOTE_EDIT", f"id={note['id']} chars={len(content)}")
+    updated = dict(note, title=heading, body=content, tags=label, updated=now)
+    return _vault_note_payload(updated, max_body)
 
 
 def _vault_note_payload(note: dict, max_body: int = 4000) -> dict:
@@ -825,13 +867,13 @@ def assistant_vault_preflight(v):
     instance to become unlocked before the tool is allowed to run.
     """
     def preflight(name: str, args: dict):
-        if name not in ("save_note", "list_vault_notes", "get_vault_note"):
+        if name not in ("save_note", "list_vault_notes", "get_vault_note", "edit_vault_note"):
             return None
         if not v.configured() or v.unlocked():
             return None
         args = args if isinstance(args, dict) else {}
         title = str(args.get("title") or "Delamain note")[:200]
-        verb = "save" if name == "save_note" else "read"
+        verb = "save" if name == "save_note" else ("edit" if name == "edit_vault_note" else "read")
 
         def events():
             yield {
@@ -1198,7 +1240,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     # ------------------------------------------------------------ assistant (local Ollama)
     def assistant_tool_executor(d: Database, v, prompt: str = ""):
         """Execute the narrow set of local tools Delamain is allowed to call."""
-        read_only = assistant.vault_read_only_intent(prompt)
+        read_only = assistant.vault_read_only_intent(prompt) or assistant.vault_edit_intent(prompt)
         def execute(name: str, args: dict) -> dict:
             args = args if isinstance(args, dict) else {}
             name = str(name or "").strip()
@@ -1232,6 +1274,12 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 if name == "get_vault_note":
                     return ai_vault_note_get(d, v, args.get("id"),
                                              args.get("title") or args.get("query"))
+                if name == "edit_vault_note":
+                    return ai_vault_note_update(
+                        d, v, args.get("id"), args.get("title") or args.get("query"),
+                        args.get("new_title"), args.get("body"), args.get("append"),
+                        args.get("tags"),
+                    )
                 if name == "save_log_entry":
                     return ai_log_save(d, args.get("title"), args.get("body"), args.get("category") or "GENERAL")
                 if name == "save_note":
