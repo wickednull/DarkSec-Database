@@ -23,9 +23,11 @@ def test_tool_specs_shape():
     assert set(names) == {
         "get_live_status", "get_library_document", "search_library",
         "list_vault_notes", "get_vault_note", "edit_vault_note",
-        "search_mission_log", "list_tasks", "create_task", "complete_task",
-        "query_inventory", "adjust_inventory", "create_incident",
-        "resolve_incident", "read_checklist", "update_checklist",
+        "search_mission_log", "list_tasks", "create_task", "complete_task", "update_task",
+        "query_inventory", "adjust_inventory", "delete_inventory",
+        "create_incident", "resolve_incident", "list_incidents", "update_incident",
+        "update_mission_log", "delete_mission_log",
+        "read_checklist", "update_checklist", "reset_checklist",
         "read_water_log", "log_water_test", "list_calculators", "calculate",
         "convert_coordinates", "distance_bearing", "list_waypoints", "create_waypoint",
         "save_log_entry", "save_note",
@@ -457,7 +459,7 @@ def test_tool_selection_is_intent_scoped():
 
     task_names = {s["function"]["name"] for s in assistant._tools_for_turn(
         base, "what tasks are open", lambda name, args: {})}
-    assert task_names == {"list_tasks", "create_task", "complete_task"}
+    assert task_names == {"list_tasks", "create_task", "complete_task", "update_task"}
 
     file_names = {s["function"]["name"] for s in assistant._tools_for_turn(
         {**base, "system_tools": True}, "read the file notes.txt", lambda name, args: {})}
@@ -562,3 +564,38 @@ def test_medical_tools_are_opt_in():
         cfg, "show patient RAVEN vitals and meds", lambda name, args: {})}
     assert {"list_patients", "get_patient", "list_vitals", "list_medications"} <= names
     assert "adjust_inventory" not in names
+
+
+def test_record_editing_and_listing_tools(tmpdb):
+    task = server.ai_task_create(tmpdb, "Inspect filter")["task"]
+    updated = server.ai_task_update(tmpdb, task_id=task["id"], detail="Check gasket",
+                                    priority="PRIORITY", done=False)
+    assert updated["ok"] and updated["task"]["detail"] == "Check gasket"
+    assert updated.get("undo", {}).get("token")
+
+    inc = server.ai_incident_create(tmpdb, "Gate fault", severity="WARNING")["incident"]
+    listed = server.ai_incidents_list(tmpdb)
+    assert listed["ok"] and any(i["id"] == inc["id"] for i in listed["incidents"])
+    edited = server.ai_incident_update(tmpdb, incident_id=inc["id"], severity="CRITICAL",
+                                       detail="Sensor failed")
+    assert edited["ok"] and edited["incident"]["severity"] == "CRITICAL"
+
+    log = server.ai_log_save(tmpdb, "Old log title", "Body text")
+    edited_log = server.ai_mission_log_update(tmpdb, log["id"], title="New log title",
+                                              body="Updated text")
+    assert edited_log["ok"] and edited_log["item"]["title"] == "New log title"
+    deleted_log = server.ai_mission_log_delete(tmpdb, log["id"])
+    assert deleted_log["ok"] and deleted_log.get("undo", {}).get("token")
+    assert tmpdb.one("SELECT count(*) c FROM log_entries WHERE id=?", (log["id"],))["c"] == 0
+
+    item = server.ai_inventory_adjust(tmpdb, name="Old rope", qty=2)["item"]
+    deleted_item = server.ai_inventory_delete(tmpdb, item_id=item["id"])
+    assert deleted_item["ok"] and deleted_item.get("undo", {}).get("token")
+    assert tmpdb.one("SELECT count(*) c FROM inventory WHERE id=?", (item["id"],))["c"] == 0
+
+    kit = server.CHECKLIST_DATA["kits"][0]
+    item_id = kit["items"][0]["id"]
+    server.ai_checklist_update(tmpdb, kit_id=kit["id"], item_id=item_id, checked=True)
+    reset = server.ai_checklist_reset(tmpdb, kit["id"])
+    assert reset["ok"] and reset.get("undo", {}).get("token")
+    assert tmpdb.one("SELECT count(*) c FROM checklist_state WHERE kit_id=?", (kit["id"],))["c"] == 0

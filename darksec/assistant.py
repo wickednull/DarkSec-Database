@@ -31,7 +31,8 @@ class ToolDenied(Exception):
 CONFIRMABLE_TOOLS = {
     "create_task", "complete_task", "adjust_inventory", "create_incident",
     "resolve_incident", "update_checklist", "log_water_test", "write_system_file",
-    "create_waypoint",
+    "create_waypoint", "update_task", "update_incident", "update_mission_log",
+    "delete_mission_log", "delete_inventory", "reset_checklist",
 }
 DEFAULT_BASE = "http://127.0.0.1:11434"
 DEFAULT_KEEP_ALIVE = "30m"
@@ -620,12 +621,12 @@ _NAV_HINTS = re.compile(
 
 _TOOL_GROUPS = {
     "vault": {"list_vault_notes", "get_vault_note", "edit_vault_note", "save_note"},
-    "tasks": {"list_tasks", "create_task", "complete_task"},
-    "inventory": {"query_inventory", "adjust_inventory"},
-    "incidents": {"create_incident", "resolve_incident"},
-    "checklists": {"read_checklist", "update_checklist"},
+    "tasks": {"list_tasks", "create_task", "complete_task", "update_task"},
+    "inventory": {"query_inventory", "adjust_inventory", "delete_inventory"},
+    "incidents": {"create_incident", "resolve_incident", "list_incidents", "update_incident"},
+    "checklists": {"read_checklist", "update_checklist", "reset_checklist"},
     "water": {"read_water_log", "log_water_test"},
-    "log": {"search_mission_log", "save_log_entry"},
+    "log": {"search_mission_log", "save_log_entry", "update_mission_log", "delete_mission_log"},
     "library": {"get_library_document", "search_library"},
     "live": {"get_live_status"},
     "system": {"list_system_directory", "read_system_file", "write_system_file"},
@@ -697,7 +698,7 @@ _SYSTEM_HINTS = re.compile(
 _RECORD_WRITE = re.compile(
     r"\b(?:add|create|adjust|set|mark|complete|resolve|check|uncheck|tick|log|"
     r"record|update|change|remove|delete|decrement|increment|consume|consume[ds]?|"
-    r"used?|reconcile|restock|remind|schedule)\b",
+    r"used?|reconcile|restock|remind|schedule|reset|reopen|close)\b",
     re.IGNORECASE,
 )
 
@@ -766,7 +767,7 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
             "query_inventory/adjust_inventory, create_incident/resolve_incident, "
             "read_checklist/update_checklist, and read_water_log/log_water_test. Use "
             "read/list/query tools for questions; use create/complete/adjust/resolve/"
-            "update/log only when the operator explicitly asks, and report the exact "
+            "update/edit/delete/reset/log only when the operator explicitly asks, and report the exact "
             "item and change. Use "
             "get_live_status before answering questions about current conditions and say "
             "how old cached data is. Call write tools only when the operator asks you to "
@@ -1250,6 +1251,123 @@ def tool_specs(cfg: dict | None = None) -> list[dict]:
                         "note": {"type": "string", "description": "Optional note."},
                     },
                     "required": ["name", "lat", "lon"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_task",
+                "description": "Edit an existing task: title, detail, priority, due, category, recurrence, or done/reopen.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "Task id if known."},
+                        "title": {"type": "string", "description": "Existing task title or distinctive words."},
+                        "new_title": {"type": "string", "description": "Optional replacement title."},
+                        "detail": {"type": "string", "description": "Optional replacement details."},
+                        "priority": {"type": "string", "description": "IMMEDIATE, PRIORITY or ROUTINE."},
+                        "due": {"type": "string", "description": "Optional due date/time; empty clears."},
+                        "category": {"type": "string", "description": "Optional category."},
+                        "recurrence": {"type": "string", "description": "Optional recurrence note."},
+                        "done": {"type": "boolean", "description": "True to complete, false to reopen."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_incidents",
+                "description": "List open, resolved or all incidents.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "description": "open, resolved or all (default open)."},
+                        "severity": {"type": "string", "description": "Optional severity filter."},
+                        "limit": {"type": "integer", "description": "Max incidents (default 20)."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_incident",
+                "description": "Edit an incident's title, detail, severity, category, coordinates or resolved state.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "Incident id if known."},
+                        "title": {"type": "string", "description": "Existing incident title or distinctive words."},
+                        "new_title": {"type": "string", "description": "Optional replacement title."},
+                        "detail": {"type": "string", "description": "Optional replacement detail."},
+                        "severity": {"type": "string", "description": "CRITICAL, WARNING, ALERT or INFO."},
+                        "category": {"type": "string", "description": "Optional category."},
+                        "lat": {"type": "number", "description": "Optional latitude."},
+                        "lon": {"type": "number", "description": "Optional longitude."},
+                        "resolved": {"type": "boolean", "description": "True to resolve, false to reopen."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_mission_log",
+                "description": "Edit a mission-log entry by id. Search the log first to get the id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "Mission log entry id."},
+                        "title": {"type": "string", "description": "Optional replacement title."},
+                        "body": {"type": "string", "description": "Optional replacement body."},
+                        "category": {"type": "string", "description": "Optional category."},
+                        "tags": {"type": "string", "description": "Optional tags."},
+                    },
+                    "required": ["id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_mission_log",
+                "description": "Delete a mission-log entry by id. Requires approval; undo is available.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"id": {"type": "integer", "description": "Mission log entry id."}},
+                    "required": ["id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_inventory",
+                "description": "Delete an inventory item by id or name. Requires approval; undo is available.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "Inventory id if known."},
+                        "name": {"type": "string", "description": "Inventory item name."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "reset_checklist",
+                "description": "Reset all checked state for one checklist kit. Requires approval; undo is available.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"kit_id": {"type": "string", "description": "Kit id or name."}},
+                    "required": ["kit_id"],
                 },
             },
         },

@@ -1908,6 +1908,218 @@ def ai_medications_list(d: Database, patient_id=None, callsign: str = "", name: 
             "note": "Read-only medication history. Do not prescribe or change doses."}
 
 
+def _ai_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "checked", "open", "done")
+
+
+def ai_task_update(d: Database, task_id=None, title: str | None = None,
+                   new_title: str | None = None, detail: str | None = None,
+                   priority: str | None = None, due: str | None = None,
+                   category: str | None = None, recurrence: str | None = None,
+                   done=None) -> dict:
+    row, error = _find_task(d, task_id, title)
+    if error:
+        return error
+    before = _ai_row(row)
+    fields = {}
+    if new_title not in (None, ""):
+        fields["title"] = str(new_title).strip()[:200]
+    if detail is not None:
+        fields["detail"] = str(detail)[:4000]
+    if priority is not None:
+        prio = str(priority).strip().upper()
+        fields["priority"] = prio if prio in _TASK_PRIORITIES else "ROUTINE"
+    if due is not None:
+        fields["due"] = str(due).strip()[:40] or None
+    if category is not None:
+        fields["category"] = str(category).strip().upper()[:40] or "GENERAL"
+    if recurrence is not None:
+        fields["recurrence"] = str(recurrence).strip()[:120]
+    if done is not None:
+        fields["done"] = 1 if _ai_bool(done) else 0
+    if not fields:
+        return {"ok": False, "error": "No task changes were provided."}
+    sets = ", ".join(f"{key}=?" for key in fields)
+    d.execute(f"UPDATE tasks SET {sets} WHERE id=?", (*fields.values(), int(row["id"])))
+    d.audit("ASSISTANT_TASK_UPDATE", f"id={row['id']} fields={','.join(fields)}")
+    updated = _ai_row(d.one("SELECT * FROM tasks WHERE id=?", (int(row["id"]),)))
+    updated["detail"] = str(updated.get("detail") or "")[:1000]
+    return {"ok": True, "task": updated,
+            "undo": _register_undo({"kind": "task_restore", "id": int(row["id"]),
+                                    "prev": {key: before.get(key) for key in fields}},
+                                    f"Updated task: {updated.get('title')}")}
+
+
+def _find_incident(d: Database, incident_id=None, title: str | None = None):
+    if incident_id not in (None, ""):
+        try:
+            row = d.one("SELECT * FROM incidents WHERE id=?", (int(incident_id),))
+        except (TypeError, ValueError):
+            row = None
+        if row:
+            return row, None
+    q = str(title or "").strip()
+    if not q:
+        return None, {"ok": False, "error": "Provide an incident id or title."}
+    rows = d.query("SELECT * FROM incidents WHERE title LIKE ? ORDER BY ts DESC LIMIT 12",
+                   (f"%{q}%",))
+    if not rows:
+        return None, {"ok": False, "error": f"No incident matched {q!r}."}
+    if len(rows) > 1:
+        exact = [r for r in rows if str(r["title"]).lower() == q.lower()]
+        if len(exact) == 1:
+            return exact[0], None
+        return None, {"ok": False, "ambiguous": True,
+                      "error": "Multiple incidents matched. Specify the id or exact title.",
+                      "matches": [dict(r) for r in rows[:8]]}
+    return rows[0], None
+
+
+def ai_incidents_list(d: Database, status: str = "open", severity: str = "",
+                      limit: int = 20) -> dict:
+    try:
+        limit = max(1, min(int(limit or 20), 50))
+    except (TypeError, ValueError):
+        limit = 20
+    clauses, params = [], []
+    state = str(status or "open").lower()
+    if state in ("open", "active", "unresolved"):
+        clauses.append("resolved=0")
+    elif state in ("closed", "resolved", "done"):
+        clauses.append("resolved=1")
+    if str(severity or "").strip():
+        clauses.append("severity = ?"); params.append(str(severity).strip().upper())
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = d.query(f"SELECT * FROM incidents{where} ORDER BY ts DESC, id DESC LIMIT ?",
+                   (*params, limit))
+    incidents = [
+        {"id": r["id"], "ts": r["ts"], "severity": r["severity"],
+         "category": r["category"], "title": r["title"],
+         "detail": str(r["detail"] or "")[:300], "resolved": int(r["resolved"] or 0),
+         "lat": r["lat"], "lon": r["lon"]}
+        for r in rows
+    ]
+    return {"ok": True, "count": len(incidents), "incidents": incidents}
+
+
+def ai_incident_update(d: Database, incident_id=None, title: str | None = None,
+                       new_title: str | None = None, detail: str | None = None,
+                       severity: str | None = None, category: str | None = None,
+                       lat=None, lon=None, resolved=None) -> dict:
+    row, error = _find_incident(d, incident_id, title)
+    if error:
+        return error
+    before = _ai_row(row)
+    fields = {}
+    if new_title not in (None, ""):
+        fields["title"] = str(new_title).strip()[:200]
+    if detail is not None:
+        fields["detail"] = str(detail)[:8000]
+    if severity is not None:
+        sev = str(severity).strip().upper()
+        fields["severity"] = sev if sev in ("CRITICAL", "WARNING", "ALERT", "INFO") else "INFO"
+    if category is not None:
+        fields["category"] = str(category).strip().upper()[:40] or "SECURITY"
+    if lat is not None:
+        value = _ai_num(lat)
+        fields["lat"] = value if value is not None and -90 <= value <= 90 else None
+    if lon is not None:
+        value = _ai_num(lon)
+        fields["lon"] = value if value is not None and -180 <= value <= 180 else None
+    if resolved is not None:
+        fields["resolved"] = 1 if _ai_bool(resolved) else 0
+    if not fields:
+        return {"ok": False, "error": "No incident changes were provided."}
+    sets = ", ".join(f"{key}=?" for key in fields)
+    d.execute(f"UPDATE incidents SET {sets} WHERE id=?", (*fields.values(), int(row["id"])))
+    d.audit("ASSISTANT_INCIDENT_UPDATE", f"id={row['id']} fields={','.join(fields)}")
+    updated = _ai_row(d.one("SELECT * FROM incidents WHERE id=?", (int(row["id"]),)))
+    updated["detail"] = str(updated.get("detail") or "")[:2000]
+    return {"ok": True, "incident": updated,
+            "undo": _register_undo({"kind": "incident_restore_full", "id": int(row["id"]),
+                                    "prev": {key: before.get(key) for key in fields}},
+                                    f"Updated incident: {updated.get('title')}")}
+
+
+def ai_mission_log_update(d: Database, log_id=None, title: str | None = None,
+                          body: str | None = None, category: str | None = None,
+                          tags: str | None = None) -> dict:
+    try:
+        row = d.one("SELECT * FROM log_entries WHERE id=?", (int(log_id),))
+    except (TypeError, ValueError):
+        row = None
+    if not row:
+        return {"ok": False, "error": "Mission log entry not found. Search it first for the id."}
+    before = _ai_row(row)
+    fields = {}
+    if title not in (None, ""):
+        fields["title"] = str(title).strip()[:200]
+    if body is not None:
+        fields["body"] = str(body)[:20000]
+    if category is not None:
+        fields["category"] = str(category).strip().upper()[:40] or "GENERAL"
+    if tags is not None:
+        fields["tags"] = str(tags).strip()[:500]
+    if not fields:
+        return {"ok": False, "error": "No mission-log changes were provided."}
+    sets = ", ".join(f"{key}=?" for key in fields)
+    d.execute(f"UPDATE log_entries SET {sets} WHERE id=?", (*fields.values(), int(row["id"])))
+    d.audit("ASSISTANT_LOG_UPDATE", f"id={row['id']}")
+    updated = _ai_row(d.one("SELECT * FROM log_entries WHERE id=?", (int(row["id"]),)))
+    updated["body"] = str(updated.get("body") or "")[:1000]
+    return {"ok": True, "item": updated,
+            "undo": _register_undo({"kind": "log_restore", "id": int(row["id"]),
+                                    "prev": {key: before.get(key) for key in fields}},
+                                    f"Edited mission log: {updated.get('title')}")}
+
+
+def ai_mission_log_delete(d: Database, log_id=None) -> dict:
+    try:
+        row = d.one("SELECT * FROM log_entries WHERE id=?", (int(log_id),))
+    except (TypeError, ValueError):
+        row = None
+    if not row:
+        return {"ok": False, "error": "Mission log entry not found. Search it first for the id."}
+    snapshot = _ai_row(row)
+    d.execute("DELETE FROM log_entries WHERE id=?", (int(row["id"]),))
+    d.audit("ASSISTANT_LOG_DELETE", f"id={row['id']}")
+    return {"ok": True, "deleted": int(row["id"]),
+            "undo": _register_undo({"kind": "log_restore_row", "row": snapshot},
+                                    f"Deleted mission log: {snapshot.get('title')}")}
+
+
+def ai_inventory_delete(d: Database, item_id=None, name: str | None = None) -> dict:
+    row, error = _find_inventory(d, item_id, name)
+    if error:
+        return error
+    if row is None:
+        return {"ok": False, "error": "Inventory item not found."}
+    snapshot = _ai_row(row)
+    d.execute("DELETE FROM inventory WHERE id=?", (int(row["id"]),))
+    d.audit("ASSISTANT_INVENTORY_DELETE", f"id={row['id']} {row['name'][:100]}")
+    return {"ok": True, "deleted": int(row["id"]),
+            "undo": _register_undo({"kind": "inventory_restore_row", "row": snapshot},
+                                    f"Deleted inventory: {snapshot.get('name')}")}
+
+
+def ai_checklist_reset(d: Database, kit_id=None) -> dict:
+    kit = _find_checklist_kit(kit_id, kit_id)
+    if kit is None:
+        return {"ok": False, "error": "Checklist kit not found.",
+                "kits": [{"id": k.get("id"), "name": k.get("name")}
+                         for k in (CHECKLIST_DATA.get("kits") or [])]}
+    rows = [dict(r) for r in d.query("SELECT * FROM checklist_state WHERE kit_id=?", (kit["id"],))]
+    d.execute("DELETE FROM checklist_state WHERE kit_id=?", (kit["id"],))
+    d.audit("ASSISTANT_CHECKLIST_RESET", str(kit["id"]))
+    return {"ok": True, "kit": kit.get("name"), "cleared": len(rows),
+            "undo": _register_undo({"kind": "checklist_reset_restore", "rows": rows},
+                                    f"Reset checklist: {kit.get('name')}")}
+
+
 def vault_fast_events(d: Database, v, prompt: str):
     """Deterministic stream for simple vault read/list requests.
 
@@ -2002,6 +2214,22 @@ def _confirm_preview(d: Database, name: str, args: dict) -> tuple[str, str]:
         if name == "create_waypoint":
             return ("Create waypoint", str(args.get("name") or "")
                     + (f" — {args.get('lat')}, {args.get('lon')}" if args.get("lat") is not None else ""))
+        if name == "update_task":
+            row, _ = _find_task(d, args.get("id"), args.get("title"))
+            return ("Update task", str(row["title"]) if row else str(args.get("new_title") or args.get("id") or ""))
+        if name == "update_incident":
+            row, _ = _find_incident(d, args.get("id"), args.get("title"))
+            return ("Update incident", str(row["title"]) if row else str(args.get("new_title") or args.get("id") or ""))
+        if name == "update_mission_log":
+            return ("Edit mission log", f"entry #{args.get('id')}")
+        if name == "delete_mission_log":
+            return ("Delete mission log", f"entry #{args.get('id')}")
+        if name == "delete_inventory":
+            row, _ = _find_inventory(d, args.get("id"), args.get("name"))
+            return ("Delete inventory item", str(row["name"]) if row else str(args.get("name") or args.get("id") or ""))
+        if name == "reset_checklist":
+            kit = _find_checklist_kit(args.get("kit_id"), args.get("kit_id"))
+            return ("Reset checklist", str(kit.get("name") if kit else args.get("kit_id") or ""))
         if name == "write_system_file":
             raw = str(args.get("path") or "")
             try:
@@ -2608,6 +2836,26 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 if name == "list_medications":
                     return ai_medications_list(d, args.get("patient_id"), args.get("callsign") or "",
                                                args.get("name") or "", args.get("limit") or 20)
+                if name == "update_task":
+                    return ai_task_update(d, args.get("id"), args.get("title"), args.get("new_title"),
+                                          args.get("detail"), args.get("priority"), args.get("due"),
+                                          args.get("category"), args.get("recurrence"), args.get("done"))
+                if name == "list_incidents":
+                    return ai_incidents_list(d, args.get("status") or "open",
+                                             args.get("severity") or "", args.get("limit") or 20)
+                if name == "update_incident":
+                    return ai_incident_update(d, args.get("id"), args.get("title"), args.get("new_title"),
+                                              args.get("detail"), args.get("severity"), args.get("category"),
+                                              args.get("lat"), args.get("lon"), args.get("resolved"))
+                if name == "update_mission_log":
+                    return ai_mission_log_update(d, args.get("id"), args.get("title"), args.get("body"),
+                                                 args.get("category"), args.get("tags"))
+                if name == "delete_mission_log":
+                    return ai_mission_log_delete(d, args.get("id"))
+                if name == "delete_inventory":
+                    return ai_inventory_delete(d, args.get("id"), args.get("name"))
+                if name == "reset_checklist":
+                    return ai_checklist_reset(d, args.get("kit_id"))
                 if name == "save_log_entry":
                     return ai_log_save(d, args.get("title"), args.get("body"), args.get("category") or "GENERAL")
                 if name == "save_note":
