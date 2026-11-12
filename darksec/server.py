@@ -14,6 +14,7 @@ import base64
 import calendar
 import csv
 import hashlib
+import html
 import io
 import json
 import mimetypes
@@ -25,6 +26,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import zipfile
 
 import requests
 from contextlib import asynccontextmanager
@@ -48,6 +50,11 @@ from .db import Database, utcnow
 from .security import Vault
 from .status import hardware, system_info, readiness
 from .trips import parse_utc as _parse_utc, trip_items
+
+try:
+    from charset_normalizer import from_bytes as _charset_from_bytes
+except Exception:
+    _charset_from_bytes = None
 
 APP_CODENAME = "NIGHTWATCH"
 COOKIE = "darksec_session"
@@ -1308,6 +1315,75 @@ _SYSTEM_DENY_PATHS = (
 )
 
 
+_TEXT_BOMS = (
+    (b"\xef\xbb\xbf", "utf-8-sig"),
+    (b"\xff\xfe\x00\x00", "utf-32"),
+    (b"\x00\x00\xfe\xff", "utf-32"),
+    (b"\xff\xfe", "utf-16"),
+    (b"\xfe\xff", "utf-16"),
+)
+
+
+def _decode_text_bytes(raw: bytes) -> tuple[str, str]:
+    for bom, encoding in _TEXT_BOMS:
+        if raw.startswith(bom):
+            try:
+                return raw.decode(encoding, errors="replace"), encoding
+            except Exception:
+                pass
+    try:
+        return raw.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        pass
+    if _charset_from_bytes is not None:
+        try:
+            best = _charset_from_bytes(raw).best()
+            if best is not None:
+                decoded = str(best)
+                if "\x00" not in decoded[:4096]:
+                    return decoded, str(best.encoding or "detected")
+        except Exception:
+            pass
+    for encoding in ("cp1252", "latin-1"):
+        try:
+            return raw.decode(encoding, errors="replace"), encoding
+        except Exception:
+            pass
+    return raw.decode("utf-8", errors="replace"), "utf-8-replace"
+
+
+def _looks_binary(raw: bytes) -> bool:
+    if b"\x00" not in raw[:4096]:
+        return False
+    # UTF-16/32 text is accepted only with a BOM; arbitrary NUL-bearing data
+    # is treated as binary rather than guessed into printable gibberish.
+    return not any(raw.startswith(bom) for bom, _ in _TEXT_BOMS)
+
+
+def _extract_document_text(path: Path) -> tuple[str, str, int | None] | None:
+    ext = path.suffix.lower()
+    if ext in (".pdf", ".epub", ".cbz", ".html", ".htm"):
+        try:
+            text, pages = library.extract_text(path, ext)
+        except Exception:
+            return None
+        return (text or ""), ext.lstrip("."), pages
+    if ext in (".docx", ".odt"):
+        member = "word/document.xml" if ext == ".docx" else "content.xml"
+        try:
+            with zipfile.ZipFile(path) as archive:
+                xml = archive.read(member).decode("utf-8", errors="replace")
+        except Exception:
+            return None
+        xml = re.sub(r"(?i)</(?:w:p|text:p|text:h)>", "\n", xml)
+        text = re.sub(r"(?s)<[^>]+>", " ", xml)
+        text = html.unescape(text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        return text, ext.lstrip("."), None
+    return None
+
+
 def _system_root(d: Database) -> Path:
     raw = str(d.get_setting("assistant_system_root", "~") or "~").strip() or "~"
     return Path(os.path.expanduser(raw)).resolve()
@@ -1384,14 +1460,26 @@ def ai_system_read(d: Database, path: str, max_chars: int = 6000) -> dict:
         root, target = _system_path(d, path)
         if not target.exists() or not target.is_file():
             return {"ok": False, "error": f"File not found: {target}"}
-        if target.stat().st_size > 5_000_000:
-            return {"ok": False, "error": "File is larger than the 5 MB read limit."}
-        raw = target.read_bytes()
-        if b"\x00" in raw[:4096]:
-            return {"ok": False, "error": "Binary file; only text files can be read."}
-        text = raw.decode("utf-8", errors="replace")
+        size = target.stat().st_size
+        is_doc = target.suffix.lower() in (".pdf", ".epub", ".cbz", ".html", ".htm", ".docx", ".odt")
+        if size > (20_000_000 if is_doc else 5_000_000):
+            return {"ok": False, "error": "File exceeds the read size limit."}
+        extracted = _extract_document_text(target)
+        if extracted is not None:
+            text, fmt, pages = extracted
+            encoding = "extracted"
+        else:
+            raw = target.read_bytes()
+            if _looks_binary(raw):
+                return {"ok": False, "error": "Binary file; only text and supported document formats can be read."}
+            text, encoding = _decode_text_bytes(raw)
+            fmt = target.suffix.lstrip(".").lower() or "text"
+            pages = None
+        if not text.strip():
+            return {"ok": False, "error": "No extractable text found (scanned/image-only or empty file)."}
         d.audit("ASSISTANT_SYSTEM_READ", str(target)[:300])
         return {"ok": True, "root": str(root), "path": str(target),
+                "format": fmt, "encoding": encoding, "pages": pages,
                 "chars": len(text), "truncated": len(text) > max_chars,
                 "content": text[:max_chars]}
     except PermissionError:

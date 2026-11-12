@@ -1080,7 +1080,9 @@ def tool_specs(cfg: dict | None = None) -> list[dict]:
                 "function": {
                     "name": "read_system_file",
                     "description": (
-                        "Read a text file outside the app under the configured root. "
+                        "Read a text file or supported document outside the app under the "
+                        "configured root (txt, md, html, pdf, epub, docx, odt). Converts to "
+                        "UTF-8 text with replacement characters for undecodable bytes. "
                         "Non-sudo; sensitive credential paths are blocked."
                     ),
                     "parameters": {

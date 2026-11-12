@@ -392,3 +392,32 @@ def test_system_tools_only_in_spec_when_enabled():
     assert {"list_system_directory", "read_system_file", "write_system_file"} <= enabled_names
     assert assistant.system_write_intent("write this to a file") is True
     assert assistant.system_write_intent("list my files") is False
+
+
+def test_system_read_converts_encodings_and_documents(tmpdb):
+    from pathlib import Path
+    import zipfile
+
+    root = Path(tmpdb.path).parent
+    tmpdb.set_setting("assistant_system_tools", True)
+    tmpdb.set_setting("assistant_system_root", str(root))
+
+    (root / "latin.txt").write_bytes("café field note".encode("cp1252"))
+    latin = server.ai_system_read(tmpdb, "latin.txt")
+    assert latin["ok"] and "café" in latin["content"]
+
+    (root / "utf16.txt").write_text("UTF-16 text", encoding="utf-16")
+    utf16 = server.ai_system_read(tmpdb, "utf16.txt")
+    assert utf16["ok"] and "UTF-16 text" in utf16["content"]
+
+    with zipfile.ZipFile(root / "sample.docx", "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            "<w:document><w:body><w:p><w:r><w:t>Hello DOCX</w:t></w:r></w:p></w:body></w:document>",
+        )
+    docx = server.ai_system_read(tmpdb, "sample.docx")
+    assert docx["ok"] and "Hello DOCX" in docx["content"] and docx["format"] == "docx"
+
+    (root / "binary.bin").write_bytes(b"\x00\x01\x02\xff" * 100)
+    binary = server.ai_system_read(tmpdb, "binary.bin")
+    assert binary["ok"] is False
