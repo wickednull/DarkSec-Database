@@ -1281,7 +1281,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         numeric = {"lat": (-90, 90), "lon": (-180, 180), "elevation_m": (-500, 9000),
                    "declination": (-180, 180), "sdr_rx_gain": (0, 62), "sdr_lna_gain": (0, 40),
                    "position_accuracy_m": (0, 100000),
-                   "position_mode": (0, 3)}
+                   "position_mode": (0, 3), "font_scale": (0.8, 1.5)}
         for key, value in payload.items():
             if key in numeric:
                 if key == "position_accuracy_m" and value is None:

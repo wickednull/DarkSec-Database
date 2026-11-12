@@ -762,3 +762,16 @@ def test_rsoe_parser_keeps_all_categories():
     items = feeds._parse_rsoe(html)
     assert {item["category"] for item in items} == {"Earthquake", "War"}
     assert {item["id"] for item in items} == {"1", "2"}
+
+
+def test_display_theme_accent_and_font_scale_roundtrip(client):
+    r = client.put("/api/settings", json={
+        "theme": "midnight", "accent": "violet", "font_scale": 1.2,
+    })
+    assert r.status_code == 200
+    settings = client.get("/api/settings").json()
+    assert settings["theme"] == "midnight"
+    assert settings["accent"] == "violet"
+    assert float(settings["font_scale"]) == 1.2
+    bad = client.put("/api/settings", json={"font_scale": 3.0})
+    assert bad.status_code == 400

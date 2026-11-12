@@ -7,7 +7,7 @@ import { openRecordForm } from "./records.js";
 import { positionConfidence } from "./views/shared.js";
 
 import * as dashboard from "./views/dashboard.js";
-import * as mapView from "./views/map.js?v=map-upgrade-9";
+import * as mapView from "./views/map.js?v=map-upgrade-10";
 import * as library from "./views/library.js";
 import * as manual from "./views/manual.js";
 import * as navView from "./views/nav.js";
@@ -19,9 +19,9 @@ import * as cbrn from "./views/cbrn.js";
 import * as security from "./views/security.js";
 import * as logistics from "./views/logistics.js";
 import * as weather from "./views/weather.js";
-import * as intel from "./views/intel.js?v=better-8";
-import * as assistant from "./views/assistant.js?v=better-7";
-import * as settings from "./views/settings.js?v=better-8";
+import * as intel from "./views/intel.js?v=better-9";
+import * as assistant from "./views/assistant.js?v=better-8";
+import * as settings from "./views/settings.js?v=better-9";
 
 const ROUTES = {
   dashboard: { title: "Situation Report", group: "COMMAND", icon: "dashboard", view: dashboard },
@@ -272,7 +272,15 @@ function closeSidebar() {
 
 function applyAppearance() {
   const s = store.settings || {};
+  document.documentElement.dataset.theme = s.theme || "nightwatch";
   document.documentElement.dataset.accent = s.accent || "green";
+  const scale = Math.max(0.8, Math.min(1.5, Number(s.font_scale) || 1));
+  if (window.darksecDesktop?.setZoom) {
+    try { window.darksecDesktop.setZoom(scale); }
+    catch { document.body.style.zoom = String(scale); }
+  } else {
+    document.body.style.zoom = String(scale);
+  }
   document.body.classList.toggle("no-scan", !s.scanlines);
   document.body.classList.toggle("opsec", !!s.opsec_mode);
   const opsecToggle = document.getElementById("opsecToggle");

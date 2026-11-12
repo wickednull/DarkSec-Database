@@ -224,6 +224,13 @@ ipcMain.handle("darksec:info", () => ({
   dataDir: dataDir(),
 }));
 
+ipcMain.handle("darksec:set-zoom", (event, factor) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const zoom = Math.max(0.8, Math.min(1.5, Number(factor) || 1));
+  if (win) win.webContents.setZoomFactor(zoom);
+  return { ok: Boolean(win), zoom };
+});
+
 ipcMain.handle("darksec:open-external", (_event, url) => {
   try {
     const parsed = new URL(String(url));

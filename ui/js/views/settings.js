@@ -46,12 +46,30 @@ export async function render(root) {
   const callsign = input({ value: settings.callsign || "", maxlength: 40 });
   const team = input({ value: settings.team || "", maxlength: 80 });
   const operator = input({ value: settings.operator || "", maxlength: 80, placeholder: "Optional — avoid real names in the field" });
+  const theme = select([
+    { value: "nightwatch", label: "Nightwatch (default)" },
+    { value: "midnight", label: "Midnight blue" },
+    { value: "blackout", label: "Blackout" },
+    { value: "contrast", label: "High contrast" },
+  ], settings.theme || "nightwatch");
   const accent = select([
     { value: "green", label: "Green phosphor" },
     { value: "amber", label: "Amber CRT" },
     { value: "cyan", label: "Cyan night" },
     { value: "red", label: "Red alert" },
+    { value: "violet", label: "Violet" },
+    { value: "blue", label: "Ice blue" },
+    { value: "orange", label: "Tactical orange" },
+    { value: "magenta", label: "Magenta" },
+    { value: "mono", label: "Monochrome" },
   ], settings.accent || "green");
+  const fontScale = select([
+    { value: "0.9", label: "Small (90%)" },
+    { value: "1", label: "Normal (100%)" },
+    { value: "1.1", label: "Large (110%)" },
+    { value: "1.2", label: "Extra large (120%)" },
+    { value: "1.35", label: "Maximum (135%)" },
+  ], String(settings.font_scale ?? 1));
   const gridFormat = select([
     { value: "mgrs", label: "MGRS" },
     { value: "utm", label: "UTM" },
@@ -78,7 +96,8 @@ export async function render(root) {
       h("div", { class: "form-grid" },
         field("Callsign", callsign), field("Team", team),
         field("Operator", operator, "Optional. Stored only in the local database."),
-        field("Accent", accent),
+        field("Theme", theme), field("Accent", accent),
+        field("Font size", fontScale, "Scales the whole interface."),
         field("Default grid", gridFormat), field("Units", units),
         field("Date format", dateFormat), field("Timezone", timezone, "auto uses the host clock."),
         h("div", { class: "wide" }, field("Mission epoch", epoch, "Shown as H+ / H- in the status bar."))),
@@ -514,7 +533,9 @@ export async function render(root) {
       callsign: callsign.value.trim() || "NIGHTWATCH",
       team: team.value.trim(),
       operator: operator.value.trim(),
+      theme: theme.value,
       accent: accent.value,
+      font_scale: Number(fontScale.value),
       grid_format: gridFormat.value,
       units: units.value,
       date_format: dateFormat.value,

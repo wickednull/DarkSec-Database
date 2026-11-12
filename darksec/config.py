@@ -78,6 +78,8 @@ def default_settings() -> dict:
         "grid_format": "mgrs",
         "declination": 0.0,
         "accent": "green",
+        "theme": "nightwatch",
+        "font_scale": 1.0,
         "sound": True,
         "scanlines": True,
         "sdr_rx_gain": 40,
