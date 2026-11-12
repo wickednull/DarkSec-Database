@@ -1,13 +1,13 @@
 import { api, promptVaultUnlock } from "../api.js";
 import { store } from "../store.js";
-import { h, pageHead, panel, btn, input, textarea, field, select, badge, alertStrip, loading, toast, toggle, renderMarkdown, fmt } from "../components.js";
+import { h, pageHead, panel, btn, input, textarea, field, select, badge, alertStrip, loading, toast, toggle, renderMarkdown, fmt, confirmDialog } from "../components.js";
 
 function csrfToken() {
   const m = document.cookie.match(/(?:^|;\s*)darksec_csrf=([^;]+)/);
   return m ? decodeURIComponent(m[1]) : "";
 }
 
-const chatSession = { conversationId: null, messages: [], selectedModel: "", think: null, includeContext: false, sending: false, creatingConversation: false, abortController: null, pendingImages: [], recognizing: false };
+const chatSession = { conversationId: null, messages: [], selectedModel: "", think: null, includeContext: false, sending: false, creatingConversation: false, epoch: 0, abortController: null, pendingImages: [], recognizing: false };
 
 function nowTs() { return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
 
@@ -463,7 +463,17 @@ export async function render(root) {
     return true;
   }
 
+  function beginChatSwitch() {
+    // Invalidate any in-flight reply so it cannot write into a different
+    // conversation or leave the composer in the sending state.
+    state.epoch += 1;
+    try { state.abortController?.abort(); } catch {}
+    state.abortController = null;
+    setSending(false);
+  }
+
   async function loadConversation(id) {
+    beginChatSwitch();
     try {
       state.conversationId = id;
       const res = await api.get(`/api/assistant/conversations/${id}/messages`);
@@ -571,6 +581,7 @@ export async function render(root) {
     if (state.creatingConversation) return;
     state.creatingConversation = true;
     newConvBtn.disabled = true;
+    beginChatSwitch();
     try {
       const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
       const c = await api.post("/api/assistant/conversations", { title: `Chat ${stamp}` });
@@ -581,6 +592,7 @@ export async function render(root) {
       await rebuildConvPicker();
       const sel = convContainer.querySelector("select");
       if (sel) sel.value = String(c.id);
+      try { promptInput.focus(); } catch {}
       toast("New conversation created", "ok");
     } catch (e) { toast(e.message, "error"); }
     finally {
@@ -609,13 +621,21 @@ export async function render(root) {
 
   async function deleteConversation() {
     if (!state.conversationId) { toast("No conversation selected", "warn"); return; }
-    if (!confirm("Delete this conversation and its messages?")) return;
+    const ok = await confirmDialog({
+      title: "Delete conversation",
+      message: "Delete this conversation and its messages? This cannot be undone.",
+      confirmText: "DELETE",
+      danger: true,
+    });
+    if (!ok) return;
+    beginChatSwitch();
     try {
       await api.del(`/api/assistant/conversations/${state.conversationId}`);
       state.conversationId = null;
       state.messages = [];
       transcript.replaceChildren(intro);
       await rebuildConvPicker();
+      try { promptInput.focus(); } catch {}
       toast("Conversation deleted", "ok");
     } catch (e) { toast(e.message, "error"); }
   }
@@ -662,6 +682,7 @@ export async function render(root) {
         catch { try { controller.abort(); } catch {} }
       }
     }, 2000);
+    const epoch = state.epoch;
     setSending(true);
     try {
       const priorHistory = (state.messages || []).slice(-12).map(m => ({ role: m.role, content: m.content }));
@@ -713,6 +734,10 @@ export async function render(root) {
           while (true) {
             const { value, done } = await reader.read();
             touch();
+            if (state.epoch !== epoch) {
+              try { controller.abort(); } catch {}
+              break;
+            }
             if (done) break;
             buf += decoder.decode(value, { stream: true });
             const lines = buf.split("\n"); buf = lines.pop() || "";
@@ -767,6 +792,7 @@ export async function render(root) {
               }
             }
           }
+          if (state.epoch !== epoch) return;
           if (hadError && !String(content).trim()) throw new Error(hadError);
           const finalContent = String(content || "").trim() || "(model returned empty content)";
           const truncNote = (doneData?.truncated || doneData?.done_reason === "length") ? " · truncated (increase Context or Max reply tokens)" : "";
@@ -810,6 +836,7 @@ export async function render(root) {
         stallLimit = stallMs * 4 + 30000;
         touch();
         const res = await api.post("/api/assistant/chat", payload, { signal: controller.signal });
+        if (state.epoch !== epoch) return;
         const content = (res?.content || "").trim() || "(model returned empty content)";
         const truncNote = (res?.truncated || res?.done_reason === "length") ? " · truncated (increase Context or Max reply tokens)" : "";
         try { pending?.remove(); } catch {}
@@ -830,6 +857,7 @@ export async function render(root) {
       }
     } catch (e) {
       try { pending?.remove(); } catch {}
+      if (state.epoch !== epoch) return;
       if (e?.name === "TimeoutError") {
         const msg = `No activity from Ollama for ${timeoutSec}s. The model may still be loading or the prompt may be too large. Raise Timeout in Settings if CPU inference is slow.`;
         try { addMsg("assistant", `**Timeout:** ${msg}`, "", [], { record: false }); } catch {}
@@ -849,8 +877,10 @@ export async function render(root) {
       clearInterval(watchdog);
       if (pendingTicker) { clearInterval(pendingTicker); pendingTicker = null; }
       if (state.abortController === controller) state.abortController = null;
-      setSending(false);
-      try { window.dispatchEvent(new CustomEvent("darksec:assistant-update")); } catch {}
+      if (state.epoch === epoch) {
+        setSending(false);
+        try { window.dispatchEvent(new CustomEvent("darksec:assistant-update")); } catch {}
+      }
     }
   }
 
