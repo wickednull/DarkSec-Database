@@ -171,6 +171,35 @@ def find_cached(z: int, x: int, y: int, prefer: Optional[str] = None) -> Optiona
 _last_request_at = 0.0
 _throttle_lock = threading.Lock()
 
+# A source that just failed is skipped for a cooldown instead of retrying for
+# every tile in the viewport. This keeps an offline map from spamming DNS/TCP
+# attempts (and the console) while panning.
+SOURCE_FAIL_COOLDOWN = 60.0
+_source_offline_until: dict[str, float] = {}
+_source_fail_lock = threading.Lock()
+
+
+def _source_in_cooldown(source: str) -> bool:
+    with _source_fail_lock:
+        until = _source_offline_until.get(source, 0.0)
+        return time.monotonic() < until
+
+
+def _mark_source_failure(source: str, exc: Exception) -> None:
+    now = time.monotonic()
+    with _source_fail_lock:
+        first = now >= _source_offline_until.get(source, 0.0)
+        _source_offline_until[source] = now + SOURCE_FAIL_COOLDOWN
+    if first:
+        detail = " ".join(str(exc).split())[:240]
+        print(f"Tile source {source} unreachable; pausing fetches for "
+              f"{int(SOURCE_FAIL_COOLDOWN)}s: {detail}")
+
+
+def _clear_source_failure(source: str) -> None:
+    with _source_fail_lock:
+        _source_offline_until.pop(source, None)
+
 
 def _throttle() -> None:
     global _last_request_at
@@ -203,6 +232,8 @@ def fetch_tile(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Optional
         return None
     if z > src["max_zoom"]:
         return None
+    if _source_in_cooldown(source):
+        return None
     url = src["url_template"].format(z=z, x=x, y=y)
     _throttle()
     try:
@@ -212,8 +243,9 @@ def fetch_tile(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Optional
             timeout=REQUEST_TIMEOUT,
         )
     except Exception as exc:  # network down, DNS, timeout
-        print(f"Tile fetch error {source} z={z} x={x} y={y}: {exc}")
+        _mark_source_failure(source, exc)
         return None
+    _clear_source_failure(source)
 
     if resp.status_code in (401, 403, 418, 429):
         raise TileBlocked(f"HTTP {resp.status_code} from {source}")

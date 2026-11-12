@@ -4763,6 +4763,21 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             headers["X-Tile-Source"] = source
         return Response(content=data, media_type=ctype, headers=headers)
 
+    def _bundled_ancestor_tile(z: int, x: int, y: int) -> bytes | None:
+        """Nearest lower-zoom bundled tile, for offline overzoom fallback."""
+        for dirname, maxz in (("overview", 5), ("us_tiles", 6)):
+            for zz in range(min(z - 1, maxz), -1, -1):
+                shift = z - zz
+                xx, yy = x >> shift, y >> shift
+                for ext in ("jpg", "png", "webp"):
+                    path = config.MAP_TILE_DIR / dirname / str(zz) / str(xx) / f"{yy}.{ext}"
+                    if path.exists() and path.stat().st_size > 0:
+                        try:
+                            return path.read_bytes()
+                        except OSError:
+                            continue
+        return None
+
     @app.get("/api/map/tiles/{layer}/{z}/{x}/{y}.png")
     def map_tile_layer(layer: str, z: int, x: int, y: int):
         require(0 <= z <= 22 and x >= 0 and y >= 0, "Invalid tile coordinates", 400)
@@ -4826,6 +4841,11 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 blob = None
             if blob:
                 return _tile_response(blob, src)
+        # Offline or upstream unavailable: overzoom the bundled overview rather
+        # than returning blank tiles for every viewport request.
+        fallback = _bundled_ancestor_tile(z, x, y)
+        if fallback:
+            return _tile_response(fallback, "bundled-overview")
         raise HTTPException(status_code=404, detail="Tile not cached")
 
     # ---------------------------------------------------------------- tile cache

@@ -1017,3 +1017,19 @@ def test_plain_chat_history_default_after_purge(client):
     db = Database(config.DB_PATH)
     raw = db.one("SELECT title, encrypted FROM assistant_conversations WHERE id=?", (conv["id"],))
     assert raw["title"] == "plain chat" and raw["encrypted"] == 0
+
+
+def test_map_tile_falls_back_to_bundled_overview(client, monkeypatch):
+    from darksec import config, server
+
+    # z15 x5799 y11950 maps to the z5 ancestor tile 5/11.
+    tile = config.MAP_TILE_DIR / "overview" / "5" / "5" / "11.png"
+    tile.parent.mkdir(parents=True, exist_ok=True)
+    tile.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    monkeypatch.setattr(server.tilecache, "is_online", lambda: False)
+    try:
+        r = client.get("/api/map/tiles/15/5799/11950.png")
+        assert r.status_code == 200
+        assert r.headers.get("x-tile-source") == "bundled-overview"
+    finally:
+        tile.unlink(missing_ok=True)

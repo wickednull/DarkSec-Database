@@ -682,3 +682,23 @@ def test_opsec_masks_position_in_brief_and_live_status(tmpdb):
     compact = server.assistant_live_status_compact(tmpdb)
     assert compact["position"].get("redacted") is True
     assert "lat" not in compact["position"] and "lon" not in compact["position"]
+
+
+def test_tile_source_cooldown_suppresses_repeated_fetches(monkeypatch):
+    from darksec import tilecache
+
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(1)
+        raise OSError("network is unreachable")
+
+    monkeypatch.setattr(tilecache.requests, "get", fail)
+    monkeypatch.setattr(tilecache, "_throttle", lambda: None)
+    tilecache._source_offline_until.clear()
+    try:
+        assert tilecache.fetch_tile(10, 1, 1, "esri_imagery") is None
+        assert tilecache.fetch_tile(10, 2, 1, "esri_imagery") is None
+        assert len(calls) == 1
+    finally:
+        tilecache._source_offline_until.clear()
