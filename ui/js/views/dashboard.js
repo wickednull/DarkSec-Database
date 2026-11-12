@@ -2,7 +2,7 @@ import { api, download } from "../api.js";
 import { store } from "../store.js";
 import {
   h, panel, stat, gauge, badge, btn, iconBtn, icon, pageHead, alertStrip,
-  emptyState, loading, fmt, toast, modal, textarea,
+  emptyState, loading, fmt, toast, modal, textarea, confirmDialog,
 } from "../components.js";
 import { openRecordForm, deleteRecord, severityTone } from "../records.js";
 import { positionConfidence } from "./shared.js";
@@ -420,6 +420,22 @@ async function showBrief() {
     wide: true, body: pre,
     actions: [
       btn("COPY", { onClick: () => { navigator.clipboard?.writeText(text).then(() => toast("Brief copied")).catch(() => toast("Copy failed", "error")); } }),
+      btn("SAVE TO LOG", { icon: "save", tone: "ghost", onClick: async () => {
+        const ok = await confirmDialog({
+          title: "Save SITREP",
+          message: "Save this server-generated report to the mission log? It will be tagged SITREP.",
+          confirmText: "SAVE",
+        });
+        if (!ok) return;
+        try {
+          const res = await api.post("/api/brief/save", {});
+          if (res && res.ok === false) throw new Error(res.error || "Could not save SITREP");
+          toast("SITREP saved to mission log");
+        } catch (err) { toast(err.message || "Could not save SITREP", "error"); }
+      } }),
+      btn("MARKDOWN", { icon: "download", onClick: () => {
+        location.href = "/api/brief?format=md&download=true";
+      } }),
       btn("DOWNLOAD", { icon: "download", onClick: () => {
         const blob = new Blob([text], { type: "text/plain" });
         const a = h("a", { href: URL.createObjectURL(blob), download: `darksec-sitrep-${new Date().toISOString().slice(0, 10)}.txt` });

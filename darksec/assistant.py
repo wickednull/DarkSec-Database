@@ -32,7 +32,7 @@ CONFIRMABLE_TOOLS = {
     "create_task", "complete_task", "adjust_inventory", "create_incident",
     "resolve_incident", "update_checklist", "log_water_test", "write_system_file",
     "create_waypoint", "update_task", "update_incident", "update_mission_log",
-    "delete_mission_log", "delete_inventory", "reset_checklist",
+    "delete_mission_log", "delete_inventory", "reset_checklist", "save_sitrep",
 }
 DEFAULT_BASE = "http://127.0.0.1:11434"
 DEFAULT_KEEP_ALIVE = "30m"
@@ -606,6 +606,9 @@ _CHECKLIST_HINTS = re.compile(r"\b(checklists?|check list|kits?|gear list)\b", r
 _WATER_HINTS = re.compile(r"\b(water test|water log|chlorine|turbidity|potable|water quality)\b", re.I)
 _LOG_HINTS = re.compile(r"\b(mission log|journal|log entr(?:y|ies)|what did i (?:log|record)|log (?:this|that|it)|record (?:this|that|it))\b", re.I)
 _LIBRARY_HINTS = re.compile(r"\b(manuals?|documents?|pdfs?|books?|guides?|handbooks?|library|field manual)\b", re.I)
+_SITREP_HINTS = re.compile(
+    r"\b(sitrep|situation report|field brief|operational brief|status report|"
+    r"brief me|give me (?:the |a )?brief)\b", re.I)
 _VAULT_HINTS = re.compile(r"\b(note|notes|vault)\b", re.I)
 _CALC_HINTS = re.compile(
     r"\b(calc|calculator|calculate|wind chill|heat index|dew point|wet bulb|"
@@ -629,6 +632,7 @@ _TOOL_GROUPS = {
     "log": {"search_mission_log", "save_log_entry", "update_mission_log", "delete_mission_log"},
     "library": {"get_library_document", "search_library"},
     "live": {"get_live_status"},
+    "sitrep": {"get_sitrep", "save_sitrep"},
     "system": {"list_system_directory", "read_system_file", "write_system_file"},
     "calc": {"list_calculators", "calculate"},
     "nav": {"convert_coordinates", "distance_bearing", "list_waypoints", "create_waypoint"},
@@ -656,6 +660,8 @@ def select_tool_names(cfg: dict, prompt: str) -> set[str] | None:
         selected |= _TOOL_GROUPS["log"]
     if _LIBRARY_HINTS.search(text):
         selected |= _TOOL_GROUPS["library"]
+    if _SITREP_HINTS.search(text):
+        selected |= _TOOL_GROUPS["sitrep"]
     if _CALC_HINTS.search(text):
         selected |= _TOOL_GROUPS["calc"]
     if _NAV_HINTS.search(text):
@@ -697,7 +703,7 @@ _SYSTEM_HINTS = re.compile(
 
 _RECORD_WRITE = re.compile(
     r"\b(?:add|create|adjust|set|mark|complete|resolve|check|uncheck|tick|log|"
-    r"record|update|change|remove|delete|decrement|increment|consume|consume[ds]?|"
+    r"record|save|store|update|change|remove|delete|decrement|increment|consume|consume[ds]?|"
     r"used?|reconcile|restock|remind|schedule|reset|reopen|close)\b",
     re.IGNORECASE,
 )
@@ -754,7 +760,9 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
     if include_tools:
         sys += (
             "\nYou can act on the operator's system with these tools: "
-            "get_live_status, get_library_document (find a named manual by title; pass "
+            "get_live_status, get_sitrep (generate the field situation report), "
+            "save_sitrep (save a report snapshot to the mission log; approval required), "
+            "get_library_document (find a named manual by title; pass "
             "query to focus an excerpt, or page/span to read specific pages), "
             "search_library (topic search), list_vault_notes, get_vault_note and "
             "edit_vault_note (encrypted vault notes; require an unlocked vault), "
@@ -866,6 +874,41 @@ def tool_specs(cfg: dict | None = None) -> list[dict]:
                     "questions and report how old the data is."
                 ),
                 "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_sitrep",
+                "description": (
+                    "Generate the current field SITREP from local data: stance, readiness, "
+                    "threat, nearby events, recommended actions, tasks, incidents and "
+                    "supplies. Read-only. Use for situation-report or brief requests."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "max_chars": {"type": "integer", "description": "Max brief characters (default 6000)."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "save_sitrep",
+                "description": (
+                    "Save a server-generated SITREP snapshot to the mission log. Requires "
+                    "operator approval; undo is available. Never write the report yourself."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note": {"type": "string", "description": "Optional operator note appended to the entry."},
+                    },
+                    "required": [],
+                },
             },
         },
         {

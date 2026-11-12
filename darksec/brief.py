@@ -1,6 +1,7 @@
 """Plain-text SITREP brief generation."""
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -186,3 +187,32 @@ def build_brief(db: Database, vault: Optional[dict] = None) -> str:
               "   current maps, or qualified medical/legal advice. Verify before acting.",
               "", "END OF REPORT // DARKSEC NIGHTWATCH"]
     return "\n".join(lines)
+
+
+def to_markdown(text: str) -> str:
+    """Render the plain-text brief as a portable Markdown report."""
+    out: list[str] = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            out.append("")
+            continue
+        if set(stripped) == {"="}:
+            continue
+        if line.startswith("DARKSEC // FIELD SITUATION REPORT"):
+            out.append(f"# {stripped}")
+        elif line.startswith("UNCLASSIFIED"):
+            out.append(f"*{stripped}*")
+        elif line.startswith("END OF REPORT"):
+            out.extend(["---", "", f"*{stripped}*"])
+        elif stripped == "NOTES" or re.match(r"^\d+\.\s+\S", stripped):
+            if out and out[-1]:
+                out.append("")
+            out.append(f"## {stripped}")
+        elif line.startswith("   - "):
+            out.append(f"- {stripped[2:]}" if stripped.startswith("- ") else f"- {stripped.lstrip('- ')}")
+        elif line.startswith("     ") and stripped:
+            out.append(f"  {stripped}")
+        else:
+            out.append(stripped)
+    return "\n".join(out).strip() + "\n"

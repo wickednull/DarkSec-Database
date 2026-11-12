@@ -44,7 +44,7 @@ from starlette.concurrency import run_in_threadpool
 
 from . import __version__, assistant, astro, autosync, config, feeds, geo, geocoding, intel, library, phonegps, sdr, sitrep, tilecache
 from .config import APP_NAME
-from .brief import build_brief
+from .brief import build_brief, to_markdown
 from .calc_catalog import CALC_CATALOG, CALC_FUNCS
 from .db import Database, utcnow
 from .security import Vault
@@ -603,6 +603,47 @@ def ai_log_save(d: Database, title: str, body: str, category: str = "GENERAL") -
     d.audit("ASSISTANT_LOG", f"id={new_id} chars={len(content)} cat={cat}")
     return {"ok": True, "id": new_id, "title": heading,
             "limit_note": f"Saved to mission log (AI category). Max {AI_LOG_MAX_PER_HOUR}/hour, {AI_LOG_TOTAL_CAP} total."}
+
+
+def ai_sitrep(d: Database, v=None, max_chars: int = 6000) -> dict:
+    """Generate the current field SITREP from local data."""
+    try:
+        cap = max(1000, min(int(max_chars or 6000), 12000))
+    except (TypeError, ValueError):
+        cap = 6000
+    vault_status = v.status() if v is not None else None
+    try:
+        text = build_brief(d, vault=vault_status)
+    except Exception as exc:
+        return {"ok": False, "error": f"SITREP generation failed: {type(exc).__name__}: {str(exc)[:200]}"}
+    d.audit("ASSISTANT_SITREP", f"chars={len(text)}")
+    return {"ok": True, "generated": utcnow(), "brief": text[:cap],
+            "truncated": len(text) > cap,
+            "note": ("Generated locally from cached feeds and records. Estimates and online "
+                     "feeds are not substitutes for instruments, official warnings or "
+                     "qualified advice; verify before acting.")}
+
+
+def ai_sitrep_save(d: Database, v=None, note: str = "") -> dict:
+    """Save a server-generated SITREP snapshot to the mission log."""
+    made = ai_sitrep(d, v, max_chars=12000)
+    if not made.get("ok"):
+        return made
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+    title = f"SITREP {stamp}"
+    body = made["brief"]
+    extra = str(note or "").strip()
+    if extra:
+        body += f"\n\nOPERATOR NOTE: {extra[:1000]}"
+    try:
+        saved = ai_log_save(d, title, body, "SITREP")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    undo = _register_undo({"kind": "log_remove", "id": int(saved["id"])},
+                          f"Saved SITREP: {title}")
+    return {"ok": True, "id": saved["id"], "title": title,
+            "chars": len(body), "undo": undo,
+            "note": saved.get("limit_note")}
 
 
 def ai_note_save(d: Database, v, title: str, body: str, tags: str = "",
@@ -2230,6 +2271,9 @@ def _confirm_preview(d: Database, name: str, args: dict) -> tuple[str, str]:
         if name == "reset_checklist":
             kit = _find_checklist_kit(args.get("kit_id"), args.get("kit_id"))
             return ("Reset checklist", str(kit.get("name") if kit else args.get("kit_id") or ""))
+        if name == "save_sitrep":
+            return ("Save SITREP to mission log",
+                    "Snapshot generated now from local data; entry is tagged SITREP and undo is available.")
         if name == "write_system_file":
             raw = str(args.get("path") or "")
             try:
@@ -2683,8 +2727,26 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         }
 
     @app.get("/api/brief", response_class=PlainTextResponse)
-    def brief(request: Request):
-        return PlainTextResponse(build_brief(db(request), vault=vault(request).status()), media_type="text/plain; charset=utf-8")
+    def brief(request: Request, format: str = "txt", download: bool = False):
+        text = build_brief(db(request), vault=vault(request).status())
+        media = "text/plain; charset=utf-8"
+        suffix = "txt"
+        if str(format or "").lower() in ("md", "markdown"):
+            text = to_markdown(text)
+            media = "text/markdown; charset=utf-8"
+            suffix = "md"
+        headers = {}
+        if download:
+            headers["Content-Disposition"] = (
+                f'attachment; filename="darksec-sitrep-{datetime.now(timezone.utc).date().isoformat()}.{suffix}"'
+            )
+        return PlainTextResponse(text, media_type=media, headers=headers)
+
+    @app.post("/api/brief/save")
+    def brief_save(request: Request, payload: dict = Body(default={})):
+        """Save a server-generated SITREP snapshot to the mission log."""
+        payload = payload if isinstance(payload, dict) else {}
+        return ai_sitrep_save(db(request), vault(request), payload.get("note") or "")
 
     @app.get("/api/system")
     def system(request: Request):
@@ -2715,10 +2777,17 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     return {"ok": False, "error": "Blocked: the operator asked to read/retrieve a vault note, not save one."}
                 if name in ("create_task", "complete_task", "adjust_inventory",
                             "create_incident", "resolve_incident", "update_checklist",
-                            "log_water_test") and not assistant.record_write_intent(prompt):
+                            "log_water_test", "update_task", "update_incident",
+                            "update_mission_log", "delete_mission_log",
+                            "delete_inventory", "reset_checklist",
+                            "save_sitrep") and not assistant.record_write_intent(prompt):
                     return {"ok": False, "error": "Blocked: the operator did not explicitly ask to modify records."}
                 if name == "get_live_status":
                     return assistant_live_status_compact(d, v)
+                if name == "get_sitrep":
+                    return ai_sitrep(d, v, args.get("max_chars") or 6000)
+                if name == "save_sitrep":
+                    return ai_sitrep_save(d, v, args.get("note") or "")
                 if name == "get_library_document":
                     title = str(args.get("title") or args.get("name") or "").strip()
                     if not title:
@@ -3150,7 +3219,43 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         data = entry.get("payload") or {}
         kind = str(data.get("kind") or "")
         d = db(request)
-        if kind == "inventory_restore":
+        if kind == "task_restore":
+            previous = data.get("prev") or {}
+            fields = {key: previous.get(key) for key in
+                      ("title", "detail", "priority", "due", "category", "recurrence", "done")}
+            sets = ", ".join(f"{key}=?" for key in fields)
+            d.execute(f"UPDATE tasks SET {sets} WHERE id=?",
+                      (*fields.values(), int(data.get("id"))))
+        elif kind == "incident_restore_full":
+            previous = data.get("prev") or {}
+            fields = {key: previous.get(key) for key in
+                      ("title", "detail", "severity", "category", "lat", "lon", "resolved")}
+            sets = ", ".join(f"{key}=?" for key in fields)
+            d.execute(f"UPDATE incidents SET {sets} WHERE id=?",
+                      (*fields.values(), int(data.get("id"))))
+        elif kind == "log_restore":
+            previous = data.get("prev") or {}
+            fields = {key: previous.get(key) for key in ("title", "body", "category", "tags")}
+            sets = ", ".join(f"{key}=?" for key in fields)
+            d.execute(f"UPDATE log_entries SET {sets} WHERE id=?",
+                      (*fields.values(), int(data.get("id"))))
+        elif kind == "log_remove":
+            d.execute("DELETE FROM log_entries WHERE id=?", (int(data.get("id")),))
+        elif kind in ("log_restore_row", "inventory_restore_row"):
+            row = data.get("row") or {}
+            table = "log_entries" if kind == "log_restore_row" else "inventory"
+            if row:
+                columns = list(row.keys())
+                d.execute(f"INSERT OR REPLACE INTO {table}({', '.join(columns)}) "
+                          f"VALUES({', '.join('?' for _ in columns)})",
+                          tuple(row.get(column) for column in columns))
+        elif kind == "checklist_reset_restore":
+            for entry in data.get("rows") or []:
+                d.execute("INSERT INTO checklist_state(kit_id,item_id,checked,updated) VALUES(?,?,?,?) "
+                          "ON CONFLICT(kit_id,item_id) DO UPDATE SET checked=excluded.checked, updated=excluded.updated",
+                          (entry.get("kit_id"), entry.get("item_id"),
+                           int(entry.get("checked") or 0), entry.get("updated") or utcnow()))
+        elif kind == "inventory_restore":
             previous = data.get("prev") or {}
             fields = {k: previous.get(k) for k in
                       ("qty", "unit", "category", "min_qty", "location", "notes", "expires")}

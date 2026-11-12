@@ -21,7 +21,8 @@ def tmpdb(tmp_path):
 def test_tool_specs_shape():
     names = [t["function"]["name"] for t in assistant.tool_specs()]
     assert set(names) == {
-        "get_live_status", "get_library_document", "search_library",
+        "get_live_status", "get_sitrep", "save_sitrep",
+        "get_library_document", "search_library",
         "list_vault_notes", "get_vault_note", "edit_vault_note",
         "search_mission_log", "list_tasks", "create_task", "complete_task", "update_task",
         "query_inventory", "adjust_inventory", "delete_inventory",
@@ -647,3 +648,22 @@ def test_library_tool_declares_page_citation_parameters():
     props = spec["function"]["parameters"]["properties"]
     assert {"query", "page", "span", "max_chars"} <= set(props)
     assert "page" in spec["function"]["description"].lower()
+
+
+def test_sitrep_generation_and_save_tools(tmpdb):
+    out = server.ai_sitrep(tmpdb)
+    assert out["ok"] is True
+    assert "FIELD SITUATION REPORT" in out["brief"]
+    assert "STANCE:" in out["brief"]
+
+    saved = server.ai_sitrep_save(tmpdb, note="shift change")
+    assert saved["ok"] is True and saved["id"]
+    row = tmpdb.one("SELECT * FROM log_entries WHERE id=?", (saved["id"],))
+    assert "OPERATOR NOTE: shift change" in row["body"]
+    assert "sitrep" in row["tags"]
+    assert saved["undo"]["token"]
+
+    cfg = {"tools": True, "tools_auto": True}
+    names = {s["function"]["name"] for s in assistant._tools_for_turn(
+        cfg, "give me a sitrep and save it to the log", lambda name, args: {})}
+    assert {"get_sitrep", "save_sitrep"} <= names

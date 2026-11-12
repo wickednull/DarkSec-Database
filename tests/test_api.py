@@ -870,3 +870,60 @@ def test_medical_record_tools_setting_roundtrip(client):
     assert r.status_code == 200
     assert client.get("/api/settings").json()["assistant_medical_tools"] is True
     client.put("/api/settings", json={"assistant_medical_tools": False})
+
+
+def test_assistant_undo_record_edit_kinds(client):
+    from darksec import config
+    from darksec.db import Database
+    import darksec.server as srv
+
+    db = Database(config.DB_PATH)
+    task_id = db.insert("tasks", {
+        "title": _unique("undo task"), "detail": "after", "priority": "ROUTINE",
+        "due": None, "category": "GENERAL", "recurrence": "", "done": 1,
+        "ts": "2026-01-01T00:00:00+00:00",
+    })
+    token = srv._register_undo({
+        "kind": "task_restore", "id": task_id,
+        "prev": {"title": "before", "detail": "before", "priority": "PRIORITY",
+                 "due": None, "category": "GENERAL", "recurrence": "", "done": 0},
+    }, "task undo")
+    r = client.post("/api/assistant/undo", json={"token": token["token"]})
+    assert r.status_code == 200
+    row = db.one("SELECT * FROM tasks WHERE id=?", (task_id,))
+    assert row["title"] == "before" and row["done"] == 0
+    db.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+
+    log_id = db.insert("log_entries", {
+        "ts": "2026-01-01T00:00:00+00:00", "category": "AI",
+        "title": _unique("undo log"), "body": "x", "tags": "sitrep",
+    })
+    token = srv._register_undo({"kind": "log_remove", "id": log_id}, "log remove")
+    r = client.post("/api/assistant/undo", json={"token": token["token"]})
+    assert r.status_code == 200
+    assert db.one("SELECT count(*) c FROM log_entries WHERE id=?", (log_id,))["c"] == 0
+
+
+def test_brief_markdown_and_save(client):
+    r = client.get("/api/brief")
+    assert r.status_code == 200 and "DARKSEC" in r.text
+    r = client.get("/api/brief?format=md")
+    assert r.status_code == 200
+    assert r.text.lstrip().startswith("# DARKSEC")
+    assert "## 1." in r.text
+    r = client.get("/api/brief?download=true")
+    assert "attachment;" in r.headers.get("content-disposition", "")
+
+    before = client.get("/api/brief").text
+    saved = client.post("/api/brief/save", json={"note": "test snapshot"})
+    assert saved.status_code == 200
+    body = saved.json()
+    assert body["ok"] is True and body["id"]
+    assert "SITREP" in body["title"]
+    assert body.get("undo", {}).get("token")
+
+    from darksec import config
+    from darksec.db import Database
+    row = Database(config.DB_PATH).one("SELECT * FROM log_entries WHERE id=?", (body["id"],))
+    assert "OPERATOR NOTE: test snapshot" in row["body"]
+    assert "DARKSEC" in before and "FIELD SITUATION REPORT" in row["body"]
