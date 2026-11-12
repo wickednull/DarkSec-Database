@@ -845,8 +845,5 @@ export async function render(root) {
   // Restore sending UI state if a request is still in flight.
   if (state.sending) { try { setSending(true); } catch {} }
 
-  // override createConversation to rebuild picker (already defined below? ensure exists)
-  // (createConversation2 assigned above)
-
   return () => { try { window.removeEventListener("darksec:assistant-update", onUpdate); } catch {} };
 }

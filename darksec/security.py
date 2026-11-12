@@ -162,10 +162,13 @@ class Vault:
             "patients", "vitals", "medication_log", "weather_log", "water_log", "power_log", "rad_log",
             "waypoints", "tracks", "radio_log", "notes", "incidents", "inventory",
             "caches", "comms_plans", "opords", "trip_plans", "sdr_jobs", "sdr_recordings",
-            "checklist_state",
+            "checklist_state", "assistant_messages", "assistant_conversations",
         ]
         for table in tables:
             self.db.execute(f"DELETE FROM {table}")
+        # Chat history may have been encrypted with the vault we are about to
+        # remove; return the setting to its safe default.
+        self.db.execute("DELETE FROM settings WHERE key='assistant_history_encrypted'")
         # Feed definitions are part of the baseline kit, not operator data.
         # Reset their state and cached intel instead of deleting them, so the
         # console stays usable immediately after a purge.

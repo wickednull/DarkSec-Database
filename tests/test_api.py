@@ -982,4 +982,23 @@ def test_encrypted_chat_history_roundtrip(client):
     assert raw["encrypted"] == 0 and raw["title"] == "renamed secret"
     raw_msg = db.one("SELECT content, encrypted FROM assistant_messages WHERE id=?", (mid,))
     assert raw_msg["encrypted"] == 0 and raw_msg["content"] == "sensitive route"
+
     client.post("/api/vault/lock")
+    denied = client.put("/api/settings", json={"assistant_history_encrypted": True})
+    assert denied.status_code == 400
+    assert "Unlock the vault" in denied.json()["detail"]
+    assert client.get("/api/settings").json()["assistant_history_encrypted"] is False
+
+
+def test_purge_removes_chat_history(client):
+    from darksec import config
+    from darksec.db import Database
+
+    conv = client.post("/api/assistant/conversations", json={"title": "purge me"}).json()
+    assert conv.get("id")
+    r = client.post("/api/security/purge", json={"mode": "operator", "confirm": "PURGE"})
+    assert r.status_code == 200
+    db = Database(config.DB_PATH)
+    assert db.one("SELECT count(*) c FROM assistant_conversations")["c"] == 0
+    assert db.one("SELECT count(*) c FROM assistant_messages")["c"] == 0
+    assert db.get_setting("assistant_history_encrypted", False) is False
