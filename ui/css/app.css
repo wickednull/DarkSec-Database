@@ -312,7 +312,7 @@ body.no-scan .fx-scan { display: none; }
   .app.nav-collapsed .build { display: none; }
   .app.nav-collapsed .nav a { justify-content: center; padding: 10px 6px; }
   .app.nav-collapsed .nav a .ic { width: 19px; height: 19px; }
-  .app.nav-collapsed .nav a .nav-badge { display: none; }
+  .app.nav-collapsed .nav a .nav-badge { display: none !important; }
   .app.nav-collapsed .side-section { margin-bottom: 8px; }
   .app.nav-collapsed .side-foot { padding: 8px 0 0; }
   .app.nav-collapsed .opsec-row { justify-content: center; }
@@ -978,7 +978,7 @@ body.no-scan .fx-scan { display: none; }
   .side-label, .nav a span.nav-text, .side-foot .opsec-row span, .build { display: none; }
   .nav a { justify-content: center; padding: 10px 6px; }
   .nav a .ic { width: 19px; height: 19px; }
-  .nav a .nav-badge { display: none; }
+  .nav a .nav-badge { display: none !important; }
   .side-section { margin-bottom: 8px; }
   .side-foot { padding: 8px 0 0; }
   .opsec-row { justify-content: center; }
@@ -1003,7 +1003,7 @@ body.no-scan .fx-scan { display: none; }
   .sidebar.open { transform: none; }
   .sidebar .nav a span.nav-text, .sidebar .side-label, .sidebar .side-foot .opsec-row span, .sidebar .build { display: initial; }
   .sidebar .nav a { justify-content: flex-start; padding: 8px 9px; }
-  .sidebar .nav a .nav-badge { display: inline-block; }
+  .sidebar .nav a .nav-badge { display: inline-block !important; }
   .sidebar-scrim { display: block; position: fixed; inset: var(--top-h) 0 var(--bot-h); z-index: 24; background: rgba(0,0,0,.55); opacity: 0; visibility: hidden; transition: .2s; }
   .sidebar-scrim.open { opacity: 1; visibility: visible; }
   .main { grid-column: 1; padding: 14px 12px 34px; }
@@ -1145,6 +1145,33 @@ body.no-scan .fx-scan { display: none; }
 }
 @media (max-width: 860px) {
   .assistant-layout { grid-template-columns: 1fr; height: auto; min-height: 0; }
-  .assistant-main { height: min(76dvh, 760px); }
+  .assistant-main { height: min(64dvh, 680px); }
   .assistant-side { max-height: none; overflow: visible; }
+}
+
+/* On desktop, fill the available main area instead of using a fixed height.
+   This keeps the composer on screen when the font scale shrinks the viewport
+   and prevents the chat from being clipped below the fold. */
+@media (min-width: 861px) {
+  .main:has(> .view > .assistant-layout) > .view {
+    height: 100%;
+    min-height: 420px;
+    display: flex;
+    flex-direction: column;
+  }
+  .main:has(> .view > .assistant-layout) .assistant-layout {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+  }
+}
+
+/* Short windows (including high font scales) need the chat area more than
+   a long page description. Keep the title and actions, drop the prose. */
+@media (max-height: 800px) {
+  .main:has(> .view > .assistant-layout) .view-desc { display: none; }
+  .main:has(> .view > .assistant-layout) .view-head { align-items: center; margin-bottom: 10px; }
+}
+@media (max-height: 720px) {
+  .main:has(> .view > .assistant-layout) .assistant-composer textarea { min-height: 56px; }
 }
