@@ -77,7 +77,7 @@ export async function render(root, params = {}) {
     actions: [
       btn("REFRESH INTEL", { icon: "refresh", tone: "primary", onClick: refreshIntel }),
       btn("OPEN MAP", { icon: "map", onClick: () => { location.hash = "#/map"; } }),
-      btn("FEEDS", { icon: "globe", onClick: () => { location.hash = "#/weather"; } }),
+      btn("FEED HEALTH", { icon: "globe", tone: "ghost", onClick: () => { location.hash = "#/settings"; } }),
     ],
   }));
 
@@ -249,19 +249,53 @@ export async function render(root, params = {}) {
   }
 
   function renderConflict(host) {
-    host.appendChild(sectionTitle("Conflict & War Intelligence", "GDELT live media reports, UCDP verified events, and filtered wire headlines"));
-    const grid = h("div", { class: "panel-grid grid-1 mt-10" });
+    host.appendChild(sectionTitle("Conflict & War Intelligence", "GDELT media reports, UCDP verified events, defense reporting and humanitarian analysis"));
+    const grid = h("div", { class: "panel-grid grid-2 mt-10" });
     host.appendChild(grid);
+
     grid.appendChild(panel({
       title: "Conflict Reporting",
       sub: `${warSummary.live ?? conflictLive.length} live media · ${warSummary.verified ?? conflictVerified.length} verified · ${warSummary.headlines ?? war.length} headlines · newest ${warSummary.newest_time ? fmt.ago(warSummary.newest_time) : "unavailable"}`,
       icon: "alert",
+      cls: "span-2",
       body: buildWar(war),
     }));
+
+    if (conflictNews.length > 0) {
+      grid.appendChild(panel({
+        title: "Conflict News (NewsAPI)",
+        sub: `${conflictNews.length} real-time conflict stories`,
+        icon: "alert",
+        body: buildNews(conflictNews),
+      }));
+    }
+
+    const warFeedIds = ["bbc_middle_east", "twz_defense", "breaking_defense", "defense_one", "long_war_journal", "war_on_the_rocks"];
+    const warFeeds = warFeedIds.map((id) => feedById[id]).filter(Boolean);
+    if (warFeeds.length) {
+      grid.appendChild(panel({
+        title: "Defense & War Reporting",
+        sub: "Specialized conflict and defense sources (cached)",
+        icon: "alert",
+        cls: "span-2",
+        body: h("div", { class: "grid grid-2 gap-10" }, ...warFeeds.map((f) => newsCard(f, 4))),
+      }));
+    }
+
+    const analysisFeeds = ["reliefweb", "crisisgroup"].map((id) => feedById[id]).filter(Boolean);
+    if (analysisFeeds.length) {
+      grid.appendChild(panel({
+        title: "Humanitarian & Conflict Analysis",
+        sub: "ReliefWeb updates and International Crisis Group analysis",
+        icon: "globe",
+        cls: "span-2",
+        body: h("div", { class: "grid grid-2 gap-10" }, ...analysisFeeds.map((f) => newsCard(f, 4))),
+      }));
+    }
   }
 
   function renderCyber(host) {
-    host.appendChild(sectionTitle("Cybersecurity & News", "The Hacker News RSS, world/news feeds, and NewsAPI stories"));
+    host.appendChild(sectionTitle("Cybersecurity & World News", "The Hacker News RSS and general world-news wires"));
     const grid = h("div", { class: "panel-grid grid-2 mt-10" });
     host.appendChild(grid);
 
@@ -275,44 +309,17 @@ export async function render(root, params = {}) {
       body: thn ? buildFeedItemList(thn, 12, { showSummary: true }) : emptyState("The Hacker News feed is not cached yet", "Refresh intel while online to ingest https://feeds.feedburner.com/TheHackersNews.", "book"),
     }));
 
-    if (conflictNews.length > 0) {
+    const worldFeedIds = ["bbc_world", "guardian_world", "aljazeera_world", "france24_world", "dw_news"];
+    const worldFeeds = worldFeedIds.map((id) => feedById[id]).filter(Boolean);
+    if (worldFeeds.length) {
       grid.appendChild(panel({
-        title: "Conflict News (NewsAPI)",
-        sub: `${conflictNews.length} real-time conflict stories`,
-        icon: "alert",
-        body: buildNews(conflictNews),
-      }));
-    }
-    if (disasterNews.length > 0) {
-      grid.appendChild(panel({
-        title: "Disaster News (NewsAPI)",
-        sub: `${disasterNews.length} real-time disaster stories`,
-        icon: "alert",
-        body: buildNews(disasterNews),
-      }));
-    }
-
-    const warFeedIds = ["bbc_middle_east", "twz_defense", "breaking_defense", "defense_one", "long_war_journal", "war_on_the_rocks"];
-    const warFeeds = warFeedIds.map((id) => feedById[id]).filter(Boolean);
-    if (warFeeds.length) {
-      grid.appendChild(panel({
-        title: "Defense & War Reporting Feeds",
-        sub: "Specialized conflict/defense sources (cached). Headlines are filtered for conflict relevance in the Conflict tab.",
-        icon: "alert",
+        title: "World News Feeds",
+        sub: "General international reporting · headlines are age-labeled",
+        icon: "globe",
         cls: "span-2",
-        body: h("div", { class: "grid grid-2 gap-10" }, ...warFeeds.map((f) => newsCard(f, 4))),
+        body: h("div", { class: "grid grid-2 gap-10" }, ...worldFeeds.map((f) => newsCard(f, 4))),
       }));
     }
-
-    const newsFeedIds = ["thehackernews", "bbc_world", "guardian_world", "aljazeera_world", "france24_world", "dw_news", "reliefweb", "crisisgroup", "gdacs", "rsoe_edis", "nws_alerts", "usgs_quakes"];
-    const newsFeeds = newsFeedIds.map((id) => feedById[id]).filter(Boolean);
-    grid.appendChild(panel({
-      title: "News & Public Safety Feeds",
-      sub: "Cached official and wire sources, grouped separately from tactical overlays",
-      icon: "globe",
-      cls: "span-2",
-      body: h("div", { class: "grid grid-2 gap-10" }, ...newsFeeds.map((f) => newsCard(f, 3))),
-    }));
   }
 
   function renderEvents(host) {
@@ -320,12 +327,14 @@ export async function render(root, params = {}) {
     const grid = h("div", { class: "panel-grid grid-2 mt-10" });
     host.appendChild(grid);
 
+    const hazardEvents = (events || []).filter((ev) =>
+      ev.kind !== "conflict" && ev.feed_id !== "gdelt_conflict" && ev.feed_id !== "ucdp_candidate");
     grid.appendChild(panel({
-      title: "Global Live Events",
-      sub: `${events.length} cached event(s) with coordinates`,
+      title: "Global Hazard Events",
+      sub: `${hazardEvents.length} cached hazard event(s) with coordinates · conflict events are in the Conflict tab`,
       icon: "globe",
       cls: "span-2",
-      body: buildEvents(events),
+      body: buildEvents(hazardEvents),
     }));
 
     const rsoe = feedById.rsoe_edis;
@@ -350,6 +359,38 @@ export async function render(root, params = {}) {
         icon: "warning",
         cls: "span-2",
         body: h("div", { class: "grid grid-2 gap-10" }, ...officialHazards.map((f) => newsCard(f, 4))),
+      }));
+    }
+
+    if (disasterNews.length > 0) {
+      grid.appendChild(panel({
+        title: "Disaster News (NewsAPI)",
+        sub: `${disasterNews.length} real-time disaster stories`,
+        icon: "alert",
+        cls: "span-2",
+        body: buildNews(disasterNews),
+      }));
+    }
+
+    const cbrnFeeds = [feedById.smithsonian_volcano, feedById.safecast].filter(Boolean);
+    if (cbrnFeeds.length) {
+      grid.appendChild(panel({
+        title: "Volcano & Radiation",
+        sub: "Smithsonian volcanic activity and Safecast radiation reports",
+        icon: "alert",
+        cls: "span-2",
+        body: h("div", { class: "grid grid-2 gap-10" }, ...cbrnFeeds.map((f) => newsCard(f, 4))),
+      }));
+    }
+
+    const healthFeeds = [feedById.who_don].filter(Boolean);
+    if (healthFeeds.length) {
+      grid.appendChild(panel({
+        title: "Health & Outbreaks",
+        sub: "WHO news and outbreak reporting",
+        icon: "biohazard",
+        cls: "span-2",
+        body: h("div", { class: "grid grid-2 gap-10" }, ...healthFeeds.map((f) => newsCard(f, 4))),
       }));
     }
 
