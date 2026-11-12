@@ -1757,6 +1757,157 @@ def ai_waypoint_create(d: Database, name: str, lat, lon, ele=None, type: str = "
                                     f"Created waypoint: {heading}")}
 
 
+def _find_patient(d: Database, patient_id=None, callsign: str = "", name: str = ""):
+    if patient_id not in (None, ""):
+        try:
+            row = d.one("SELECT * FROM patients WHERE id=?", (int(patient_id),))
+        except (TypeError, ValueError):
+            row = None
+        if row:
+            return row, None
+    q = str(callsign or name or "").strip()
+    if not q:
+        return None, {"ok": False, "error": "Provide a patient id, callsign or name."}
+    rows = d.query(
+        "SELECT * FROM patients WHERE callsign LIKE ? OR name LIKE ? "
+        "ORDER BY updated DESC, created DESC LIMIT 12",
+        (f"%{q}%", f"%{q}%"),
+    )
+    if not rows:
+        return None, {"ok": False, "error": f"No patient matched {q!r}."}
+    if len(rows) > 1:
+        exact = [r for r in rows if str(r["callsign"]).lower() == q.lower()]
+        if len(exact) == 1:
+            return exact[0], None
+        return None, {"ok": False, "ambiguous": True,
+                      "error": "Multiple patients matched. Specify the callsign or id.",
+                      "matches": [{"id": r["id"], "callsign": r["callsign"],
+                                   "name": r["name"], "triage": r["triage"],
+                                   "status": r["status"]} for r in rows[:8]]}
+    return rows[0], None
+
+
+def ai_patients_list(d: Database, query: str = "", triage: str = "",
+                     status: str = "", limit: int = 20) -> dict:
+    if not d.get_setting("assistant_medical_tools", False):
+        return {"ok": False, "error": "Medical record tools are disabled in Settings."}
+    try:
+        limit = max(1, min(int(limit or 20), 50))
+    except (TypeError, ValueError):
+        limit = 20
+    clauses, params = [], []
+    q = str(query or "").strip()
+    if q:
+        like = f"%{q}%"
+        clauses.append("(callsign LIKE ? OR name LIKE ? OR allergies LIKE ? OR meds LIKE ? OR note LIKE ?)")
+        params.extend([like] * 5)
+    if str(triage or "").strip():
+        clauses.append("triage = ?"); params.append(str(triage).strip().upper())
+    if str(status or "").strip():
+        clauses.append("status = ?"); params.append(str(status).strip().upper())
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = d.query(f"SELECT * FROM patients{where} ORDER BY updated DESC, created DESC LIMIT ?",
+                   (*params, limit))
+    items = [{"id": r["id"], "callsign": r["callsign"], "name": r["name"],
+              "age": r["age"], "sex": r["sex"], "triage": r["triage"],
+              "status": r["status"], "updated": r["updated"]} for r in rows]
+    return {"ok": True, "count": len(items), "patients": items,
+            "note": "Read-only medical records. Not a diagnosis or prescription."}
+
+
+def ai_patient_get(d: Database, patient_id=None, callsign: str = "", name: str = "",
+                   include_vitals: bool = True, include_meds: bool = True,
+                   limit: int = 6) -> dict:
+    if not d.get_setting("assistant_medical_tools", False):
+        return {"ok": False, "error": "Medical record tools are disabled in Settings."}
+    row, error = _find_patient(d, patient_id, callsign, name)
+    if error:
+        return error
+    try:
+        limit = max(1, min(int(limit or 6), 20))
+    except (TypeError, ValueError):
+        limit = 6
+    patient = _ai_row(row)
+    for key, cap in (("history", 1000), ("note", 800), ("allergies", 400), ("meds", 600)):
+        patient[key] = str(patient.get(key) or "")[:cap]
+    out = {"ok": True, "patient": patient,
+           "note": "Read-only record. Do not diagnose or prescribe; recommend qualified care."}
+    if include_vitals:
+        out["vitals"] = [
+            {"id": r["id"], "ts": r["ts"], "hr": r["hr"], "rr": r["rr"],
+             "sys": r["sys"], "dia": r["dia"], "spo2": r["spo2"],
+             "temp_c": r["temp_c"], "glucose": r["glucose"], "pain": r["pain"],
+             "avpu": r["avpu"], "note": str(r["note"] or "")[:200]}
+            for r in d.query(
+                "SELECT * FROM vitals WHERE patient_id=? ORDER BY ts DESC, id DESC LIMIT ?",
+                (int(row["id"]), limit))
+        ]
+    if include_meds:
+        out["medications"] = [
+            {"id": r["id"], "ts": r["ts"], "medication": r["medication"],
+             "dose": r["dose"], "route": r["route"],
+             "administered_by": r["administered_by"], "indication": r["indication"],
+             "reaction": r["reaction"], "note": str(r["note"] or "")[:200]}
+            for r in d.query(
+                "SELECT * FROM medication_log WHERE patient_id=? ORDER BY ts DESC, id DESC LIMIT ?",
+                (int(row["id"]), limit))
+        ]
+    d.audit("ASSISTANT_MEDICAL_READ", f"patient={row['id']}")
+    return out
+
+
+def ai_vitals_list(d: Database, patient_id=None, callsign: str = "", name: str = "",
+                   limit: int = 15) -> dict:
+    if not d.get_setting("assistant_medical_tools", False):
+        return {"ok": False, "error": "Medical record tools are disabled in Settings."}
+    row, error = _find_patient(d, patient_id, callsign, name)
+    if error:
+        return error
+    try:
+        limit = max(1, min(int(limit or 15), 40))
+    except (TypeError, ValueError):
+        limit = 15
+    rows = d.query("SELECT * FROM vitals WHERE patient_id=? ORDER BY ts DESC, id DESC LIMIT ?",
+                   (int(row["id"]), limit))
+    d.audit("ASSISTANT_MEDICAL_READ", f"patient={row['id']} vitals")
+    vitals = [
+        {"id": r["id"], "ts": r["ts"], "hr": r["hr"], "rr": r["rr"],
+         "sys": r["sys"], "dia": r["dia"], "spo2": r["spo2"],
+         "temp_c": r["temp_c"], "glucose": r["glucose"], "pain": r["pain"],
+         "avpu": r["avpu"], "note": str(r["note"] or "")[:200]}
+        for r in rows
+    ]
+    return {"ok": True, "patient": {"id": row["id"], "callsign": row["callsign"]},
+            "count": len(vitals), "vitals": vitals,
+            "note": "Read-only observations. Not a diagnosis."}
+
+
+def ai_medications_list(d: Database, patient_id=None, callsign: str = "", name: str = "",
+                        limit: int = 10) -> dict:
+    if not d.get_setting("assistant_medical_tools", False):
+        return {"ok": False, "error": "Medical record tools are disabled in Settings."}
+    row, error = _find_patient(d, patient_id, callsign, name)
+    if error:
+        return error
+    try:
+        limit = max(1, min(int(limit or 10), 30))
+    except (TypeError, ValueError):
+        limit = 10
+    rows = d.query("SELECT * FROM medication_log WHERE patient_id=? ORDER BY ts DESC, id DESC LIMIT ?",
+                   (int(row["id"]), limit))
+    d.audit("ASSISTANT_MEDICAL_READ", f"patient={row['id']} medications")
+    medications = [
+        {"id": r["id"], "ts": r["ts"], "medication": r["medication"],
+         "dose": r["dose"], "route": r["route"], "administered_by": r["administered_by"],
+         "indication": r["indication"], "reaction": r["reaction"],
+         "note": str(r["note"] or "")[:200]}
+        for r in rows
+    ]
+    return {"ok": True, "patient": {"id": row["id"], "callsign": row["callsign"]},
+            "count": len(medications), "medications": medications,
+            "note": "Read-only medication history. Do not prescribe or change doses."}
+
+
 def vault_fast_events(d: Database, v, prompt: str):
     """Deterministic stream for simple vault read/list requests.
 
@@ -2443,6 +2594,20 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                                               args.get("lon"), args.get("ele"),
                                               args.get("type") or "WAYPOINT",
                                               args.get("note") or "")
+                if name == "list_patients":
+                    return ai_patients_list(d, args.get("query") or "", args.get("triage") or "",
+                                            args.get("status") or "", args.get("limit") or 20)
+                if name == "get_patient":
+                    return ai_patient_get(d, args.get("patient_id"), args.get("callsign") or "",
+                                          args.get("name") or "", bool(args.get("include_vitals", True)),
+                                          bool(args.get("include_meds", True)),
+                                          args.get("limit") or 10)
+                if name == "list_vitals":
+                    return ai_vitals_list(d, args.get("patient_id"), args.get("callsign") or "",
+                                          args.get("name") or "", args.get("limit") or 20)
+                if name == "list_medications":
+                    return ai_medications_list(d, args.get("patient_id"), args.get("callsign") or "",
+                                               args.get("name") or "", args.get("limit") or 20)
                 if name == "save_log_entry":
                     return ai_log_save(d, args.get("title"), args.get("body"), args.get("category") or "GENERAL")
                 if name == "save_note":

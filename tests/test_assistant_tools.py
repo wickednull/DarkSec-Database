@@ -511,3 +511,54 @@ def test_calculators_and_navigation_tools(tmpdb):
     assert created["ok"] and created.get("undo", {}).get("token")
     waypoints = server.ai_waypoints_list(tmpdb, query="ridge")
     assert waypoints["ok"] and any(w["name"] == "Ridge Cache" for w in waypoints["waypoints"])
+
+
+def test_medical_read_tools(tmpdb):
+    tmpdb.set_setting("assistant_medical_tools", True)
+    pid = tmpdb.insert("patients", {
+        "callsign": "RAVEN", "name": "Test Patient", "age": 40, "sex": "F",
+        "weight_kg": 70, "blood_type": "O+", "allergies": "penicillin",
+        "meds": "none", "history": "hypertension", "triage": "PRIORITY",
+        "status": "OPEN", "note": "stable", "created": "2026-01-01T00:00:00+00:00",
+        "updated": "2026-01-01T00:00:00+00:00",
+    })
+    tmpdb.insert("vitals", {
+        "ts": "2026-01-01T01:00:00+00:00", "patient_id": pid, "hr": 88, "rr": 16,
+        "sys": 120, "dia": 80, "spo2": 98, "temp_c": 37.0, "glucose": 100,
+        "pain": 2, "avpu": "A", "note": "ok",
+    })
+    tmpdb.insert("medication_log", {
+        "ts": "2026-01-01T02:00:00+00:00", "patient_id": pid, "medication": "aspirin",
+        "dose": "81 mg", "route": "PO", "administered_by": "operator",
+        "indication": "headache", "reaction": "none", "note": "",
+    })
+    listed = server.ai_patients_list(tmpdb, query="raven")
+    assert listed["ok"] and listed["patients"][0]["callsign"] == "RAVEN"
+
+    patient = server.ai_patient_get(tmpdb, callsign="RAVEN")
+    assert patient["ok"] and patient["patient"]["allergies"] == "penicillin"
+    assert patient["vitals"][0]["hr"] == 88
+    assert patient["medications"][0]["medication"] == "aspirin"
+
+    vitals = server.ai_vitals_list(tmpdb, callsign="RAVEN")
+    assert vitals["ok"] and vitals["vitals"][0]["spo2"] == 98
+    meds = server.ai_medications_list(tmpdb, callsign="RAVEN")
+    assert meds["ok"] and meds["medications"][0]["dose"] == "81 mg"
+
+    tmpdb.set_setting("assistant_medical_tools", False)
+    disabled = server.ai_patients_list(tmpdb)
+    assert disabled["ok"] is False and "disabled" in disabled["error"]
+
+
+def test_medical_tools_are_opt_in():
+    base = assistant.tool_specs()
+    assert "get_patient" not in {s["function"]["name"] for s in base}
+    enabled = assistant.tool_specs({"medical_tools": True})
+    assert {"list_patients", "get_patient", "list_vitals", "list_medications"} <= {
+        s["function"]["name"] for s in enabled}
+
+    cfg = {"tools": True, "tools_auto": True, "medical_tools": True}
+    names = {s["function"]["name"] for s in assistant._tools_for_turn(
+        cfg, "show patient RAVEN vitals and meds", lambda name, args: {})}
+    assert {"list_patients", "get_patient", "list_vitals", "list_medications"} <= names
+    assert "adjust_inventory" not in names

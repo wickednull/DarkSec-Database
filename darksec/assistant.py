@@ -67,6 +67,7 @@ def _settings(db: Database) -> dict:
         "library_context": bool(s.get("assistant_library_context", True)),
         "system_tools": bool(s.get("assistant_system_tools", False)),
         "system_root": str(s.get("assistant_system_root") or "~").strip() or "~",
+        "medical_tools": bool(s.get("assistant_medical_tools", False)),
         "keep_alive": str(s.get("assistant_keep_alive") or DEFAULT_KEEP_ALIVE).strip() or DEFAULT_KEEP_ALIVE,
         "opsec_mode": bool(s.get("opsec_mode", False)),
         "units": s.get("units") or "metric",
@@ -609,6 +610,9 @@ _CALC_HINTS = re.compile(
     r"\b(calc|calculator|calculate|wind chill|heat index|dew point|wet bulb|"
     r"humidex|pressure altitude|density altitude|lightning distance|beaufort|"
     r"unit conversion|convert units)\b", re.I)
+_MEDICAL_HINTS = re.compile(
+    r"\b(patients?|vitals?|medications?|meds?|triage|medical records?|"
+    r"allergies|allergy|dosage|dose)\b", re.I)
 _NAV_HINTS = re.compile(
     r"\b(coordinates?|latitude|longitude|dms|utm|mgrs|bearing|distance|how far|"
     r"waypoints?|navigation|navigate|direction|heading|my position|"
@@ -627,6 +631,7 @@ _TOOL_GROUPS = {
     "system": {"list_system_directory", "read_system_file", "write_system_file"},
     "calc": {"list_calculators", "calculate"},
     "nav": {"convert_coordinates", "distance_bearing", "list_waypoints", "create_waypoint"},
+    "medical": {"list_patients", "get_patient", "list_vitals", "list_medications"},
 }
 
 
@@ -654,6 +659,8 @@ def select_tool_names(cfg: dict, prompt: str) -> set[str] | None:
         selected |= _TOOL_GROUPS["calc"]
     if _NAV_HINTS.search(text):
         selected |= _TOOL_GROUPS["nav"]
+    if cfg.get("medical_tools") and _MEDICAL_HINTS.search(text):
+        selected |= _TOOL_GROUPS["medical"]
     if _TOOL_HINTS.search(text):
         selected.add("get_live_status")
     system_intent = bool(cfg.get("system_tools") and _SYSTEM_HINTS.search(text))
@@ -765,6 +772,13 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
             "how old cached data is. Call write tools only when the operator asks you to "
             "save/record something. Writes are rate-limited by the server."
         )
+        if cfg.get("medical_tools"):
+            sys += (
+                "\nMedical record tools are enabled and are strictly read-only. Verify the patient "
+                "identity before discussing details; summarize recorded observations, flag missing "
+                "or red-flag data, and recommend qualified medical care. Do not diagnose, prescribe, "
+                "or change doses."
+            )
         if cfg.get("system_tools"):
             sys += (
                 "\nSystem file tools are enabled by the operator (non-sudo). They are restricted "
@@ -1330,6 +1344,79 @@ def tool_specs(cfg: dict | None = None) -> list[dict]:
                             "append": {"type": "boolean", "description": "Append instead of replacing."},
                         },
                         "required": ["path", "content"],
+                    },
+                },
+            },
+        ])
+    if cfg and cfg.get("medical_tools"):
+        specs.extend([
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_patients",
+                    "description": "Read-only patient list/search. Not a diagnosis or prescription.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Callsign/name/allergy/med/note search."},
+                            "triage": {"type": "string", "description": "Optional triage filter."},
+                            "status": {"type": "string", "description": "Optional status filter."},
+                            "limit": {"type": "integer", "description": "Max patients (default 20)."},
+                        },
+                        "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_patient",
+                    "description": "Read a patient record with recent vitals/medications. Read-only; verify identity and do not diagnose or prescribe.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "patient_id": {"type": "integer", "description": "Patient id if known."},
+                            "callsign": {"type": "string", "description": "Patient callsign."},
+                            "name": {"type": "string", "description": "Patient name."},
+                            "include_vitals": {"type": "boolean", "description": "Include recent vitals (default true)."},
+                            "include_meds": {"type": "boolean", "description": "Include medication history (default true)."},
+                            "limit": {"type": "integer", "description": "Max vitals/med rows each (default 6)."},
+                        },
+                        "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_vitals",
+                    "description": "Read a patient's vitals history. Read-only; not a diagnosis.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "patient_id": {"type": "integer", "description": "Patient id if known."},
+                            "callsign": {"type": "string", "description": "Patient callsign."},
+                            "name": {"type": "string", "description": "Patient name."},
+                            "limit": {"type": "integer", "description": "Max rows (default 15 for vitals, 10 for medications)."},
+                        },
+                        "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_medications",
+                    "description": "Read a patient's medication history. Read-only; do not prescribe or change doses.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "patient_id": {"type": "integer", "description": "Patient id if known."},
+                            "callsign": {"type": "string", "description": "Patient callsign."},
+                            "name": {"type": "string", "description": "Patient name."},
+                            "limit": {"type": "integer", "description": "Max rows (default 15 for vitals, 10 for medications)."},
+                        },
+                        "required": [],
                     },
                 },
             },

@@ -863,3 +863,10 @@ def test_assistant_confirm_and_undo_endpoints(client):
     assert r.status_code == 200
     assert db.one("SELECT qty FROM inventory WHERE id=?", (item_id,))["qty"] == 4
     db.execute("DELETE FROM inventory WHERE id=?", (item_id,))
+
+
+def test_medical_record_tools_setting_roundtrip(client):
+    r = client.put("/api/settings", json={"assistant_medical_tools": True})
+    assert r.status_code == 200
+    assert client.get("/api/settings").json()["assistant_medical_tools"] is True
+    client.put("/api/settings", json={"assistant_medical_tools": False})

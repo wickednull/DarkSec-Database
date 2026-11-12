@@ -128,6 +128,7 @@ def default_settings() -> dict:
         "assistant_tools_auto": True,
         "assistant_system_tools": False,
         "assistant_system_root": "~",
+        "assistant_medical_tools": False,
         "assistant_library_context": True,
         "assistant_keep_alive": "30m",
         "lan_access_enabled": False,
