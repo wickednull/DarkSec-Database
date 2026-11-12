@@ -7,7 +7,7 @@ function csrfToken() {
   return m ? decodeURIComponent(m[1]) : "";
 }
 
-const chatSession = { conversationId: null, messages: [], selectedModel: "", think: null, includeContext: false, sending: false, abortController: null, pendingImages: [], recognizing: false };
+const chatSession = { conversationId: null, messages: [], selectedModel: "", think: null, includeContext: false, sending: false, creatingConversation: false, abortController: null, pendingImages: [], recognizing: false };
 
 function nowTs() { return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
 
@@ -568,6 +568,9 @@ export async function render(root) {
   }));
 
   async function createConversation() {
+    if (state.creatingConversation) return;
+    state.creatingConversation = true;
+    newConvBtn.disabled = true;
     try {
       const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
       const c = await api.post("/api/assistant/conversations", { title: `Chat ${stamp}` });
@@ -580,6 +583,10 @@ export async function render(root) {
       if (sel) sel.value = String(c.id);
       toast("New conversation created", "ok");
     } catch (e) { toast(e.message, "error"); }
+    finally {
+      state.creatingConversation = false;
+      newConvBtn.disabled = false;
+    }
   }
 
   async function renameConversation() {
