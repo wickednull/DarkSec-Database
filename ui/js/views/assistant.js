@@ -487,6 +487,7 @@ export async function render(root) {
       const old = convContainer.querySelector("select");
       if (res?.locked || res?.unconfigured) {
         if (old) old.remove();
+        convState.style.display = "";
         convState.replaceChildren(h("div", { class: "callout small amber", text: res.error || "Encrypted chat history is unavailable." }));
         convState.appendChild(res.locked
           ? btn("UNLOCK VAULT", { size: "sm", tone: "primary", icon: "lock", onClick: async () => {
@@ -499,7 +500,11 @@ export async function render(root) {
       }
       const items = res?.items || [];
       convState.replaceChildren();
-      if (res?.encrypted) convState.appendChild(h("span", { class: "badge", text: "ENCRYPTED HISTORY" }));
+      convState.style.display = "none";
+      if (res?.encrypted) {
+        convState.style.display = "";
+        convState.appendChild(h("span", { class: "badge", text: "ENCRYPTED HISTORY" }));
+      }
       const opts = [
         { value: "", label: items.length ? "Select conversation…" : "No saved conversations" },
         ...items.map(c => ({ value: String(c.id), label: `${c.title || "Chat"} (${c.msg_count || 0})` })),
