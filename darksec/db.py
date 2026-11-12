@@ -532,6 +532,23 @@ class Database:
         if "recurrence" not in task_cols:
             self.execute("ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT ''")
 
+        # Document citations need page boundaries in the stored text. Older
+        # indexes joined PDF pages with newlines; clear those once so the next
+        # background index re-extracts them with form feeds.
+        if self.one("SELECT 1 FROM meta WHERE key='library_pages_v1'") is None:
+            legacy = self.query(
+                "SELECT id,name,rel_path,category,path FROM library_docs "
+                "WHERE text != '' AND pages > 1 AND instr(text, char(12)) = 0"
+            )
+            for row in legacy:
+                if not str(row["path"]).lower().endswith((".pdf", ".epub", ".cbz")):
+                    continue
+                self.execute("UPDATE library_docs SET text='', chars=0 WHERE id=?", (row["id"],))
+                self.fts_upsert(row["id"], row["name"], row["rel_path"],
+                                row["category"], "")
+            self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('library_pages_v1',?)",
+                         (utcnow(),))
+
         # Auto-sync used to be an inert preference (the old build only fetched
         # on explicit request). Adopt the automatic behaviour once, and add the
         # interval setting, without disturbing other operator choices.

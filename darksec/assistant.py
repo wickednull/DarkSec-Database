@@ -754,7 +754,8 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
     if include_tools:
         sys += (
             "\nYou can act on the operator's system with these tools: "
-            "get_live_status, get_library_document (find a named manual by title), "
+            "get_live_status, get_library_document (find a named manual by title; pass "
+            "query to focus an excerpt, or page/span to read specific pages), "
             "search_library (topic search), list_vault_notes, get_vault_note and "
             "edit_vault_note (encrypted vault notes; require an unlocked vault), "
             "save_log_entry (plaintext mission log) and save_note (encrypted vault note; "
@@ -770,7 +771,10 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
             "update/edit/delete/reset/log only when the operator explicitly asks, and report the exact "
             "item and change. Use "
             "get_live_status before answering questions about current conditions and say "
-            "how old cached data is. Call write tools only when the operator asks you to "
+            "how old cached data is. When quoting the document library, cite the document "
+            "name and the page or section reported in the tool result (for example "
+            "\"Manual — p. 42\"); never invent page numbers, and say when a document has "
+            "no page-level index. Call write tools only when the operator asks you to "
             "save/record something. Writes are rate-limited by the server."
         )
         if cfg.get("medical_tools"):
@@ -869,15 +873,18 @@ def tool_specs(cfg: dict | None = None) -> list[dict]:
             "function": {
                 "name": "get_library_document",
                 "description": (
-                    "Find a manual/document by title and return an excerpt. Tolerates "
-                    "partial or misspelled titles."
+                    "Find a manual/document by title and return an excerpt with page or "
+                    "section citations. Tolerates partial or misspelled titles. Pass query "
+                    "to focus the excerpt, or page/span to read specific pages."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "title": {"type": "string", "description": "Document title or filename."},
                         "query": {"type": "string", "description": "Optional topic to focus the excerpt."},
-                        "max_chars": {"type": "integer", "description": "Max excerpt characters (default 6000)."},
+                        "max_chars": {"type": "integer", "description": "Max excerpt characters (default 4000)."},
+                        "page": {"type": "integer", "description": "Optional 1-based page or section to read."},
+                        "span": {"type": "integer", "description": "Pages to read from page (default 1, max 20)."},
                     },
                     "required": ["title"],
                 },

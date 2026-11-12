@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import threading
+from bisect import bisect_left
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -108,13 +109,15 @@ def extract_text(path: Path, ext: str) -> tuple[str, int | None]:
     if ext == ".pdf":
         if shutil.which("pdftotext"):
             try:
+                # pdftotext emits a form feed between pages. Keep it: page
+                # breaks are what later become citations ("p. 42").
                 proc = subprocess.run(
                     ["pdftotext", "-q", "-layout", "-f", "1", "-l", str(MAX_PDF_PAGES), str(path), "-"],
                     capture_output=True, timeout=EXTRACT_TIMEOUT, check=False,
                 )
                 text = proc.stdout.decode("utf-8", errors="ignore")[:MAX_TEXT_CHARS]
                 if text.strip():
-                    return text, None
+                    return _normalize_page_breaks(text), None
             except Exception:
                 pass
         try:
@@ -129,7 +132,7 @@ def extract_text(path: Path, ext: str) -> tuple[str, int | None]:
                         chunks.append(reader.pages[i].extract_text() or "")
                     except Exception:
                         continue
-                return ("\n".join(chunks))[:MAX_TEXT_CHARS], len(reader.pages)
+                return _normalize_page_breaks("\f".join(chunks))[:MAX_TEXT_CHARS], len(reader.pages)
         except Exception:
             return "", None
     if ext in (".epub", ".cbz"):
@@ -142,10 +145,66 @@ def extract_text(path: Path, ext: str) -> tuple[str, int | None]:
                         chunks.append(_strip_html(z.read(name).decode("utf-8", errors="ignore")))
                     if sum(len(c) for c in chunks) > MAX_TEXT_CHARS:
                         break
-            return ("\n".join(chunks))[:MAX_TEXT_CHARS], None
+            # Each archive member is a chapter/section; form feeds preserve
+            # those boundaries for section citations.
+            return _normalize_page_breaks("\f".join(chunks))[:MAX_TEXT_CHARS], None
         except Exception:
             return "", None
     return "", None
+
+
+def _normalize_page_breaks(text: str) -> str:
+    """Collapse runs of page breaks and normalise line endings."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n*\f[\s\f]*", "\f", text)
+    # A trailing breaker is a terminator, not an extra page.
+    return text.rstrip("\f\n ")
+
+
+def _page_offsets(text: str) -> list[int]:
+    return [idx for idx, char in enumerate(text) if char == "\f"]
+
+
+def page_number(text: str, offset: int) -> int:
+    """1-based page/section number for a character offset."""
+    if not text:
+        return 1
+    return bisect_left(_page_offsets(text), max(0, offset)) + 1
+
+
+def page_count(text: str, fallback: int | None = None) -> int:
+    breaks = text.count("\f")
+    if breaks:
+        return breaks + 1
+    return int(fallback or 1)
+
+
+def _looks_like_heading(line: str) -> bool:
+    line = line.strip().strip("#").strip()
+    if not (3 <= len(line) <= 90):
+        return False
+    if line.endswith((".", ",", ";", ":")) and not line.isupper():
+        return False
+    letters = sum(ch.isalpha() for ch in line)
+    if letters < 3 or letters < len(line) * 0.35:
+        return False
+    if line.isupper():
+        return True
+    if re.match(r"^(chapter|section|part|appendix|unit|lesson)\b", line, flags=re.I):
+        return True
+    if re.match(r"^(\d+(\.\d+)*|[IVXLC]+)[.)]?\s+\S", line):
+        return True
+    return False
+
+
+def section_for_offset(text: str, offset: int) -> str:
+    """Nearest preceding heading line, if one is close enough to be useful."""
+    start = max(0, offset - 6000)
+    block = text[start:offset]
+    for line in reversed(block.splitlines()):
+        if _looks_like_heading(line):
+            return " ".join(line.strip().strip("#").split())[:120]
+    return ""
 
 
 def _upsert_meta(db: Database, doc: dict, force: bool = False) -> tuple[int, bool]:
@@ -357,14 +416,20 @@ def find_document(db: Database, query: str, limit: int = 6) -> list[dict]:
 
 
 def document_excerpt(db: Database, doc_id: int, query: str = "",
-                     max_chars: int = 6000) -> dict:
-    """Return extracted text, optionally focused around query terms."""
+                     max_chars: int = 6000, page: int | None = None,
+                     span: int = 1) -> dict:
+    """Return extracted text, optionally focused around query terms.
+
+    Text keeps the page breaks written by ``extract_text`` (form feeds), so
+    excerpts can report the page or section they came from. ``page`` reads a
+    specific 1-based page instead of searching.
+    """
     try:
         budget = max(500, min(int(max_chars or 6000), 20_000))
     except (TypeError, ValueError):
         budget = 6000
     row = db.one(
-        "SELECT id,name,rel_path,category,chars,text FROM library_docs WHERE id=?",
+        "SELECT id,name,rel_path,path,category,chars,pages,text FROM library_docs WHERE id=?",
         (doc_id,),
     )
     if not row:
@@ -378,7 +443,43 @@ def document_excerpt(db: Database, doc_id: int, query: str = "",
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if not text:
         return {"text": "", "chars": 0, "truncated": False, "focus": False,
+                "pages": [], "page_count": 0, "sections": [], "unit": "page",
                 "note": "No extractable text (scanned/image PDF or not yet indexed)."}
+
+    suffix = Path(str(row["rel_path"] or row["path"] or "")).suffix.lower()
+    unit = "section" if suffix in (".epub", ".cbz") else "page"
+    breaks = _page_offsets(text)
+    total_pages = page_count(text, row["pages"])
+    available = bool(breaks) or total_pages <= 1
+
+    def page_at(offset: int) -> int:
+        return bisect_left(breaks, max(0, offset)) + 1
+
+    def clean(piece: str) -> str:
+        return re.sub(r"\n*\f[\s\f]*", "\n\n", piece).strip()
+
+    # Explicit page/section request: slice between breaks.
+    if page not in (None, "", 0):
+        try:
+            first = max(1, int(page))
+            count = max(1, min(int(span or 1), 20))
+        except (TypeError, ValueError):
+            raise ValueError("page and span must be numbers")
+        if not available:
+            raise ValueError(
+                f"This document has no {unit} breaks in its index; re-index it to enable citations."
+            )
+        if first > total_pages:
+            raise ValueError(f"{unit.title()} {first} is outside this document ({total_pages} {unit}s).")
+        start = 0 if first == 1 else breaks[first - 2] + 1
+        last = min(total_pages, first + count - 1)
+        end = len(text) if last >= total_pages else breaks[last - 1]
+        body = clean(text[start:end])[:budget]
+        heading = section_for_offset(text, start)
+        return {"text": body, "chars": len(body), "truncated": len(body) >= budget,
+                "focus": False, "pages": [first, last], "page_count": total_pages,
+                "sections": [heading] if heading else [], "unit": unit,
+                "citation": _citation(row["name"], unit, first, last)}
 
     q = str(query or "").strip()
     if q:
@@ -404,24 +505,69 @@ def document_excerpt(db: Database, doc_id: int, query: str = "",
                     merged.append((start, end))
             parts = []
             used = 0
+            page_refs: list[int] = []
+            sections: list[str] = []
             for start, end in merged:
-                piece = text[start:end].strip()
+                match_at = None
+                for token in tokens:
+                    idx = lower.find(token.lower(), start, end)
+                    if idx >= 0 and (match_at is None or idx < match_at):
+                        match_at = idx
+                anchor = match_at if match_at is not None else start
+                piece = text[start:end]
                 if used + len(piece) > budget:
                     piece = piece[:max(0, budget - used)]
+                piece = clean(piece)
                 if not piece:
                     continue
                 parts.append(("…" if start > 0 else "") + piece
                              + ("…" if end < len(text) else ""))
+                page_refs.append(page_at(anchor))
+                heading = section_for_offset(text, anchor)
+                if heading and heading not in sections:
+                    sections.append(heading)
                 used += len(piece)
                 if used >= budget:
                     break
             excerpt = "\n\n".join(parts)
+            pages = ([min(page_refs), max(page_refs)] if page_refs and breaks else [])
             return {"text": excerpt, "chars": len(text),
-                    "truncated": used < len(text), "focus": True}
+                    "truncated": used < len(text), "focus": True,
+                    "pages": pages, "page_numbers": page_refs,
+                    "page_count": total_pages, "sections": sections[:6], "unit": unit,
+                    "citation": _citation(row["name"], unit, pages[0] if pages else None,
+                                          pages[1] if pages and len(pages) > 1 else None)}
 
-    excerpt = text[:budget]
+    excerpt = clean(text[:budget])
+    pages = [1, page_at(budget)] if breaks else []
+    heading = section_for_offset(text, 0)
     return {"text": excerpt, "chars": len(text),
-            "truncated": len(excerpt) < len(text), "focus": False}
+            "truncated": len(excerpt) < len(text), "focus": False,
+            "pages": pages, "page_count": total_pages,
+            "sections": [heading] if heading else [], "unit": unit,
+            "citation": _citation(row["name"], unit, pages[0] if pages else None,
+                                  pages[1] if pages and len(pages) > 1 else None)}
+
+
+def _citation(name: str, unit: str, first=None, last=None) -> str:
+    short = str(name or "Document")
+    if not first:
+        return short
+    span = f"{first}–{last}" if last and last != first else str(first)
+    return f"{short} — {unit} {span}"
+
+
+def page_for_query(text: str, query: str) -> int | None:
+    """Approximate page number of the first query token in a document."""
+    if not text or "\f" not in text:
+        return None
+    tokens = [t for t in re.findall(r"[\w]+", query or "", flags=re.UNICODE) if len(t) >= 3][:3]
+    lower = text.lower()
+    for token in tokens:
+        idx = lower.find(token.lower())
+        if idx >= 0:
+            return page_number(text, idx)
+    return None
 
 
 def resolve_doc(rel_path: str) -> Path | None:

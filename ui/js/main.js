@@ -8,7 +8,7 @@ import { positionConfidence } from "./views/shared.js";
 
 import * as dashboard from "./views/dashboard.js";
 import * as mapView from "./views/map.js?v=map-upgrade-10";
-import * as library from "./views/library.js";
+import * as library from "./views/library.js?v=better-1";
 import * as manual from "./views/manual.js";
 import * as navView from "./views/nav.js";
 import * as comms from "./views/comms.js";

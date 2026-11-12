@@ -2732,12 +2732,23 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                         d, int(doc["id"]),
                         query=str(args.get("query") or ""),
                         max_chars=args.get("max_chars") or 4000,
+                        page=args.get("page"),
+                        span=args.get("span") or 1,
                     )
-                    return {"ok": True, "document": doc, "matches": matches,
+                    return {"ok": True,
+                            "document": {key: doc.get(key) for key in
+                                         ("id", "name", "category", "rel_path", "pages")},
+                            "matches": [{key: m.get(key) for key in
+                                         ("id", "name", "category", "score")}
+                                        for m in matches[:5]],
                             "excerpt": excerpt.get("text") or "",
                             "chars": excerpt.get("chars"),
                             "truncated": excerpt.get("truncated"),
                             "focus": excerpt.get("focus"),
+                            "citation": excerpt.get("citation"),
+                            "pages": excerpt.get("pages") or [],
+                            "page_count": excerpt.get("page_count"),
+                            "sections": excerpt.get("sections") or [],
                             "note": excerpt.get("note")}
                 if name == "list_vault_notes":
                     return ai_vault_notes_list(d, v, args.get("limit") or 30)
@@ -2866,11 +2877,17 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                         return {"ok": False, "error": "query is required"}
                     category = str(args.get("category") or "").strip() or None
                     rows = library.search(d, q, category, limit=4)
-                    return {"ok": True, "results": [
-                        {"id": r.get("id"), "name": r.get("name"), "category": r.get("category"),
-                         "path": r.get("rel_path"), "snippet": (r.get("snippet") or "")[:800]}
-                        for r in rows[:4]
-                    ]}
+                    results = []
+                    for r in rows[:4]:
+                        text = d.one("SELECT text FROM library_docs WHERE id=?", (r.get("id"),))
+                        page = library.page_for_query(str((text or {}).get("text") or ""), q)
+                        results.append({
+                            "id": r.get("id"), "name": r.get("name"),
+                            "category": r.get("category"), "path": r.get("rel_path"),
+                            "page": page,
+                            "snippet": (r.get("snippet") or "")[:800],
+                        })
+                    return {"ok": True, "results": results}
             except ValueError as e:
                 return {"ok": False, "error": str(e)}
             except Exception as e:

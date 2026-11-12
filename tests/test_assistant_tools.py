@@ -599,3 +599,51 @@ def test_record_editing_and_listing_tools(tmpdb):
     reset = server.ai_checklist_reset(tmpdb, kit["id"])
     assert reset["ok"] and reset.get("undo", {}).get("token")
     assert tmpdb.one("SELECT count(*) c FROM checklist_state WHERE kit_id=?", (kit["id"],))["c"] == 0
+
+
+def test_library_page_and_section_citations(tmpdb):
+    from darksec import library
+
+    doc = _add_doc(
+        tmpdb, "FIELD MANUAL.pdf",
+        "CHAPTER 1 SAFETY\nWater purification steps.\f"
+        "CHAPTER 2 SHELTER\nShelter construction notes.\f"
+        "CHAPTER 3 FOOD\nFood storage guidance.",
+    )
+    tmpdb.execute("UPDATE library_docs SET pages=3 WHERE id=?", (doc,))
+
+    focused = library.document_excerpt(tmpdb, doc, query="construction notes", max_chars=600)
+    assert focused["focus"] is True
+    assert focused["pages"] == [2, 2]
+    assert focused["page_count"] == 3
+    assert "page 2" in focused["citation"]
+    assert any("SHELTER" in section for section in focused["sections"])
+
+    page_two = library.document_excerpt(tmpdb, doc, page=2, max_chars=600)
+    assert "Shelter construction" in page_two["text"]
+    assert "Water purification" not in page_two["text"]
+    assert page_two["pages"] == [2, 2]
+    assert page_two["unit"] == "page"
+
+    span = library.document_excerpt(tmpdb, doc, page=2, span=2, max_chars=600)
+    assert span["pages"] == [2, 3]
+    assert "Food storage" in span["text"]
+
+    try:
+        library.document_excerpt(tmpdb, doc, page=9)
+    except ValueError as exc:
+        assert "outside this document" in str(exc)
+    else:
+        raise AssertionError("out-of-range page should fail")
+
+    assert library.page_for_query(str(tmpdb.one(
+        "SELECT text FROM library_docs WHERE id=?", (doc,))["text"]), "food") == 3
+    assert library._normalize_page_breaks("one\n\f\n\ntwo\f") == "one\ftwo"
+
+
+def test_library_tool_declares_page_citation_parameters():
+    spec = next(s for s in assistant.tool_specs()
+                if s["function"]["name"] == "get_library_document")
+    props = spec["function"]["parameters"]["properties"]
+    assert {"query", "page", "span", "max_chars"} <= set(props)
+    assert "page" in spec["function"]["description"].lower()

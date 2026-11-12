@@ -256,6 +256,7 @@ function statBox(label, value, foot, tone = "") {
 
 async function renderDocument(root, params) {
   const docId = Number(params.doc);
+  const startPage = Math.max(1, parseInt(params.page || "1", 10) || 1);
   if (!Number.isFinite(docId) || docId <= 0) {
     root.replaceChildren(pageHead({ kicker: "COMMAND // LIBRARY", title: "Document" }),
       h("div", { class: "callout danger", text: "Invalid document id." }));
@@ -301,7 +302,7 @@ async function renderDocument(root, params) {
 
   if (isPdf) {
     const frame = h("iframe", {
-      src: `/api/library/doc/${docId}/file`,
+      src: `/api/library/doc/${docId}/file${startPage > 1 ? `#page=${startPage}` : ""}`,
       title: doc.name || "PDF document",
       style: { width: "100%", height: "78vh", border: "1px solid var(--border)", borderRadius: "8px", background: "#fff" },
     });
@@ -318,7 +319,7 @@ async function renderDocument(root, params) {
           btn("OPEN IN NEW TAB", { size: "sm", icon: "link", onClick: () => window.open(`/api/library/doc/${docId}/file`, "_blank", "noopener") }),
           btn("DOWNLOAD", { size: "sm", icon: "download", onClick: () => { location.href = `/api/library/doc/${docId}/file?download=true`; } }),
           btn("CONSOLE VIEWER", { size: "sm", tone: "ghost", onClick: async () => {
-            const v = await pdfViewer(docId, doc);
+            const v = await pdfViewer(docId, doc, startPage);
             viewerPanel.replaceWith(v.node);
           } }),
         ),
@@ -368,7 +369,7 @@ function kvLine(k, v) {
   return h("div", { class: "coord-line" }, h("span", { text: k }), h("b", { text: v }));
 }
 
-async function pdfViewer(docId, doc) {
+async function pdfViewer(docId, doc, startPage = 1) {
   const canvas = h("canvas");
   const stage = h("div", { class: "pdf-stage" }, h("div", { class: "pdf-loading" }, h("span", { class: "spinner" }), " LOADING PDF"));
   const pageInfo = h("span", { class: "pdf-page-info", text: "— / —" });
@@ -404,7 +405,7 @@ async function pdfViewer(docId, doc) {
   const wrap = h("div", { class: "panel mt-14" }, shell);
 
   let pdf = null;
-  let pageNum = 1;
+  let pageNum = Math.max(1, Number(startPage) || 1);
   let zoom = 1.2;
   let fitMode = true;
   let fitType = "width";
@@ -425,6 +426,7 @@ async function pdfViewer(docId, doc) {
       standardFontDataUrl: "/ui/vendor/pdfjs/standard_fonts/",
     });
     pdf = await task.promise;
+    pageNum = Math.min(Math.max(1, pageNum), pdf.numPages);
     stage.replaceChildren(canvas);
     updateControls();
     await draw();
