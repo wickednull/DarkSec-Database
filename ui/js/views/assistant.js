@@ -110,40 +110,49 @@ export async function render(root) {
   const state = chatSession;
   root.replaceChildren();
 
+  const focusBtn = btn("FOCUS", { tone: "ghost", onClick: () => {
+    const on = layout.classList.toggle("assistant-focus");
+    const label = focusBtn.querySelector("span");
+    if (label) label.textContent = on ? "SHOW PANEL" : "FOCUS";
+    else focusBtn.textContent = on ? "SHOW PANEL" : "FOCUS";
+  } });
+  focusBtn.id = "assistantFocusBtn";
+
   root.appendChild(pageHead({
     kicker: "COMMAND // DELAMAIN",
     title: "Delamain",
     desc: "Local, operator-controlled AI assistant backed by Ollama. Supports chat history, image attachments for vision models, voice input/output (browser-dependent), and indexed document retrieval.",
     actions: [
+      focusBtn,
       btn("SETTINGS", { icon: "settings", tone: "ghost", onClick: () => { location.hash = "#/settings"; } }),
       btn("DETECT MODELS", { icon: "refresh", onClick: refreshModels }),
     ],
   }));
 
-  const alert = status?.reachable
-    ? alertStrip(`Connected to Ollama at ${status.base_url}${status.model ? ` · model: ${status.model}` : " · no model configured"}`, "green")
-    : alertStrip(status?.error || "Ollama is not reachable. Start Ollama locally and configure a model in Settings.", "amber");
-  root.appendChild(alert);
+  if (!status?.reachable || !status?.model) {
+    root.appendChild(alertStrip(
+      status?.error || "Ollama is not reachable. Start Ollama locally and configure a model in Settings.",
+      "amber",
+    ));
+  }
 
-  const layout = h("div", { class: "grid-2 mt-14", style: { alignItems: "start" } });
-  const main = h("div", { class: "col gap-12" });
-  const side = h("div", { class: "col gap-12" });
+  const layout = h("div", { class: "assistant-layout mt-14" });
+  const main = h("div", { class: "col gap-12 assistant-main" });
+  const side = h("div", { class: "col gap-12 assistant-side" });
   layout.append(main, side);
   root.appendChild(layout);
 
   // Conversation picker
-  const convBar = h("div", { class: "row wrap gap-8", style: { alignItems: "center" } });
   const convSelect = select([{ value: "", label: "Select conversation…" }], state.conversationId ? String(state.conversationId) : "");
   const newConvBtn = btn("NEW CHAT", { size: "sm", icon: "plus", onClick: createConversation });
   const saveChatBtn = btn("SAVE CHAT TO VAULT", { size: "sm", tone: "ghost", icon: "lock", onClick: saveChatToVault });
   const delConvBtn = btn("DELETE", { size: "sm", tone: "danger", icon: "trash", onClick: deleteConversation });
-  convBar.append(convSelect, newConvBtn, saveChatBtn, delConvBtn);
-  main.appendChild(panel({ title: "Conversations", icon: "cpu", body: convBar }));
-
+  const convContainer = h("div", { class: "assistant-convbar" });
+  convContainer.append(convSelect, newConvBtn, saveChatBtn, delConvBtn);
   async function saveChatToVault() {
     const msgs = (state.messages || []).filter((m) => m && (m.role === "user" || m.role === "assistant") && String(m.content || "").trim());
     if (!msgs.length) { toast("No chat messages to save", "warn"); return; }
-    const option = convSelect?.selectedOptions?.[0]?.textContent || "";
+    const option = convContainer?.querySelector("select")?.selectedOptions?.[0]?.textContent || "";
     const label = option.replace(/\s*\(\d+\)\s*$/, "").trim();
     const fallback = `Delamain chat ${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
     const title = (label && label !== "Select conversation…" ? label : fallback).slice(0, 300);
@@ -159,7 +168,7 @@ export async function render(root) {
     }
   }
 
-  const transcript = h("div", { class: "col gap-10", style: { minHeight: "320px", maxHeight: "56vh", overflow: "auto", padding: "4px 2px" } });
+  const transcript = h("div", { class: "col gap-10 assistant-transcript" });
   const intro = h("div", { class: "callout" },
     h("div", { class: "small", style: { whiteSpace: "pre-wrap" }, text: "Ask for field planning help, SITREP drafting, checklists, triage prompts, comms/logistics planning, map/intel interpretation, or gear/water/food/power reasoning. Attach images for vision models, use the mic for voice input, and review past chats below. I can include a cached app-context snapshot if enabled. I won’t invent live readings." })
   );
@@ -504,12 +513,7 @@ export async function render(root) {
   // Remove the previous convBar select by rebuilding convBar contents each load.
   // We'll instead create a container and manage select inside.
 
-  // Rebuild convBar as container with dynamic select
-  const convContainer = h("div", { class: "row wrap gap-8", style: { alignItems: "center" } });
-  convContainer.append(newConvBtn, delConvBtn);
-  // replace convBar in DOM
-  convBar.replaceWith(convContainer);
-  // We'll insert select at front when loading
+  // Insert the current conversation select at the front when loading.
   async function rebuildConvPicker() {
     try {
       const res = await api.get("/api/assistant/conversations");
@@ -531,14 +535,16 @@ export async function render(root) {
   await rebuildConvPicker();
 
   main.appendChild(panel({
-    title: "Assistant Chat", icon: "cpu", flush: true,
-    body: h("div", { class: "col gap-10", style: { padding: "12px" } },
+    title: "Assistant Chat", icon: "cpu", flush: true, cls: "assistant-chat",
+    body: h("div", { class: "assistant-chat-body" },
       transcript,
-      field("PROMPT", promptInput),
-      previewRow,
-      h("div", { class: "col gap-6" },
-        h("div", { class: "row wrap gap-12" }, ctxToggle, thinkToggle),
-        h("div", { class: "row wrap gap-8", style: { justifyContent: "flex-end" } }, attachBtn, micBtn, speakBtn, clearBtn, cancelBtn, sendBtn))
+      h("div", { class: "assistant-composer" },
+        field("PROMPT", promptInput),
+        previewRow,
+        h("div", { class: "row wrap gap-12 mt-6" }, ctxToggle, thinkToggle),
+        h("div", { class: "row wrap gap-8 mt-6", style: { justifyContent: "flex-end" } },
+          attachBtn, micBtn, speakBtn, clearBtn, cancelBtn, sendBtn)
+      )
     )
   }));
 
@@ -555,13 +561,17 @@ export async function render(root) {
     ["Route planning", "Help me think through route planning risks and checks (weather, hazards, timing, comms, contingencies). Ask for origin/destination/constraints if needed."],
   ];
   side.appendChild(panel({
-    title: "Quick Prompts", icon: "cpu",
-    body: h("div", { class: "col gap-6" }, ...quick.map(([label, text]) => btn(label, { tone: "ghost", size: "sm", onClick: () => { promptInput.value = text; promptInput.focus(); } })))
+    title: "Conversations", icon: "cpu", cls: "assistant-side-panel",
+    body: convContainer,
   }));
-  side.appendChild(panel({ title: "Model", icon: "cpu", body: modelBox }));
-  side.appendChild(panel({ title: "Connection", icon: "info", body: statusBox }));
   side.appendChild(panel({
-    title: "Local Setup", icon: "settings",
+    title: "Quick Prompts", icon: "cpu", cls: "assistant-side-panel",
+    body: h("div", { class: "quick-grid" }, ...quick.map(([label, text]) => btn(label, { tone: "ghost", size: "sm", class: "quick-btn", onClick: () => { promptInput.value = text; promptInput.focus(); } })))
+  }));
+  side.appendChild(panel({ title: "Model", icon: "cpu", cls: "assistant-side-panel", body: modelBox }));
+  side.appendChild(panel({ title: "Connection", icon: "info", cls: "assistant-side-panel", body: statusBox }));
+  side.appendChild(panel({
+    title: "Local Setup", icon: "settings", cls: "assistant-side-panel",
     body: h("div", { class: "col gap-6 small" },
       h("div", { class: "muted", text: "1. Install/start Ollama locally." }),
       h("div", { class: "muted", text: "2. Pull a model (example: `ollama pull llama3.2` or another model you trust)." }),

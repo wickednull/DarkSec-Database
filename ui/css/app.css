@@ -1096,3 +1096,54 @@ body.no-scan .fx-scan { display: none; }
 .toggle-label { color: var(--muted); font-size: 10.5px; line-height: 1.2; }
 .toggle:hover .toggle-label { color: var(--text); }
 .toggle-input:checked ~ .toggle-label { color: var(--text); }
+
+/* ------------------------------------------------------- Delamain workspace */
+.assistant-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 14px;
+  align-items: stretch;
+  height: calc(100dvh - var(--top-h) - var(--bot-h) - 195px);
+  min-height: 620px;
+}
+.assistant-layout.assistant-focus { grid-template-columns: minmax(0, 1fr); }
+.assistant-layout.assistant-focus .assistant-side { display: none; }
+.assistant-main { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.assistant-side { max-height: 100%; overflow-y: auto; padding-right: 2px; scrollbar-gutter: stable; }
+.assistant-chat { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.assistant-chat .panel-body { flex: 1; min-height: 0; display: flex; padding: 0; }
+.assistant-chat-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.assistant-convbar {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 8px 12px; border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, .012);
+}
+.assistant-side .assistant-convbar {
+  padding: 0; border-bottom: 0; background: transparent;
+}
+.assistant-side .assistant-convbar select { flex: 1 1 100%; width: 100%; }
+.assistant-transcript {
+  flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable;
+  padding: 12px 14px;
+}
+.assistant-composer {
+  border-top: 1px solid var(--line); padding: 10px 12px 12px;
+  background: rgba(0, 0, 0, .18);
+}
+.assistant-composer .field { margin-bottom: 6px; }
+.assistant-composer textarea { min-height: 76px; max-height: 180px; resize: vertical; }
+.quick-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.quick-grid .quick-btn {
+  justify-content: flex-start; text-align: left; white-space: normal;
+  height: auto; min-height: 28px; padding: 5px 8px; line-height: 1.25;
+}
+.assistant-side-panel .panel-body { padding: 10px 12px; }
+
+@media (max-width: 1100px) {
+  .assistant-layout { grid-template-columns: minmax(0, 1fr) 250px; }
+}
+@media (max-width: 860px) {
+  .assistant-layout { grid-template-columns: 1fr; height: auto; min-height: 0; }
+  .assistant-main { height: min(76dvh, 760px); }
+  .assistant-side { max-height: none; overflow: visible; }
+}
