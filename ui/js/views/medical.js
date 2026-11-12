@@ -7,7 +7,7 @@ import {
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { calculatorGrid } from "../calculators.js";
-import { kv, referenceSection } from "./shared.js"
+import { kv, referenceSection } from "./shared.js?v=opsec-1"
 import * as U from "../units.js";;
 
 let lastSelected = null;

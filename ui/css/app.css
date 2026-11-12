@@ -332,6 +332,9 @@ body.no-scan .fx-scan { display: none; }
 .view-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 .view-head.assistant-head { align-items: center; margin-bottom: 8px; }
 
+/* OPSEC: mask editable position fields without disabling them. */
+body.opsec .opsec-mask { -webkit-text-security: disc; }
+
 /* ------------------------------------------------------------------ panels */
 .panel {
   position: relative; background: linear-gradient(160deg, rgba(13, 21, 16, .94), rgba(6, 11, 8, .96));

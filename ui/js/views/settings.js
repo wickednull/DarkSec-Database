@@ -6,8 +6,8 @@ import {
 } from "../components.js";
 import {
   kv, progressBar, statusTone, positionConfidence, manualPositionMetadata, gpsPositionMetadata,
-  geocodedPositionMetadata,
-} from "./shared.js";
+  geocodedPositionMetadata, opsecActive,
+} from "./shared.js?v=opsec-1";
 
 export async function render(root) {
   root.replaceChildren(loading("LOADING CONFIGURATION"));
@@ -107,8 +107,8 @@ export async function render(root) {
   grid.appendChild(identity);
 
   /* ------------------------------------------------------------ position */
-  const lat = input({ type: "number", step: "0.000001", min: -90, max: 90, value: settings.lat ?? "" });
-  const lon = input({ type: "number", step: "0.000001", min: -180, max: 180, value: settings.lon ?? "" });
+  const lat = input({ type: "number", step: "0.000001", min: -90, max: 90, value: settings.lat ?? "", class: "input opsec-mask" });
+  const lon = input({ type: "number", step: "0.000001", min: -180, max: 180, value: settings.lon ?? "", class: "input opsec-mask" });
   const elevation = input({ type: "number", step: "1", value: settings.elevation_m ?? 0 });
   const declination = input({ type: "number", step: "0.1", value: settings.declination ?? 0 });
   const coordPreview = h("div", { class: "coord-block" });
@@ -180,6 +180,7 @@ export async function render(root) {
     phoneStartButton.disabled = opsec || !!phoneSessionId;
     if (opsec && phoneSessionId) stopPhoneGps();
     else if (!opsec) loadPhoneInterfaces();
+    updateCoordPreview();
   }));
 
   /* ---------------------------------------------------- LAN / mobile access */
@@ -812,7 +813,7 @@ export async function render(root) {
       const fix = status.latest_fix;
       if (fix) {
         phoneFix.replaceChildren(kv([
-          ["PHONE POSITION", fmt.coord(fix.lat, fix.lon, 6)],
+          ["PHONE POSITION", opsecActive(store.settings) ? "OP//MASKED" : fmt.coord(fix.lat, fix.lon, 6)],
           ["REPORTED ACCURACY", `±${fmt.num(fix.accuracy_m, 1)} m`],
           ["FIX TIME", fmt.date(fix.timestamp)],
           ["RECEIVED", `${fmt.ago(fix.received_at)} · ${fix.age_seconds}s old`],
@@ -1220,6 +1221,11 @@ export async function render(root) {
   }
 
   async function updateCoordPreview() {
+    if (opsecActive(store.settings)) {
+      coordPreview.replaceChildren(h("div", { class: "coord-line" },
+        h("span", { text: "COORDINATES" }), h("b", { text: "OP//MASKED" })));
+      return;
+    }
     const la = Number(lat.value), lo = Number(lon.value);
     if (!Number.isFinite(la) || !Number.isFinite(lo)) return;
     try {

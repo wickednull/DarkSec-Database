@@ -5,7 +5,7 @@ import {
   emptyState, loading, fmt, toast, modal, textarea, confirmDialog,
 } from "../components.js";
 import { openRecordForm, deleteRecord, severityTone } from "../records.js";
-import { positionConfidence } from "./shared.js";
+import { positionConfidence, opsecActive } from "./shared.js?v=opsec-1";
 
 const DASH_AUTO_MS = 60_000;
 let dashTimer = null;
@@ -115,7 +115,7 @@ export async function render(root, params) {
   copy.appendChild(h("h2", { text: headline }));
   copy.appendChild(h("p", {
     title: positionInfo.text,
-    text: `${now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })} local · ${dash.coords?.mgrs || "GRID UNKNOWN"} · ` +
+    text: `${now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })} local · ${opsecActive(dash.settings) ? "OP//MASKED" : (dash.coords?.mgrs || "GRID UNKNOWN")} · ` +
       `${positionInfo.mapLabel} · ${(dash.tasks || []).length} open task(s), ${(dash.incidents || []).length} open incident(s), ${(dash.low_stock || []).length} low-stock item(s).`,
   }));
 

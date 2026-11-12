@@ -6,7 +6,7 @@ import {
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { calculatorGrid } from "../calculators.js";
-import { feedBadge, kv, referenceSection, severityBadge, positionConfidence } from "./shared.js";
+import { feedBadge, kv, referenceSection, severityBadge, positionConfidence, opsecActive } from "./shared.js?v=opsec-1";
 import * as U from "../units.js";
 
 const WEATHER_AUTO_MS = 120_000;
@@ -57,7 +57,7 @@ export async function render(root) {
   const aq = byId.open_meteo_air || airFeed;
 
   const positionInfo = positionConfidence(store.settings || {});
-  const observer = fmt.coord(store.settings?.lat, store.settings?.lon, 4);
+  const observer = opsecActive(store.settings) ? "OP//MASKED" : fmt.coord(store.settings?.lat, store.settings?.lon, 4);
   const latest = (logs.items || [])[0] || null;
   const wxItem = (wx?.items || [])[0] || null;
   const aqItem = (aq?.items || [])[0] || null;

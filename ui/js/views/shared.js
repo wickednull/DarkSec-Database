@@ -66,6 +66,17 @@ export function geocodedPositionMetadata() {
 }
 
 /* A saved coordinate is never presented as live tracking. */
+export function opsecActive(settings = null) {
+  try {
+    if (document.body?.classList.contains("opsec")) return true;
+  } catch {}
+  return !!(settings && settings.opsec_mode);
+}
+
+export function maskLocation(value, settings = null, fallback = "OP//MASKED") {
+  return opsecActive(settings) ? fallback : value;
+}
+
 export function positionConfidence(settings = {}) {
   const source = String(settings.position_source || "unverified").toLowerCase();
   const updated = Date.parse(settings.position_updated_at || "");

@@ -6,7 +6,7 @@ import {
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { calculatorGrid } from "../calculators.js";
-import { kv, errorBox, referenceSection, printText, severityBadge } from "./shared.js";
+import { kv, errorBox, referenceSection, printText, severityBadge } from "./shared.js?v=opsec-1";
 
 function priorityTone(p) {
   const v = String(p || "").toUpperCase();

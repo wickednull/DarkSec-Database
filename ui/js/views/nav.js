@@ -7,8 +7,8 @@ import {
 import { calculatorGrid } from "../calculators.js";
 import {
   kv, errorBox, referenceSection, positionConfidence, manualPositionMetadata, gpsPositionMetadata,
-  phoneGpsMetadata,
-} from "./shared.js";
+  phoneGpsMetadata, opsecActive,
+} from "./shared.js?v=opsec-1";
 import * as U from "../units.js";
 
 const COMPASS_SVG = (declination = 0, sunAz = null, moonAz = null) => {
@@ -146,12 +146,13 @@ export async function render(root, params) {
   convertInput.addEventListener("keydown", (e) => { if (e.key === "Enter") convertBtn.click(); });
 
   const posBox = h("div", { class: "coord-block" });
+  const hidePosition = opsecActive(s);
   posBox.append(
-    coordLine("DECIMAL", coords.dd),
-    coordLine("DMS", coords.dms),
-    coordLine("UTM", coords.utm),
-    coordLine("MGRS", coords.mgrs),
-    coordLine("ELEVATION", `${fmt.num(elevation, 0)} m`),
+    coordLine("DECIMAL", hidePosition ? "OP//MASKED" : coords.dd),
+    coordLine("DMS", hidePosition ? "OP//MASKED" : coords.dms),
+    coordLine("UTM", hidePosition ? "OP//MASKED" : coords.utm),
+    coordLine("MGRS", hidePosition ? "OP//MASKED" : coords.mgrs),
+    coordLine("ELEVATION", hidePosition ? "OP//MASKED" : `${fmt.num(elevation, 0)} m`),
   );
 
   const converter = panel({
@@ -227,8 +228,8 @@ export async function render(root, params) {
       }
       gpsOut.replaceChildren(kv([
         ["FIX", gps.mode ? `MODE ${gps.mode}` : "YES"],
-        ["LATITUDE", fmt.coord(gps.lat, gps.lon, 6)],
-        ["ALTITUDE", `${fmt.num(gps.alt_m, 1)} m`],
+        ["LATITUDE", opsecActive(s) ? "OP//MASKED" : fmt.coord(gps.lat, gps.lon, 6)],
+        ["ALTITUDE", opsecActive(s) ? "OP//MASKED" : `${fmt.num(gps.alt_m, 1)} m`],
         ["SPEED", `${fmt.num(gps.speed_mps, 2)} m/s`],
         ["TRACK", `${fmt.num(gps.track, 1)}°`],
         ["HORIZONTAL ERROR", gps.accuracy_m != null ? `±${fmt.num(gps.accuracy_m, 1)} m (estimate)` : "not reported"],

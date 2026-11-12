@@ -6,7 +6,7 @@ import {
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { store } from "../store.js";
-import { kv, downloadText, readTextFile, printText } from "./shared.js";
+import { kv, downloadText, readTextFile, printText } from "./shared.js?v=opsec-1";
 import * as U from "../units.js";
 
 let lastTab = "mission";

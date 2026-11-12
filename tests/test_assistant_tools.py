@@ -667,3 +667,18 @@ def test_sitrep_generation_and_save_tools(tmpdb):
     names = {s["function"]["name"] for s in assistant._tools_for_turn(
         cfg, "give me a sitrep and save it to the log", lambda name, args: {})}
     assert {"get_sitrep", "save_sitrep"} <= names
+
+
+def test_opsec_masks_position_in_brief_and_live_status(tmpdb):
+    tmpdb.set_setting("lat", 39.8283)
+    tmpdb.set_setting("lon", -98.5795)
+    tmpdb.set_setting("opsec_mode", True)
+
+    text = server.build_brief(tmpdb)
+    assert "39.8283" not in text and "-98.5795" not in text
+    assert "OP//MASKED" in text
+    assert "SOURCE: MASKED" in text
+
+    compact = server.assistant_live_status_compact(tmpdb)
+    assert compact["position"].get("redacted") is True
+    assert "lat" not in compact["position"] and "lon" not in compact["position"]

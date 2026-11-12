@@ -4,24 +4,24 @@ import {
   h, append, icon, hydrateIcons, toast, modal, btn, input, field, emptyState, fmt,
 } from "./components.js";
 import { openRecordForm } from "./records.js";
-import { positionConfidence } from "./views/shared.js";
+import { positionConfidence, opsecActive } from "./views/shared.js?v=opsec-1";
 
-import * as dashboard from "./views/dashboard.js?v=better-1";
-import * as mapView from "./views/map.js?v=map-upgrade-10";
+import * as dashboard from "./views/dashboard.js?v=better-2";
+import * as mapView from "./views/map.js?v=map-upgrade-11";
 import * as library from "./views/library.js?v=better-1";
 import * as manual from "./views/manual.js";
-import * as navView from "./views/nav.js";
+import * as navView from "./views/nav.js?v=opsec-1";
 import * as comms from "./views/comms.js";
 import * as sdr from "./views/sdr.js";
 import * as medical from "./views/medical.js";
 import * as supply from "./views/supply.js?v=better-5";
-import * as cbrn from "./views/cbrn.js";
-import * as security from "./views/security.js";
+import * as cbrn from "./views/cbrn.js?v=opsec-1";
+import * as security from "./views/security.js?v=opsec-1";
 import * as logistics from "./views/logistics.js";
-import * as weather from "./views/weather.js";
-import * as intel from "./views/intel.js?v=better-11";
+import * as weather from "./views/weather.js?v=opsec-1";
+import * as intel from "./views/intel.js?v=better-12";
 import * as assistant from "./views/assistant.js?v=better-21";
-import * as settings from "./views/settings.js?v=better-13";
+import * as settings from "./views/settings.js?v=better-14";
 
 const ROUTES = {
   dashboard: { title: "Situation Report", group: "COMMAND", icon: "dashboard", view: dashboard },
@@ -323,7 +323,9 @@ function startClock() {
           return;
         }
       }
-      if (lastStatus) epoch.textContent = `${Number(store.settings.lat).toFixed(4)}, ${Number(store.settings.lon).toFixed(4)}`;
+      if (lastStatus) epoch.textContent = store.settings?.opsec_mode
+        ? "OP//MASKED"
+        : `${Number(store.settings.lat).toFixed(4)}, ${Number(store.settings.lon).toFixed(4)}`;
     }
   };
   tick();
@@ -452,10 +454,15 @@ function updateSyncPill(sync) {
 function updateGpsStatus(settings = {}) {
   const chip = document.getElementById("sbGps");
   if (!chip) return;
+  chip.classList.remove("gps-warn", "gps-danger");
+  if (opsecActive(settings)) {
+    chip.textContent = "GPS MASKED";
+    chip.title = "Position source, age and accuracy are masked by OPSEC mode.";
+    return;
+  }
   const source = String(settings.position_source || "unverified").toLowerCase();
   const info = positionConfidence(settings);
   const accuracy = Number(settings.position_accuracy_m);
-  chip.classList.remove("gps-warn", "gps-danger");
   if (source === "phone" || source === "gpsd") {
     const label = source === "phone" ? "PHONE" : "RCVR";
     chip.textContent = `GPS ${label}${Number.isFinite(accuracy) ? ` ±${fmt.num(accuracy, 1)}m` : ""} · ${fmt.ago(settings.position_fix_at || settings.position_updated_at)}`;
@@ -484,10 +491,12 @@ async function refreshGrid() {
       if (grid) {
         grid.dataset.value = s.grid_format === "utm" ? c.utm : s.grid_format === "dd" ? c.dd : c.mgrs;
         grid.textContent = s.opsec_mode ? "OP//MASKED" : grid.dataset.value;
-        grid.parentElement.title = `${c.dd} // ${c.utm} // ${c.mgrs} · ${positionConfidence(s).text}`;
+        grid.parentElement.title = s.opsec_mode
+          ? "Coordinates masked by OPSEC mode"
+          : `${c.dd} // ${c.utm} // ${c.mgrs} · ${positionConfidence(s).text}`;
       }
       const sb = document.getElementById("sbCoords");
-      if (sb && !s.epoch) sb.textContent = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+      if (sb && !s.epoch) sb.textContent = s.opsec_mode ? "OP//MASKED" : `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
     } catch {}
   }, 200);
 }

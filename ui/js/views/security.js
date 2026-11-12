@@ -6,7 +6,7 @@ import {
   field, input, textarea, checkbox, modal, confirmDialog,
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions, severityTone } from "../records.js";
-import { kv, referenceSection, severityBadge, printText } from "./shared.js";
+import { kv, referenceSection, severityBadge, printText } from "./shared.js?v=opsec-1";
 
 let lastTab = "vault";
 let selectedNoteId = null;
@@ -405,7 +405,7 @@ async function opsecSection(root) {
 
   const controls = h("div", { class: "col" });
   for (const [key, label, help] of [
-    ["opsec_mode", "OPSEC mode", "Masks the persistent grid-coordinate readout and marks the interface as OPSEC. It does not hide open windows or encrypt the screen."],
+    ["opsec_mode", "OPSEC mode", "Masks grid/coordinate readouts, the status-bar GPS source, position fields and the map position marker; also disables phone GPS/LAN access and pauses feed refresh. It does not hide open windows, the map itself, or encrypt the screen."],
     ["scanlines", "CRT scanlines", "Display effect only; turn off for maximum legibility or reduced visual noise."],
     ["sound", "Interface sound", "Reserved for audible cues. Verify device volume before relying on it."],
     ["feed_auto_refresh", "Automatic feed refresh", "When online and OPSEC is off, the console pulls public feeds in the background. Set the cadence in System Settings. Treat all network activity as an emissions risk."],

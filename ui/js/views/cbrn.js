@@ -6,7 +6,7 @@ import {
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { calculatorGrid } from "../calculators.js";
-import { kv, referenceSection, positionConfidence } from "./shared.js";
+import { kv, referenceSection, positionConfidence, opsecActive } from "./shared.js?v=opsec-1";
 import * as U from "../units.js";
 
 const CBRN_AUTO_MS = 60_000;
@@ -68,7 +68,7 @@ function cbrnLivePanel(live) {
   body.appendChild(h("div", {
     class: "tiny muted",
     title: positionInfo.text,
-    text: `REFERENCE POSITION ${fmt.coord(position.lat, position.lon, 4)} · ${positionInfo.mapLabel} · Safecast distance is measured from this stored reference`,
+    text: `REFERENCE POSITION ${opsecActive(store.settings) ? "OP//MASKED" : fmt.coord(position.lat, position.lon, 4)} · ${positionInfo.mapLabel} · Safecast distance is measured from this stored reference`,
   }));
 
   const cols = h("div", { class: "grid grid-2 gap-14" });

@@ -3,7 +3,7 @@ import { api } from "../api.js";
 import {
   h, panel, pageHead, btn, input, select, loading, emptyState, toast, fmt, badge, field,
 } from "../components.js";
-import { errorBox, progressBar, downloadText } from "./shared.js";
+import { errorBox, progressBar, downloadText } from "./shared.js?v=opsec-1";
 
 let pdfjsPromise = null;
 

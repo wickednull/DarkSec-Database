@@ -3,7 +3,7 @@
    local files or an operator-supplied MBTiles archive. No tile server is
    contacted. Everything else is waypoints and tracks in the local database. */
 import { api, download } from "../api.js";
-import * as mapGl from "./map-gl.js?v=map-upgrade-8";
+import * as mapGl from "./map-gl.js?v=map-upgrade-9";
 import { store } from "../store.js";
 import {
   h, panel, pageHead, btn, iconBtn, icon, badge, toast, modal, field, input, select,
@@ -11,7 +11,7 @@ import {
 } from "../components.js";
 import * as U from "../units.js";
 import { openRecordForm, deleteRecord } from "../records.js";
-import { downloadText, readTextFile, positionConfidence } from "./shared.js";
+import { downloadText, readTextFile, positionConfidence, opsecActive } from "./shared.js?v=opsec-1";
 
 const R = 6371008.8;
 const TILE = 256;
@@ -68,6 +68,7 @@ export async function render(root, params = {}) {
   const configuredLat = Number(settings.lat), configuredLon = Number(settings.lon);
   const homeLat = Number.isFinite(configuredLat) ? configuredLat : 39.8283;
   const homeLon = Number.isFinite(configuredLon) ? configuredLon : -98.5795;
+  const hidePosition = opsecActive(settings);
   const positionInfo = positionConfidence(settings);
   let intelFeatures = [];
   let intelAircraft = [];
@@ -108,12 +109,12 @@ export async function render(root, params = {}) {
     return;
   }
 
-  const startLat = homeLat;
-  const startLon = homeLon;
+  const startLat = hidePosition ? 20 : homeLat;
+  const startLon = hidePosition ? 0 : homeLon;
   const view = {
     lat: Number.isFinite(startLat) ? startLat : 39.8283,
     lon: Number.isFinite(startLon) ? startLon : -98.5795,
-    zoom: 5,
+    zoom: hidePosition ? 1.6 : 5,
   };
   const visible = {
     countries: true, states: true, land: true, lakes: true, rivers: true,
@@ -150,7 +151,7 @@ export async function render(root, params = {}) {
   root.appendChild(pageHead({
     kicker: "COMMAND // TERRAIN",
     title: "Map & Terrain",
-    desc: `Bundled vector terrain, local raster tiles, waypoints/tracks and cached intelligence. Position: ${positionInfo.mapLabel}. Click intel/aircraft/satellites for details. Use intel age filter in Layers. Works offline.`,
+    desc: `Bundled vector terrain, local raster tiles, waypoints/tracks and cached intelligence. Position: ${hidePosition ? "OP//MASKED" : positionInfo.mapLabel}. Click intel/aircraft/satellites for details. Use intel age filter in Layers. Works offline.`,
     actions: [
       btn("2D CANVAS", { icon: "map", tone: "primary", onClick: () => { location.hash = "#/map?renderer=2d"; } }),
       btn("3D GL", { icon: "layers", onClick: () => { location.hash = "#/map?renderer=gl"; } }),
@@ -390,7 +391,7 @@ export async function render(root, params = {}) {
     ctx.fillStyle = "#030806";
     ctx.fillRect(0, 0, w, hh);
     hudZoom.lastChild.textContent = String(view.zoom);
-    hudCenter.textContent = `${view.lat.toFixed(4)} ${view.lon.toFixed(4)}`;
+    hudCenter.textContent = hidePosition ? "OP//MASKED" : `${view.lat.toFixed(4)} ${view.lon.toFixed(4)}`;
 
     if (visible.basemap) drawTiles(ctx, w, hh);
 
@@ -1202,6 +1203,7 @@ export async function render(root, params = {}) {
   }
 
   function drawPosition(ctx, w, hh) {
+    if (hidePosition) return;
     const lat = Number(store.settings?.lat), lon = Number(store.settings?.lon);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
     const s = latLonToScreen(lat, lon);
@@ -1272,9 +1274,9 @@ export async function render(root, params = {}) {
   }
   function zoomBy(delta) { zoomAt(view.zoom + delta); }
   function home() {
-    view.lat = homeLat;
-    view.lon = homeLon;
-    view.zoom = 10;
+    view.lat = hidePosition ? 20 : homeLat;
+    view.lon = hidePosition ? 0 : homeLon;
+    view.zoom = hidePosition ? 1.6 : 10;
     selected = null;
     draw();
   }
@@ -1792,6 +1794,10 @@ export async function render(root, params = {}) {
 
   function updateReadout(latlon, screen = null) {
     if (!latlon) return;
+    if (opsecActive(store.settings)) {
+      readout.replaceChildren(h("div", { class: "tiny", text: "COORDS MASKED (OPSEC)" }));
+      return;
+    }
     if (screen) hover = screen;
     const key = `${latlon.lat.toFixed(5)}|${latlon.lon.toFixed(5)}`;
     if (key === lastReadout) return;
@@ -1981,8 +1987,8 @@ export async function render(root, params = {}) {
   renderWaypoints();
   renderIntel();
   updateModeHud();
-  hudCenter.textContent = `${view.lat.toFixed(4)} ${view.lon.toFixed(4)}`;
-  if (coordNow) readout.appendChild(h("div", { class: "tiny", text: coordNow.mgrs || "" }));
+  hudCenter.textContent = hidePosition ? "OP//MASKED" : `${view.lat.toFixed(4)} ${view.lon.toFixed(4)}`;
+  if (coordNow && !hidePosition) readout.appendChild(h("div", { class: "tiny", text: coordNow.mgrs || "" }));
   resizeObs = new ResizeObserver(() => draw());
   resizeObs.observe(shell);
   setTimeout(() => { draw(); updateReadout({ lat: view.lat, lon: view.lon }); }, 40);

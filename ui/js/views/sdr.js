@@ -5,7 +5,7 @@ import {
   h, panel, stat, btn, badge, pageHead, alertStrip, emptyState, loading, fmt, toast,
   field, input, select, checkbox, modal, confirmDialog,
 } from "../components.js";
-import { kv, progressBar, referenceSection, statusTone } from "./shared.js";
+import { kv, progressBar, referenceSection, statusTone } from "./shared.js?v=opsec-1";
 
 const DEMODS = [
   { value: "nfm", label: "NFM — narrowband voice" },

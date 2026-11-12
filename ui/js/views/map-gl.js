@@ -4,7 +4,7 @@
 import { api } from "../api.js";
 import { store } from "../store.js";
 import { h, pageHead, btn, alertStrip, loading, fmt, toast, panel, checkbox, select, field, badge } from "../components.js";
-import { positionConfidence } from "./shared.js";
+import { positionConfidence, opsecActive } from "./shared.js?v=opsec-1";
 import * as U from "../units.js";
 
 let maplibrePromise = null;
@@ -92,6 +92,7 @@ export async function render(root) {
   const settings = store.settings || {};
   const homeLat = Number.isFinite(Number(settings.lat)) ? Number(settings.lat) : 39.8283;
   const homeLon = Number.isFinite(Number(settings.lon)) ? Number(settings.lon) : -98.5795;
+  const hidePosition = opsecActive(settings);
   const positionInfo = positionConfidence(settings);
   let intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud;
   let statusBox = null, coordBox = null;
@@ -111,18 +112,18 @@ export async function render(root) {
   let maplibregl;
   try { maplibregl = await loadMapLibre(); } catch (err) { root.replaceChildren(h("div", { class: "callout danger", text: err.message })); return; }
 
-  const state = { maxAgeHours: 0, show: { hazards:true, conflict:true, aircraft:true, sats:true, maritime:true, cables:true, cctv:true, cctvAlpr:true, wind:false, rain:false, cloud:false, terrain: !!demStatus?.available, waypoints:true, tracks:true, daynight:true, home:true } };
+  const state = { maxAgeHours: 0, show: { hazards:true, conflict:true, aircraft:true, sats:true, maritime:true, cables:true, cctv:true, cctvAlpr:true, wind:false, rain:false, cloud:false, terrain: !!demStatus?.available, waypoints:true, tracks:true, daynight:true, home:!hidePosition } };
   let map = null, popup = null, daynightTimer = null, glLiveTimer = null, inspector = null;
 
   root.replaceChildren();
   root.appendChild(pageHead({
     kicker: "COMMAND // TERRAIN (GL PROTOTYPE)",
     title: "Map & Terrain — 3D/GL",
-    desc: `WebGL situational map over local/offline raster tiles. Pitch/rotate for 3D perspective. Position: ${positionInfo.mapLabel}. DEM terrain, wind/rain/cloud overlays, and maritime/cables/CCTV layers use local cache when available.`,
+    desc: `WebGL situational map over local/offline raster tiles. Pitch/rotate for 3D perspective. Position: ${hidePosition ? "OP//MASKED" : positionInfo.mapLabel}. DEM terrain, wind/rain/cloud overlays, and maritime/cables/CCTV layers use local cache when available.`,
     actions: [
       btn("2D CANVAS", { icon: "map", onClick: () => { location.hash = "#/map?renderer=2d"; } }),
       btn("3D GL", { icon: "layers", tone: "primary", onClick: () => { location.hash = "#/map?renderer=gl"; } }),
-      btn("RESET", { icon: "target", onClick: () => map?.easeTo({ center:[homeLon,homeLat], zoom:4, pitch:0, bearing:0 }) }),
+      btn("RESET", { icon: "target", onClick: () => map?.easeTo({ center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 4, pitch:0, bearing:0 }) }),
       btn("PITCH 45°", { icon: "layers", onClick: () => map?.easeTo({ pitch:45, duration:600 }) }),
       btn("GLOBE/FLAT", { icon: "globe", onClick: toggleProjection }),
       btn("REFRESH OVERLAYS", { icon: "refresh", tone:"ghost", onClick: refreshOverlays }),
@@ -184,7 +185,7 @@ export async function render(root) {
   side.appendChild(panel({ title:"Situational Summary", icon:"globe", body: statsBox }));
   side.appendChild(panel({ title:"Inspector", icon:"info", body: inspector }));
 
-  map = new maplibregl.Map({ container, style: rasterStyle(), center:[homeLon,homeLat], zoom:3.5, pitch:0, bearing:0, attributionControl:true, maxPitch:85 });
+  map = new maplibregl.Map({ container, style: rasterStyle(), center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 3.5, pitch:0, bearing:0, attributionControl:true, maxPitch:85 });
   map.addControl(new maplibregl.NavigationControl({ visualizePitch:true, showCompass:true, showZoom:true }), "top-right");
   map.addControl(new maplibregl.ScaleControl({ maxWidth:120, unit: U.isImperial() ? "imperial" : "metric" }), "bottom-left");
   try { if (typeof map.setProjection === 'function') map.setProjection({ type:'globe' }); } catch (e) { console.warn('Initial globe projection failed', e); }
@@ -341,11 +342,11 @@ export async function render(root) {
     for (const a of (intel?.aircraft||[]).slice(0,200)) if(Number.isFinite(Number(a.lon))&&Number.isFinite(Number(a.lat))) coords.push([Number(a.lon),Number(a.lat)]);
     for (const s of (intel?.satellites||[]).slice(0,150)) if(Number.isFinite(Number(s.lon))&&Number.isFinite(Number(s.lat))) coords.push([Number(s.lon),Number(s.lat)]);
     for (const w of waypoints) if(Number.isFinite(Number(w.lon))&&Number.isFinite(Number(w.lat))) coords.push([Number(w.lon),Number(w.lat)]);
-    if (coords.length < 1) { map.easeTo({ center:[homeLon,homeLat], zoom:4 }); return; }
+    if (coords.length < 1) { map.easeTo({ center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 4 }); return; }
     if (coords.length === 1) { map.easeTo({ center: coords[0], zoom: 8 }); return; }
     let minX=180,minY=85,maxX=-180,maxY=-85;
     for (const [x,y] of coords) { if(x<minX)minX=x; if(y<minY)minY=y; if(x>maxX)maxX=x; if(y>maxY)maxY=y; }
-    try { map.fitBounds([[minX,minY],[maxX,maxY]], { padding: 40, maxZoom: 10, duration: 700 }); } catch { map.easeTo({ center:[homeLon,homeLat], zoom:4 }); }
+    try { map.fitBounds([[minX,minY],[maxX,maxY]], { padding: 40, maxZoom: 10, duration: 700 }); } catch { map.easeTo({ center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 4 }); }
   }
 
   function fmtProp(k,v){

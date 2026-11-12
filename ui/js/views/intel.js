@@ -4,7 +4,7 @@ import {
   h, panel, stat, gauge, badge, btn, pageHead, alertStrip, emptyState, loading, fmt, toast,
   tabs, sectionTitle, input, select, field,
 } from "../components.js";
-import { feedBadge, severityBadge, positionConfidence } from "./shared.js";
+import { feedBadge, severityBadge, positionConfidence, opsecActive } from "./shared.js?v=opsec-1";
 import * as U from "../units.js";
 
 const AUTO_MS = 90_000;
@@ -67,7 +67,7 @@ export async function render(root, params = {}) {
   let pizzint = null;
   try { pizzint = await api.get("/api/pizzint"); } catch (err) { pizzint = { error: err.message }; }
   const positionInfo = positionConfidence(store.settings || {});
-  const observer = fmt.coord(store.settings?.lat, store.settings?.lon, 4);
+  const observer = opsecActive(store.settings) ? "OP//MASKED" : fmt.coord(store.settings?.lat, store.settings?.lon, 4);
   const feedById = Object.fromEntries(feeds.map((f) => [f.id, f]));
 
   root.appendChild(pageHead({

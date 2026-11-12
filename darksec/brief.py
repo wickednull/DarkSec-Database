@@ -14,6 +14,7 @@ from .trips import trip_items
 
 def build_brief(db: Database, vault: Optional[dict] = None) -> str:
     s = db.all_settings()
+    opsec = bool(s.get("opsec_mode"))
     r = readiness(db)
     now = datetime.now(timezone.utc)
     try:
@@ -110,14 +111,20 @@ def build_brief(db: Database, vault: Optional[dict] = None) -> str:
     tband = (local_threat or {}).get("band") or "?"
     tscore = (local_threat or {}).get("score")
     tscoped = "location-weighted" if (local_threat or {}).get("events_scoped") else "global/cached"
+    if opsec:
+        position_line = "POSITION: OP//MASKED // OP//MASKED"
+        source_line = "SOURCE: MASKED · FIX AGE: MASKED"
+    else:
+        position_line = f"POSITION: {float(s['lat']):.6f}, {float(s['lon']):.6f}   {grid}"
+        source_line = provenance
     lines = [
         "DARKSEC // FIELD SITUATION REPORT",
         "UNCLASSIFIED // FIELD OPERATIONS",
         "=" * 58,
         f"TIME (UTC): {now.isoformat(timespec='seconds')}",
         f"OPERATOR: {s.get('operator') or '-'}    CALLSIGN: {s.get('callsign') or '-'}    TEAM: {s.get('team') or '-'}",
-        f"POSITION: {float(s['lat']):.6f}, {float(s['lon']):.6f}   {grid}",
-        f"{provenance}",
+        position_line,
+        source_line,
         *([f"WARNING: {position_warning}"] if position_warning else []),
         f"READINESS: {r['band']} ({r['score'] if r['score'] is not None else 'N/A'}/100)   SOURCE: AUTOMATED OPERATIONAL RISK",
         f"LOCAL THREAT: {tband} ({tscore if tscore is not None else 'N/A'}/100)   MODE: {tscoped}",

@@ -5,7 +5,7 @@ import {
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { calculatorGrid } from "../calculators.js";
-import { kv, progressBar, referenceSection } from "./shared.js";
+import { kv, progressBar, referenceSection } from "./shared.js?v=opsec-1";
 
 let lastTab = "water";
 

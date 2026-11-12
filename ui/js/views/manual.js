@@ -6,7 +6,7 @@ import {
 } from "../components.js";
 import {
   errorBox, printText, downloadText, referenceGrid, openReferenceCard, loadReference,
-} from "./shared.js";
+} from "./shared.js?v=opsec-1";
 
 export async function render(root, params) {
   root.replaceChildren(loading("LOADING FIELD MANUAL"));
