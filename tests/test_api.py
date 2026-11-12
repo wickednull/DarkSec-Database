@@ -1002,3 +1002,18 @@ def test_purge_removes_chat_history(client):
     assert db.one("SELECT count(*) c FROM assistant_conversations")["c"] == 0
     assert db.one("SELECT count(*) c FROM assistant_messages")["c"] == 0
     assert db.get_setting("assistant_history_encrypted", False) is False
+
+
+def test_plain_chat_history_default_after_purge(client):
+    from darksec import config
+    from darksec.db import Database
+
+    assert client.get("/api/vault/status").json()["configured"] is False
+    conv = client.post("/api/assistant/conversations", json={"title": "plain chat"}).json()
+    assert conv.get("id")
+    listed = client.get("/api/assistant/conversations").json()
+    assert listed["encrypted"] is False
+    assert any(i["id"] == conv["id"] and i["title"] == "plain chat" for i in listed["items"])
+    db = Database(config.DB_PATH)
+    raw = db.one("SELECT title, encrypted FROM assistant_conversations WHERE id=?", (conv["id"],))
+    assert raw["title"] == "plain chat" and raw["encrypted"] == 0
