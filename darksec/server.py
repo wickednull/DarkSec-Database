@@ -1521,6 +1521,55 @@ def ai_system_write(d: Database, path: str, content: str, overwrite: bool = Fals
         return {"ok": False, "error": str(exc)[:300]}
 
 
+def _save_title_from_text(text: str) -> str:
+    for line in str(text or "").splitlines():
+        clean = re.sub(r"^[#>*\-\s]+", "", line).strip()
+        if clean:
+            return clean[:120]
+    return "Delamain chat"
+
+
+def vault_save_fast_events(d: Database, v, prompt: str, history: list[dict] | None):
+    """Save the exact previous message when the operator says 'save this'."""
+    content = assistant.last_reference_text(history, prompt)
+    if not content:
+        return None
+    title = _save_title_from_text(content)
+
+    def events():
+        if v.configured() and not v.unlocked():
+            yield {
+                "type": "vault_unlock_required",
+                "tool": "save_note",
+                "title": title,
+                "detail": "Delamain needs to save this response to the encrypted vault. Unlock it to continue; the note is saved automatically.",
+            }
+            deadline = time.time() + 120.0
+            while time.time() < deadline and not v.unlocked():
+                time.sleep(0.4)
+            yield {"type": "vault_unlock_result", "tool": "save_note",
+                   "unlocked": bool(v.unlocked())}
+            if not v.unlocked():
+                yield {"type": "done", "ok": True, "model": "vault", "content":
+                       "Vault is locked. Unlock it in SECURITY to save this note.",
+                       "thinking": "", "thinking_present": False, "tools": [],
+                       "created_at": utcnow()}
+                return
+        try:
+            result = ai_note_save(d, v, title, content, "delamain,chat-log",
+                                  max_chars=AI_CHAT_MAX_CHARS)
+            content_out = f"Saved to the encrypted vault: **{title}** (#{result.get('id')})."
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc)[:300]}
+            content_out = f"Could not save to the vault: {str(exc)[:300]}"
+        yield {"type": "done", "ok": True, "model": "vault", "content": content_out,
+               "thinking": "", "thinking_present": False,
+               "tools": [{"name": "save_note", "args": {"title": title}, "result": result}],
+               "created_at": utcnow()}
+
+    return events()
+
+
 def vault_fast_events(d: Database, v, prompt: str):
     """Deterministic stream for simple vault read/list requests.
 
@@ -2090,7 +2139,24 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         d.audit("ASSISTANT_CHAT", json.dumps({"model": model or d.get_setting("ollama_model", ""), "prompt_chars": len(prompt), "has_context": bool(context), "think": think, "images": len(image_paths)}), request.client.host if request.client else "")
         v = vault(request)
         direct = None
-        if assistant.vault_direct_read_intent(prompt):
+        if assistant.referential_save_intent(prompt):
+            save_text = assistant.last_reference_text(history, prompt)
+            if save_text:
+                if v.configured() and not v.unlocked():
+                    raise HTTPException(status_code=403, detail="Vault is locked. Unlock it to save this note.")
+                save_title = _save_title_from_text(save_text)
+                try:
+                    saved = ai_note_save(d, v, save_title, save_text, "delamain,chat-log",
+                                         max_chars=AI_CHAT_MAX_CHARS)
+                    content = f"Saved to the encrypted vault: **{save_title}** (#{saved.get('id')})."
+                    tools = [{"name": "save_note", "args": {"title": save_title}, "result": saved}]
+                except Exception as exc:
+                    content = f"Could not save to the vault: {str(exc)[:300]}"
+                    tools = []
+                direct = {"ok": True, "model": "vault", "content": content,
+                          "thinking": "", "thinking_present": False, "tools": tools,
+                          "created_at": utcnow()}
+        if direct is None and assistant.vault_direct_read_intent(prompt):
             if v.configured() and not v.unlocked():
                 raise HTTPException(status_code=403, detail="Vault is locked. Unlock it to read encrypted notes.")
             try:
@@ -2157,7 +2223,11 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             final_model = use_model
             v = vault(request)
             try:
-                if assistant.vault_direct_read_intent(prompt):
+                save_fast = (vault_save_fast_events(d, v, prompt, history)
+                             if assistant.referential_save_intent(prompt) else None)
+                if save_fast is not None:
+                    iterator = save_fast
+                elif assistant.vault_direct_read_intent(prompt):
                     iterator = vault_fast_events(d, v, prompt)
                 else:
                     iterator = assistant.chat_stream(d, prompt, history, context, model, think, image_paths,

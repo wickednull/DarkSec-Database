@@ -741,7 +741,7 @@ export async function render(root) {
           }
           if (hadError && !String(content).trim()) throw new Error(hadError);
           const finalContent = String(content || "").trim() || "(model returned empty content)";
-          const truncNote = (doneData?.truncated || doneData?.done_reason === "length") ? " · truncated (increase Max reply tokens)" : "";
+          const truncNote = (doneData?.truncated || doneData?.done_reason === "length") ? " · truncated (increase Context or Max reply tokens)" : "";
           try {
             const html = renderMarkdown(finalContent);
             if (typeof html === "string") ui.body.innerHTML = html;
@@ -783,7 +783,7 @@ export async function render(root) {
         touch();
         const res = await api.post("/api/assistant/chat", payload, { signal: controller.signal });
         const content = (res?.content || "").trim() || "(model returned empty content)";
-        const truncNote = (res?.truncated || res?.done_reason === "length") ? " · truncated (increase Max reply tokens)" : "";
+        const truncNote = (res?.truncated || res?.done_reason === "length") ? " · truncated (increase Context or Max reply tokens)" : "";
         try { pending?.remove(); } catch {}
         pending = null;
         addMsg("assistant", content, `${nowTs()}${truncNote}`, [], { record: true });

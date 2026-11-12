@@ -534,6 +534,40 @@ def vault_edit_intent(query: str) -> bool:
     return bool(_VAULT_EDIT.search(str(query or "")))
 
 
+_REF_SAVE = re.compile(
+    r"\b(?:save|store|write|record|remember)\b.{0,50}\b(?:this|that|it|"
+    r"the (?:last|above|previous) (?:response|message|answer|chat)|"
+    r"our (?:chat|conversation))\b|"
+    r"\b(?:save|store)\b.{0,30}\bas a note\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def referential_save_intent(query: str) -> bool:
+    text = str(query or "")
+    if ":" in text or re.search(r"\b(?:saying|that says|with (?:the )?text|content:)\b", text, re.I):
+        return False
+    return bool(_REF_SAVE.search(text))
+
+
+def last_reference_text(history: list[dict] | None, prompt: str) -> str:
+    """Return the exact previous message being referred to, if any."""
+    prefer_user = bool(re.search(r"\bmy (?:message|question|prompt)\b", str(prompt or ""), re.I))
+    for message in reversed(history or []):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        if prefer_user:
+            if role == "user":
+                return content
+        elif role == "assistant":
+            return content
+    return ""
+
+
 def vault_read_only_intent(query: str) -> bool:
     return vault_read_intent(query) and not vault_save_intent(query)
 
@@ -550,6 +584,67 @@ def vault_direct_read_intent(query: str) -> bool:
     return (vault_read_only_intent(query)
             and not vault_edit_intent(query)
             and not _VAULT_ANALYZE.search(str(query or "")))
+
+
+_TASK_HINTS = re.compile(r"\b(tasks?|to-?do|remind|due date|priority)\b", re.I)
+_INVENTORY_HINTS = re.compile(r"\b(inventory|stock|supplies|supply|qty|quantity|restock|expir\w*)\b", re.I)
+_INCIDENT_HINTS = re.compile(r"\b(incidents?|security event|report an incident|resolve .*incident)\b", re.I)
+_CHECKLIST_HINTS = re.compile(r"\b(checklists?|check list|kits?|gear list)\b", re.I)
+_WATER_HINTS = re.compile(r"\b(water test|water log|chlorine|turbidity|potable|water quality)\b", re.I)
+_LOG_HINTS = re.compile(r"\b(mission log|journal|log entr(?:y|ies)|what did i (?:log|record)|log (?:this|that|it)|record (?:this|that|it))\b", re.I)
+_LIBRARY_HINTS = re.compile(r"\b(manuals?|documents?|pdfs?|books?|guides?|handbooks?|library|field manual)\b", re.I)
+_VAULT_HINTS = re.compile(r"\b(note|notes|vault)\b", re.I)
+
+_TOOL_GROUPS = {
+    "vault": {"list_vault_notes", "get_vault_note", "edit_vault_note", "save_note"},
+    "tasks": {"list_tasks", "create_task", "complete_task"},
+    "inventory": {"query_inventory", "adjust_inventory"},
+    "incidents": {"create_incident", "resolve_incident"},
+    "checklists": {"read_checklist", "update_checklist"},
+    "water": {"read_water_log", "log_water_test"},
+    "log": {"search_mission_log", "save_log_entry"},
+    "library": {"get_library_document", "search_library"},
+    "live": {"get_live_status"},
+    "system": {"list_system_directory", "read_system_file", "write_system_file"},
+}
+
+
+def select_tool_names(cfg: dict, prompt: str) -> set[str] | None:
+    """Choose a small intent-specific tool set to protect context/token budget."""
+    text = str(prompt or "")
+    selected: set[str] = set()
+    if _VAULT_HINTS.search(text):
+        selected |= _TOOL_GROUPS["vault"]
+    if _TASK_HINTS.search(text):
+        selected |= _TOOL_GROUPS["tasks"]
+    if _INVENTORY_HINTS.search(text):
+        selected |= _TOOL_GROUPS["inventory"]
+    if _INCIDENT_HINTS.search(text):
+        selected |= _TOOL_GROUPS["incidents"]
+    if _CHECKLIST_HINTS.search(text):
+        selected |= _TOOL_GROUPS["checklists"]
+    if _WATER_HINTS.search(text):
+        selected |= _TOOL_GROUPS["water"]
+    if _LOG_HINTS.search(text):
+        selected |= _TOOL_GROUPS["log"]
+    if _LIBRARY_HINTS.search(text):
+        selected |= _TOOL_GROUPS["library"]
+    if _TOOL_HINTS.search(text):
+        selected.add("get_live_status")
+    system_intent = bool(cfg.get("system_tools") and _SYSTEM_HINTS.search(text))
+    if system_intent:
+        selected |= _TOOL_GROUPS["system"]
+        if (not re.search(r"\b(?:vault|encrypted) (?:note|notes)\b", text, re.I)
+                and re.search(r"\.\w+|\bfile\b|\bfolder\b|\bdirectory\b|[/\\]", text)):
+            selected -= _TOOL_GROUPS["vault"]
+    if not selected:
+        if vault_save_intent(text) or record_write_intent(text):
+            selected |= {"save_note", "save_log_entry"}
+        elif tools_relevant(text):
+            selected |= {"get_live_status", "search_library", "search_mission_log"}
+        else:
+            return None
+    return selected
 
 
 _SYSTEM_WRITE = re.compile(r"\b(?:write|save|create|append|edit|update|replace|put)\b", re.IGNORECASE)
@@ -1153,6 +1248,13 @@ def _tool_fallback_text(events: list[dict]) -> str:
                 f"- **{n.get('title')}** — updated {n.get('updated')}"
                 for n in notes[:30] if isinstance(n, dict)
             )
+        if result.get("ok"):
+            for key in ("id", "task", "incident", "item"):
+                value = result.get(key)
+                if key == "id" and value:
+                    return f"Completed {event.get('name', 'tool')} (#{value})."
+                if isinstance(value, dict) and value.get("id"):
+                    return f"Completed {event.get('name', 'tool')} (#{value['id']})."
     errors = []
     for event in reversed(events or []):
         result = event.get("result") if isinstance(event, dict) else None
@@ -1175,16 +1277,15 @@ def _tools_for_turn(cfg: dict, prompt: str, tool_executor) -> list[dict] | None:
     """Decide whether this turn gets the (expensive) tool definitions."""
     if not tool_executor or not cfg.get("tools", True):
         return None
-    if cfg.get("tools_auto", True) and not tools_relevant(prompt) and not (
-        cfg.get("system_tools") and _SYSTEM_HINTS.search(prompt)
-    ):
+    names = select_tool_names(cfg, prompt)
+    if not names:
         return None
-    specs = tool_specs(cfg)
+    specs = [spec for spec in tool_specs(cfg)
+             if spec["function"]["name"] in names]
     if vault_read_only_intent(prompt) or vault_edit_intent(prompt):
         specs = [spec for spec in specs
                  if spec["function"]["name"] not in ("save_note", "save_log_entry")]
     return specs
-
 
 def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, stream: bool = False, images: list | None = None, tools: list | None = None):
     cfg = _settings(db)
@@ -1195,13 +1296,20 @@ def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, 
         raise ValueError("No Ollama model configured. Set assistant/ollama model in Settings.")
     messages = build_messages(db, prompt, history=history, context=context, images=images, include_tools=bool(tools))
     use_think = bool(cfg.get("think", False)) if think is None else bool(think)
+    # Tool schemas and tool results need headroom. A 4096-token context can be
+    # completely consumed by the prompt before the model can emit a final
+    # answer, which shows up as "truncated" or empty content. Raise the
+    # effective context floor only for turns that actually carry tools.
+    num_ctx = int(cfg["num_ctx"])
+    if tools and num_ctx < 8192:
+        num_ctx = 8192
     payload = {
         "model": use_model,
         "messages": messages,
         "stream": bool(stream),
         "think": use_think,
         "keep_alive": cfg["keep_alive"],
-        "options": {"temperature": cfg["temperature"], "num_ctx": cfg["num_ctx"], "num_predict": cfg["max_tokens"]},
+        "options": {"temperature": cfg["temperature"], "num_ctx": num_ctx, "num_predict": cfg["max_tokens"]},
     }
     if tools and cfg.get("tools", True):
         payload["tools"] = tools
@@ -1218,6 +1326,7 @@ def chat(db: Database, prompt: str, history: list[dict] | None = None, context: 
     tool_events: list[dict] = []
     data: dict = {}
     content = ""
+    all_content = ""
     thinking_text = ""
     for _round in range(4):
         resp = requests.post(f"{cfg['base_url']}/api/chat", headers=UA, data=json.dumps(payload), timeout=cfg["timeout"])
@@ -1236,6 +1345,8 @@ def chat(db: Database, prompt: str, history: list[dict] | None = None, context: 
         if isinstance(msg, dict):
             content = msg.get("content") or ""
             thinking_text = msg.get("thinking") or ""
+        if str(content or "").strip():
+            all_content = (all_content.rstrip() + "\n\n" + str(content).strip()).strip() if all_content else str(content).strip()
         calls = msg.get("tool_calls") if isinstance(msg, dict) else None
         if calls and use_tools:
             messages.append({"role": "assistant", "content": str(content or ""), "tool_calls": calls})
@@ -1250,6 +1361,9 @@ def chat(db: Database, prompt: str, history: list[dict] | None = None, context: 
             payload["messages"] = messages
             continue
         break
+    # Preserve text the model emitted before a tool call, not just the final round.
+    if all_content.strip():
+        content = all_content
     # Qwen 3.5 / thinking models may return useful text in `thinking` when `content` is empty.
     if not str(content).strip() and str(thinking_text).strip():
         content = str(thinking_text).strip()
@@ -1260,6 +1374,9 @@ def chat(db: Database, prompt: str, history: list[dict] | None = None, context: 
     thinking_text = str(thinking_text or "").strip()
     done_reason = data.get("done_reason") if isinstance(data, dict) else None
     truncated = done_reason == "length"
+    if not str(content).strip() and truncated:
+        content = ("The model hit the token limit before producing a response. "
+                   "Increase Context tokens (8192+) or Max reply tokens in Settings.")
     return {
         "ok": True,
         "model": data.get("model") or use_model,
@@ -1269,7 +1386,7 @@ def chat(db: Database, prompt: str, history: list[dict] | None = None, context: 
         "done": bool(data.get("done", True)) if isinstance(data, dict) else True,
         "done_reason": done_reason,
         "truncated": truncated,
-        "note": "Response truncated at the token limit. Increase 'Max reply tokens' in Settings for longer answers." if truncated else "",
+        "note": "Response truncated at the token limit. Increase Context tokens or Max reply tokens in Settings." if truncated else "",
         "total_duration": data.get("total_duration") if isinstance(data, dict) else None,
         "eval_count": data.get("eval_count") if isinstance(data, dict) else None,
         "tools": tool_events,
@@ -1286,6 +1403,7 @@ def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, co
     messages = payload["messages"]
     tool_events: list[dict] = []
     final_model = use_model
+    full_content = ""
     try:
         for _round in range(4):
             content_acc = ""
@@ -1332,6 +1450,8 @@ def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, co
                         break
             if tools_unsupported:
                 continue
+            if content_acc.strip():
+                full_content = (full_content.rstrip() + "\n\n" + content_acc.strip()).strip() if full_content else content_acc.strip()
             if calls and use_tools and _round < 3:
                 messages.append({"role": "assistant", "content": str(content_acc or ""), "tool_calls": calls})
                 for tc in list(calls)[:4]:
@@ -1354,20 +1474,23 @@ def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, co
                     yield {"type": "tool", "name": name, "result": out, "model": final_model}
                 payload["messages"] = messages
                 continue
-            if not content_acc.strip() and tool_events:
-                content_acc = _tool_fallback_text(tool_events)
-            if not content_acc.strip() and thinking_acc.strip():
-                content_acc = thinking_acc.strip()
+            if not full_content.strip() and tool_events:
+                full_content = _tool_fallback_text(tool_events)
+            if not full_content.strip() and thinking_acc.strip():
+                full_content = thinking_acc.strip()
+            if not full_content.strip() and done_data.get("done_reason") == "length":
+                full_content = ("The model hit the token limit before producing a response. "
+                                "Increase Context tokens (8192+) or Max reply tokens in Settings.")
             yield {
                 "type": "done",
                 "ok": True,
                 "model": final_model,
-                "content": content_acc,
+                "content": full_content,
                 "thinking": thinking_acc[:12000],
                 "thinking_present": bool(thinking_acc.strip()),
                 "done_reason": done_data.get("done_reason"),
                 "truncated": done_data.get("done_reason") == "length",
-                "note": "Response truncated at the token limit. Increase 'Max reply tokens' in Settings for longer answers." if done_data.get("done_reason") == "length" else "",
+                "note": "Response truncated at the token limit. Increase Context tokens or Max reply tokens in Settings." if done_data.get("done_reason") == "length" else "",
                 "total_duration": done_data.get("total_duration"),
                 "eval_count": done_data.get("eval_count"),
                 "tools": tool_events,

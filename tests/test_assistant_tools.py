@@ -421,3 +421,39 @@ def test_system_read_converts_encodings_and_documents(tmpdb):
     (root / "binary.bin").write_bytes(b"\x00\x01\x02\xff" * 100)
     binary = server.ai_system_read(tmpdb, "binary.bin")
     assert binary["ok"] is False
+
+
+def test_referential_save_uses_exact_previous_text(tmpdb):
+    vault = Vault(tmpdb)
+    vault.setup("correct horse battery staple")
+    history = [{"role": "user", "content": "plan?"},
+               {"role": "assistant", "content": "EXACT NOTE\nBoil water for one minute."}]
+    events = list(server.vault_save_fast_events(
+        tmpdb, vault, "save this as a note", history))
+    assert events[-1]["type"] == "done"
+    assert "Saved to the encrypted vault" in events[-1]["content"]
+    listed = server.ai_vault_notes_list(tmpdb, vault)
+    assert listed["count"] == 1
+    got = server.ai_vault_note_get(tmpdb, vault, title="EXACT NOTE")
+    assert got["ok"] and got["note"]["body"] == "EXACT NOTE\nBoil water for one minute."
+
+    assert assistant.referential_save_intent("save this as a note") is True
+    assert assistant.referential_save_intent("save a note about water") is False
+    assert assistant.referential_save_intent("save this note: buy water") is False
+
+
+def test_tool_selection_is_intent_scoped():
+    base = {"tools": True, "tools_auto": True, "system_tools": False}
+    note_names = {s["function"]["name"] for s in assistant._tools_for_turn(
+        base, "save a note titled water plan", lambda name, args: {})}
+    assert "save_note" in note_names
+    assert "query_inventory" not in note_names
+    assert len(note_names) <= 5
+
+    task_names = {s["function"]["name"] for s in assistant._tools_for_turn(
+        base, "what tasks are open", lambda name, args: {})}
+    assert task_names == {"list_tasks", "create_task", "complete_task"}
+
+    file_names = {s["function"]["name"] for s in assistant._tools_for_turn(
+        {**base, "system_tools": True}, "read the file notes.txt", lambda name, args: {})}
+    assert file_names == {"list_system_directory", "read_system_file", "write_system_file"}

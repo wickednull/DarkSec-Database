@@ -811,3 +811,28 @@ def test_system_file_tools_setting_roundtrip(client):
     assert settings["assistant_system_tools"] is True
     assert settings["assistant_system_root"] == "~"
     client.put("/api/settings", json={"assistant_system_tools": False})
+
+
+def test_assistant_referential_save_copies_exact_message(client):
+    from darksec import config
+    from darksec.db import Database
+
+    status = client.get("/api/vault/status").json()
+    if not status.get("configured"):
+        client.post("/api/vault/setup", json={"passphrase": "correct horse battery"})
+    else:
+        client.post("/api/vault/unlock", json={"passphrase": "correct horse battery"})
+    marker = _unique("exact-note-body")
+    content = f"Exact saved content\n{marker}"
+    db = Database(config.DB_PATH)
+    before = db.one("SELECT count(*) c FROM notes")["c"]
+    r = client.post("/api/assistant/chat/stream", json={
+        "prompt": "save this as a note",
+        "history": [{"role": "assistant", "content": content}],
+    })
+    assert r.status_code == 200
+    assert "Saved to the encrypted vault" in r.text
+    notes = client.get("/api/notes").json()["items"]
+    assert any(n["body"] == content for n in notes)
+    assert db.one("SELECT count(*) c FROM notes")["c"] == before + 1
+    client.post("/api/vault/lock")
