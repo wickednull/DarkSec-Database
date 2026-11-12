@@ -836,3 +836,30 @@ def test_assistant_referential_save_copies_exact_message(client):
     assert any(n["body"] == content for n in notes)
     assert db.one("SELECT count(*) c FROM notes")["c"] == before + 1
     client.post("/api/vault/lock")
+
+
+def test_assistant_confirm_and_undo_endpoints(client):
+    from darksec import config
+    from darksec.db import Database
+    import darksec.server as srv
+
+    token = srv._register_confirmation()
+    r = client.post("/api/assistant/confirm", json={"id": token, "approved": True})
+    assert r.status_code == 200 and r.json()["approved"] is True
+    assert srv._wait_confirmation(token, timeout=0.1) is True
+
+    db = Database(config.DB_PATH)
+    item_id = db.insert("inventory", {
+        "name": _unique("undo-item"), "category": "GENERAL", "qty": 1,
+        "unit": "ea", "min_qty": 0, "expires": None, "location": "",
+        "notes": "", "updated": "2026-01-01T00:00:00+00:00",
+    })
+    undo_token = srv._register_undo({
+        "kind": "inventory_restore", "id": item_id,
+        "prev": {"qty": 4, "unit": "ea", "category": "GENERAL", "min_qty": 0,
+                 "location": "", "notes": "", "expires": None},
+    }, "test undo")
+    r = client.post("/api/assistant/undo", json={"token": undo_token["token"]})
+    assert r.status_code == 200
+    assert db.one("SELECT qty FROM inventory WHERE id=?", (item_id,))["qty"] == 4
+    db.execute("DELETE FROM inventory WHERE id=?", (item_id,))

@@ -951,7 +951,9 @@ def ai_task_create(d: Database, title: str, detail: str = "", priority: str = "R
     d.audit("ASSISTANT_TASK_CREATE", f"id={task_id} {heading[:100]}")
     task = _ai_row(d.one("SELECT * FROM tasks WHERE id=?", (task_id,)))
     task["detail"] = str(task.get("detail") or "")[:1000]
-    return {"ok": True, "task": task}
+    return {"ok": True, "task": task,
+            "undo": _register_undo({"kind": "task_delete", "id": task_id},
+                                    f"Created task: {heading}")}
 
 
 def ai_task_complete(d: Database, task_id=None, title: str | None = None) -> dict:
@@ -959,11 +961,14 @@ def ai_task_complete(d: Database, task_id=None, title: str | None = None) -> dic
     if error:
         return error
     task_id = int(row["id"])
-    if int(row["done"] or 0):
+    previous_done = int(row["done"] or 0)
+    if previous_done:
         return {"ok": True, "already_done": True, "task": _ai_row(row)}
     d.execute("UPDATE tasks SET done=1 WHERE id=?", (task_id,))
     d.audit("ASSISTANT_TASK_COMPLETE", f"id={task_id}")
-    return {"ok": True, "task": _ai_row(d.one("SELECT * FROM tasks WHERE id=?", (task_id,)))}
+    return {"ok": True, "task": _ai_row(d.one("SELECT * FROM tasks WHERE id=?", (task_id,))),
+            "undo": _register_undo({"kind": "task_done", "id": task_id, "done": previous_done},
+                                    f"Completed task: {row['title']}")}
 
 
 def _inventory_status(item: dict) -> str:
@@ -1072,8 +1077,11 @@ def ai_inventory_adjust(d: Database, item_id=None, name: str | None = None,
         d.audit("ASSISTANT_INVENTORY_CREATE", f"id={new_id} {heading[:100]} qty={new_qty:g}")
         item = _ai_row(d.one("SELECT * FROM inventory WHERE id=?", (new_id,)))
         item["status"] = _inventory_status(item)
-        return {"ok": True, "created": True, "item": item}
+        return {"ok": True, "created": True, "item": item,
+                "undo": _register_undo({"kind": "inventory_delete", "id": new_id},
+                                        f"Created inventory item: {heading}")}
     current = _ai_num(row["qty"]) or 0.0
+    previous = {key: row[key] for key in ("qty", "unit", "category", "min_qty", "location", "notes", "expires")}
     new_qty = set_qty if set_qty is not None else current + (change or 0.0)
     new_qty = max(0.0, new_qty)
     fields = {"qty": new_qty, "updated": utcnow()}
@@ -1096,7 +1104,10 @@ def ai_inventory_adjust(d: Database, item_id=None, name: str | None = None,
     d.audit("ASSISTANT_INVENTORY_ADJUST", f"id={row['id']} qty {current:g}->{new_qty:g}")
     item = _ai_row(d.one("SELECT * FROM inventory WHERE id=?", (int(row["id"]),)))
     item["status"] = _inventory_status(item)
-    return {"ok": True, "item": item, "previous_qty": current, "new_qty": new_qty}
+    return {"ok": True, "item": item, "previous_qty": current, "new_qty": new_qty,
+            "undo": _register_undo(
+                {"kind": "inventory_restore", "id": int(row["id"]), "prev": previous},
+                f"Inventory {row['name']}: {current:g} → {new_qty:g}")}
 
 
 def ai_incident_create(d: Database, title: str, detail: str = "", severity: str = "INFO",
@@ -1119,7 +1130,9 @@ def ai_incident_create(d: Database, title: str, detail: str = "", severity: str 
     d.audit("ASSISTANT_INCIDENT_CREATE", f"id={inc_id} severity={sev}")
     incident = _ai_row(d.one("SELECT * FROM incidents WHERE id=?", (inc_id,)))
     incident["detail"] = str(incident.get("detail") or "")[:2000]
-    return {"ok": True, "incident": incident}
+    return {"ok": True, "incident": incident,
+            "undo": _register_undo({"kind": "incident_delete", "id": inc_id},
+                                    f"Created incident: {heading}")}
 
 
 def ai_incident_resolve(d: Database, incident_id=None, title: str | None = None,
@@ -1145,7 +1158,8 @@ def ai_incident_resolve(d: Database, incident_id=None, title: str | None = None,
                 "open_incidents": [dict(r) for r in d.query(
                     "SELECT id,title,severity,ts FROM incidents WHERE resolved=0 ORDER BY ts DESC LIMIT 12")]}
     inc_id = int(row["id"])
-    detail = str(row["detail"] or "")
+    previous_detail = str(row["detail"] or "")
+    detail = previous_detail
     note = str(resolution or "").strip()
     if note:
         detail = (detail + "\n\nResolution: " + note).strip()
@@ -1153,7 +1167,10 @@ def ai_incident_resolve(d: Database, incident_id=None, title: str | None = None,
     d.audit("ASSISTANT_INCIDENT_RESOLVE", f"id={inc_id}")
     incident = _ai_row(d.one("SELECT * FROM incidents WHERE id=?", (inc_id,)))
     incident["detail"] = str(incident.get("detail") or "")[:2000]
-    return {"ok": True, "incident": incident}
+    return {"ok": True, "incident": incident,
+            "undo": _register_undo({"kind": "incident_restore", "id": inc_id,
+                                    "resolved": 0, "detail": previous_detail},
+                                    f"Resolved incident: {row['title']}")}
 
 
 def _checklist_state(d: Database) -> dict:
@@ -1227,12 +1244,17 @@ def ai_checklist_update(d: Database, kit_id=None, item_id=None, item_text=None,
         return {"ok": False, "error": "Checklist item not found in that kit.",
                 "items": [{"id": i.get("id"), "text": i.get("text")}
                           for i in (kit.get("items") or [])]}
+    previous = bool(_checklist_state(d).get(f"{kit['id']}:{item['id']}", 0))
     d.execute("INSERT INTO checklist_state(kit_id,item_id,checked,updated) VALUES(?,?,?,?) "
               "ON CONFLICT(kit_id,item_id) DO UPDATE SET checked=excluded.checked, updated=excluded.updated",
               (kit["id"], item["id"], 1 if checked else 0, utcnow()))
     d.audit("ASSISTANT_CHECKLIST_UPDATE", f"{kit['id']}:{item['id']} checked={bool(checked)}")
     return {"ok": True, "kit": kit.get("name"), "item": item.get("text"),
-            "item_id": item.get("id"), "checked": bool(checked)}
+            "item_id": item.get("id"), "checked": bool(checked),
+            "undo": _register_undo(
+                {"kind": "checklist_restore", "kit_id": kit["id"], "item_id": item["id"],
+                 "checked": previous},
+                f"{'Checked' if checked else 'Unchecked'}: {item.get('text')}")}
 
 
 def _water_flag(row: dict) -> str | None:
@@ -1298,7 +1320,9 @@ def ai_water_test_log(d: Database, source: str = "", volume_l=None, method: str 
     row = _ai_row(d.one("SELECT * FROM water_log WHERE id=?", (new_id,)))
     row["chlorine_status"] = _water_flag(row)
     d.audit("ASSISTANT_WATER_LOG", f"id={new_id} ppm={ppm if ppm is not None else '—'}")
-    return {"ok": True, "item": row}
+    return {"ok": True, "item": row,
+            "undo": _register_undo({"kind": "water_delete", "id": new_id},
+                                    f"Logged water test: {row.get('source') or 'water'}")}
 
 
 _SYSTEM_DENY_PARTS = {
@@ -1602,34 +1626,144 @@ def vault_fast_events(d: Database, v, prompt: str):
            "created_at": utcnow()}
 
 
-def assistant_vault_preflight(v):
-    """Pause a save_note tool call until the operator unlocks the vault.
+_CONFIRM_LOCK = threading.Lock()
+_CONFIRM_PENDING: dict[str, dict] = {}
+_UNDO_LOCK = threading.Lock()
+_UNDO_REGISTRY: dict[str, dict] = {}
+_CONFIRM_TOOLS = assistant.CONFIRMABLE_TOOLS
 
-    Returns a generator for assistant.chat_stream: the first event asks the UI
-    to open the unlock modal, then the generator waits for the shared Vault
-    instance to become unlocked before the tool is allowed to run.
-    """
+
+def _register_undo(payload: dict, label: str) -> dict:
+    token = secrets.token_urlsafe(12)
+    now = time.time()
+    with _UNDO_LOCK:
+        for key, value in list(_UNDO_REGISTRY.items()):
+            if now - float(value.get("created") or 0) > 900:
+                _UNDO_REGISTRY.pop(key, None)
+        _UNDO_REGISTRY[token] = {"payload": payload, "label": label, "created": now}
+    return {"token": token, "label": label}
+
+
+def _confirm_preview(d: Database, name: str, args: dict) -> tuple[str, str]:
+    args = args if isinstance(args, dict) else {}
+    try:
+        if name == "adjust_inventory":
+            row, _ = _find_inventory(d, args.get("id"), args.get("name"))
+            if row:
+                current = _ai_num(row["qty"]) or 0
+                delta = _ai_num(args.get("delta"))
+                qty = _ai_num(args.get("qty"))
+                target = qty if qty is not None else current + (delta or 0)
+                return (f"Inventory: {row['name']}",
+                        f"Quantity {current:g} → {max(0, target):g} {row.get('unit') or ''}".strip())
+            return ("Create inventory item", str(args.get("name") or "unnamed item"))
+        if name == "complete_task":
+            row, _ = _find_task(d, args.get("id"), args.get("title"))
+            return ("Complete task", str(row["title"]) if row else str(args.get("title") or args.get("id") or ""))
+        if name == "resolve_incident":
+            title = args.get("title") or args.get("id") or ""
+            return ("Resolve incident", str(title))
+        if name == "update_checklist":
+            kit = _find_checklist_kit(args.get("kit_id"), args.get("kit_id"))
+            item = None
+            kit_id = args.get("kit_id")
+            item_id = args.get("item_id")
+            if kit and item_id:
+                item = next((i for i in (kit.get("items") or []) if str(i.get("id")) == str(item_id)), None)
+            state = "check" if args.get("checked", True) else "uncheck"
+            return (f"{state.title()} checklist item",
+                    f"{kit.get('name') if kit else kit_id}: {item.get('text') if item else (args.get('item_text') or item_id or '')}")
+        if name == "create_task":
+            return ("Create task", str(args.get("title") or ""))
+        if name == "create_incident":
+            return (f"Create {str(args.get('severity') or 'INFO').upper()} incident",
+                    str(args.get("title") or ""))
+        if name == "log_water_test":
+            bits = [str(args.get("source") or "water")]
+            if args.get("chlorine_ppm") is not None:
+                bits.append(f"{args['chlorine_ppm']} ppm chlorine")
+            if args.get("method"):
+                bits.append(str(args["method"]))
+            return ("Log water test", " · ".join(bits))
+        if name == "write_system_file":
+            raw = str(args.get("path") or "")
+            try:
+                _, target = _system_path(d, raw)
+                existed = target.exists()
+            except Exception:
+                target, existed = raw, False
+            mode = "append to" if args.get("append") else ("overwrite" if (existed and args.get("overwrite")) else "write")
+            return (f"File {mode}: {target}", f"{len(str(args.get('content') or ''))} characters")
+    except Exception:
+        pass
+    return (f"Run {name}", "")
+
+
+def _register_confirmation() -> str:
+    token = secrets.token_urlsafe(12)
+    now = time.time()
+    with _CONFIRM_LOCK:
+        for key, value in list(_CONFIRM_PENDING.items()):
+            if now - float(value.get("created") or 0) > 600:
+                _CONFIRM_PENDING.pop(key, None)
+        _CONFIRM_PENDING[token] = {"approved": None, "created": now}
+    return token
+
+
+def _wait_confirmation(token: str, timeout: float = 180.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with _CONFIRM_LOCK:
+            entry = _CONFIRM_PENDING.get(token)
+            decision = entry.get("approved") if entry else False
+        if decision is not None:
+            with _CONFIRM_LOCK:
+                _CONFIRM_PENDING.pop(token, None)
+            return bool(decision)
+        time.sleep(0.2)
+    with _CONFIRM_LOCK:
+        _CONFIRM_PENDING.pop(token, None)
+    return None
+
+
+def assistant_tool_preflight(d: Database, v):
+    """Pause vault/record/system writes until unlock/confirmation."""
     def preflight(name: str, args: dict):
-        if name not in ("save_note", "list_vault_notes", "get_vault_note", "edit_vault_note"):
-            return None
-        if not v.configured() or v.unlocked():
+        name = str(name or "")
+        vault_needed = (name in ("save_note", "list_vault_notes", "get_vault_note", "edit_vault_note")
+                        and v.configured() and not v.unlocked())
+        confirm_needed = name in _CONFIRM_TOOLS
+        if not vault_needed and not confirm_needed:
             return None
         args = args if isinstance(args, dict) else {}
         title = str(args.get("title") or "Delamain note")[:200]
         verb = "save" if name == "save_note" else ("edit" if name == "edit_vault_note" else "read")
 
         def events():
-            yield {
-                "type": "vault_unlock_required",
-                "tool": name,
-                "title": title,
-                "detail": f"Delamain needs to {verb} an encrypted note. Unlock the vault to continue; the request runs automatically after unlock.",
-            }
-            deadline = time.time() + 120.0
-            while time.time() < deadline and not v.unlocked():
-                time.sleep(0.4)
-            yield {"type": "vault_unlock_result", "tool": name,
-                   "unlocked": bool(v.unlocked())}
+            if vault_needed:
+                yield {
+                    "type": "vault_unlock_required",
+                    "tool": name,
+                    "title": title,
+                    "detail": f"Delamain needs to {verb} an encrypted note. Unlock the vault to continue; the request runs automatically after unlock.",
+                }
+                deadline = time.time() + 120.0
+                while time.time() < deadline and not v.unlocked():
+                    time.sleep(0.4)
+                yield {"type": "vault_unlock_result", "tool": name,
+                       "unlocked": bool(v.unlocked())}
+                if not v.unlocked():
+                    raise assistant.ToolDenied("Vault is locked; action cancelled.")
+            if confirm_needed:
+                summary, detail = _confirm_preview(d, name, args)
+                token = _register_confirmation()
+                yield {"type": "tool_confirm_required", "id": token, "tool": name,
+                       "summary": summary, "detail": detail}
+                approved = _wait_confirmation(token)
+                if approved is None:
+                    raise assistant.ToolDenied("Confirmation timed out; action cancelled.")
+                if not approved:
+                    raise assistant.ToolDenied("Operator declined; action cancelled.")
 
         return events()
     return preflight
@@ -2276,7 +2410,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 else:
                     iterator = assistant.chat_stream(d, prompt, history, context, model, think, image_paths,
                                                      assistant_tool_executor(d, v, prompt),
-                                                     assistant_vault_preflight(v))
+                                                     assistant_tool_preflight(d, v))
                 for chunk in iterator:
                     yield json.dumps(chunk, ensure_ascii=False, default=str) + "\n"
                     if isinstance(chunk, dict) and chunk.get("type") == "done":
@@ -2380,6 +2514,65 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 msg = "Vault is locked. Unlock it in SECURITY, then save this chat."
                 raise HTTPException(status_code=403, detail=msg)
             raise HTTPException(status_code=400, detail=msg)
+
+    @app.post("/api/assistant/confirm")
+    def assistant_confirm(request: Request, payload: dict = Body(...)):
+        cid = str(payload.get("id") or "")
+        approved = bool(payload.get("approved"))
+        with _CONFIRM_LOCK:
+            entry = _CONFIRM_PENDING.get(cid)
+            if entry is None:
+                raise HTTPException(status_code=404, detail="Confirmation request not found or expired")
+            entry["approved"] = approved
+        return {"ok": True, "id": cid, "approved": approved}
+
+    @app.post("/api/assistant/undo")
+    def assistant_undo(request: Request, payload: dict = Body(...)):
+        token = str(payload.get("token") or "")
+        now = time.time()
+        with _UNDO_LOCK:
+            entry = _UNDO_REGISTRY.pop(token, None)
+        if entry is None or now - float(entry.get("created") or 0) > 900:
+            raise HTTPException(status_code=404, detail="Undo expired or not found")
+        data = entry.get("payload") or {}
+        kind = str(data.get("kind") or "")
+        d = db(request)
+        if kind == "inventory_restore":
+            previous = data.get("prev") or {}
+            fields = {k: previous.get(k) for k in
+                      ("qty", "unit", "category", "min_qty", "location", "notes", "expires")}
+            fields["updated"] = utcnow()
+            sets = ", ".join(f"{key}=?" for key in fields)
+            d.execute(f"UPDATE inventory SET {sets} WHERE id=?",
+                      (*fields.values(), int(data.get("id"))))
+        elif kind == "inventory_delete":
+            d.execute("DELETE FROM inventory WHERE id=?", (int(data.get("id")),))
+        elif kind == "task_done":
+            d.execute("UPDATE tasks SET done=? WHERE id=?",
+                      (int(data.get("done") or 0), int(data.get("id"))))
+        elif kind == "task_delete":
+            d.execute("DELETE FROM tasks WHERE id=?", (int(data.get("id")),))
+        elif kind == "incident_delete":
+            d.execute("DELETE FROM incidents WHERE id=?", (int(data.get("id")),))
+        elif kind == "incident_restore":
+            if data.get("detail") is not None:
+                d.execute("UPDATE incidents SET resolved=?, detail=? WHERE id=?",
+                          (int(data.get("resolved") or 0), str(data.get("detail")),
+                           int(data.get("id"))))
+            else:
+                d.execute("UPDATE incidents SET resolved=? WHERE id=?",
+                          (int(data.get("resolved") or 0), int(data.get("id"))))
+        elif kind == "checklist_restore":
+            d.execute("INSERT INTO checklist_state(kit_id,item_id,checked,updated) VALUES(?,?,?,?) "
+                      "ON CONFLICT(kit_id,item_id) DO UPDATE SET checked=excluded.checked, updated=excluded.updated",
+                      (str(data.get("kit_id")), str(data.get("item_id")),
+                       1 if data.get("checked") else 0, utcnow()))
+        elif kind == "water_delete":
+            d.execute("DELETE FROM water_log WHERE id=?", (int(data.get("id")),))
+        else:
+            raise HTTPException(status_code=400, detail="Unknown undo action")
+        d.audit("ASSISTANT_UNDO", str(entry.get("label") or kind)[:300])
+        return {"ok": True, "label": entry.get("label") or "Undone"}
 
     @app.post("/api/assistant/log")
     def assistant_log(request: Request, payload: dict = Body(...)):

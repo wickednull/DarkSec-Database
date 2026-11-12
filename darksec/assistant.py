@@ -22,6 +22,16 @@ import requests
 
 from .db import Database, utcnow
 from . import library as _library
+
+
+class ToolDenied(Exception):
+    """Raised by a tool preflight when the operator declines or times out."""
+
+
+CONFIRMABLE_TOOLS = {
+    "create_task", "complete_task", "adjust_inventory", "create_incident",
+    "resolve_incident", "update_checklist", "log_water_test", "write_system_file",
+}
 DEFAULT_BASE = "http://127.0.0.1:11434"
 DEFAULT_KEEP_ALIVE = "30m"
 UA = {"User-Agent": "DarkSecNightwatch/2.0", "Accept": "application/json", "Content-Type": "application/json"}
@@ -1316,7 +1326,7 @@ def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, 
     return cfg, use_model, payload
 
 
-def chat(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None, tool_executor=None) -> dict:
+def chat(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, images: list | None = None, tool_executor=None, interactive_confirm: bool = False) -> dict:
     cfg = _settings(db)
     tools = _tools_for_turn(cfg, prompt, tool_executor)
     use_tools = bool(tools)
@@ -1352,10 +1362,13 @@ def chat(db: Database, prompt: str, history: list[dict] | None = None, context: 
             messages.append({"role": "assistant", "content": str(content or ""), "tool_calls": calls})
             for tc in list(calls)[:4]:
                 name, args = _tool_call_args(tc)
-                try:
-                    out = tool_executor(name, args)
-                except Exception as e:
-                    out = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+                if not interactive_confirm and name in CONFIRMABLE_TOOLS:
+                    out = {"ok": False, "error": "This write requires the interactive confirmation flow. Use the streaming chat UI."}
+                else:
+                    try:
+                        out = tool_executor(name, args)
+                    except Exception as e:
+                        out = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
                 tool_events.append({"name": name, "args": args, "result": out})
                 messages.append({"role": "tool", "tool_name": name, "content": _tool_result_text(out)})
             payload["messages"] = messages
@@ -1463,8 +1476,17 @@ def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, co
                         except Exception:
                             events = None
                         if events:
-                            for evt in events:
-                                yield evt
+                            try:
+                                for evt in events:
+                                    yield evt
+                            except ToolDenied as exc:
+                                out = {"ok": False, "error": str(exc)}
+                                tool_events.append({"name": name, "args": args, "result": out})
+                                messages.append({"role": "tool", "tool_name": name,
+                                                 "content": _tool_result_text(out)})
+                                yield {"type": "tool", "name": name, "result": out,
+                                       "model": final_model}
+                                continue
                     try:
                         out = tool_executor(name, args)
                     except Exception as e:

@@ -184,7 +184,7 @@ def test_vault_preflight_prompts_before_save_note(tmpdb):
     vault = Vault(tmpdb)
     vault.setup("correct horse battery staple")
     vault.lock()
-    preflight = server.assistant_vault_preflight(vault)
+    preflight = server.assistant_tool_preflight(tmpdb, vault)
     events = preflight("save_note", {"title": "Pending", "body": "secret"})
     assert events is not None
     first = next(events)
@@ -196,7 +196,7 @@ def test_vault_preflight_prompts_before_save_note(tmpdb):
     assert preflight("save_note", {"title": "Pending", "body": "secret"}) is None
 
 
-def test_vault_preflight_releases_after_unlock(monkeypatch):
+def test_vault_preflight_releases_after_unlock(tmpdb, monkeypatch):
     class FakeVault:
         checks = 0
         def configured(self):
@@ -205,7 +205,7 @@ def test_vault_preflight_releases_after_unlock(monkeypatch):
             self.checks += 1
             return self.checks > 2
     monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
-    events = list(server.assistant_vault_preflight(FakeVault())(
+    events = list(server.assistant_tool_preflight(tmpdb, FakeVault())(
         "save_note", {"title": "Pending", "body": "secret"}))
     assert events[0]["type"] == "vault_unlock_required"
     assert events[-1] == {"type": "vault_unlock_result", "tool": "save_note", "unlocked": True}
@@ -306,18 +306,21 @@ def test_mission_log_and_task_tools(tmpdb):
     assert any(t["id"] == task_id for t in listed["tasks"])
     done = server.ai_task_complete(tmpdb, title="Inspect generator")
     assert done["ok"] and done["task"]["done"] == 1
+    assert done.get("undo", {}).get("token")
     assert not any(t["id"] == task_id for t in server.ai_tasks_list(tmpdb)["tasks"])
 
 
 def test_inventory_tools(tmpdb):
     created = server.ai_inventory_adjust(tmpdb, name="Water filters", qty=3, unit="ea", min_qty=2)
     assert created["ok"] and created["created"] and created["item"]["qty"] == 3
+    assert created.get("undo", {}).get("token")
     item_id = created["item"]["id"]
 
     low = server.ai_inventory_query(tmpdb, low_only=True)
     assert low["ok"]
     adjusted = server.ai_inventory_adjust(tmpdb, item_id=item_id, delta=-2)
     assert adjusted["ok"] and adjusted["new_qty"] == 1
+    assert adjusted.get("undo", {}).get("token")
     low = server.ai_inventory_query(tmpdb, low_only=True)
     assert any(i["id"] == item_id and i["status"] == "LOW" for i in low["items"])
 
@@ -457,3 +460,22 @@ def test_tool_selection_is_intent_scoped():
     file_names = {s["function"]["name"] for s in assistant._tools_for_turn(
         {**base, "system_tools": True}, "read the file notes.txt", lambda name, args: {})}
     assert file_names == {"list_system_directory", "read_system_file", "write_system_file"}
+
+
+def test_write_preflight_requires_confirmation(tmpdb):
+    vault = Vault(tmpdb)
+    preflight = server.assistant_tool_preflight(tmpdb, vault)
+
+    events = preflight("create_task", {"title": "Inspect filter"})
+    first = next(events)
+    assert first["type"] == "tool_confirm_required"
+    with server._CONFIRM_LOCK:
+        server._CONFIRM_PENDING[first["id"]]["approved"] = True
+    assert list(events) == []
+
+    denied = preflight("create_task", {"title": "Second task"})
+    first = next(denied)
+    with server._CONFIRM_LOCK:
+        server._CONFIRM_PENDING[first["id"]]["approved"] = False
+    with pytest.raises(assistant.ToolDenied):
+        list(denied)

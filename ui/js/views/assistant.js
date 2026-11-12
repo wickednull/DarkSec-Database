@@ -410,10 +410,27 @@ export async function render(root) {
       const detail = r.error ? `error: ${r.error}` : (r.id ? `#${r.id}` : (Array.isArray(r.results) ? `${r.results.length} result(s)` : "done"));
       return `${ok ? "✔" : "✖"} ${e.name}${detail ? " — " + detail : ""}`;
     });
-    return h("details", { class: "small", open: true, style: { marginTop: "8px" } },
+    const details = h("details", { class: "small", open: true, style: { marginTop: "8px" } },
       h("summary", { style: { cursor: "pointer", color: "var(--muted)" }, text: `Actions taken (${list.length})` }),
       h("pre", { style: { whiteSpace: "pre-wrap", marginTop: "6px", color: "var(--muted)", fontSize: "11px" }, text: lines.join("\n") })
     );
+    const undo = list.map((e) => e.result?.undo).find((u) => u && u.token);
+    if (undo) {
+      const undoBtn = btn("UNDO", { size: "sm", tone: "danger", onClick: async () => {
+        undoBtn.disabled = true;
+        try {
+          await api.post("/api/assistant/undo", { token: undo.token });
+          undoBtn.textContent = "UNDONE";
+          toast(`Undone: ${undo.label || "last action"}`, "ok");
+        } catch (err) {
+          undoBtn.disabled = false;
+          toast(err.message || "Undo failed or expired", "error");
+        }
+      } });
+      details.appendChild(h("div", { class: "row gap-6 mt-6 items-center" }, undoBtn,
+        h("span", { class: "tiny muted", text: undo.label || "" })));
+    }
+    return details;
   }
 
   function needsVaultUnlock(events) {
@@ -726,6 +743,18 @@ export async function render(root) {
                 }
               } else if (evt.type === "vault_unlock_result") {
                 if (evt.unlocked) ui.meta.textContent = "vault unlocked · saving…";
+              } else if (evt.type === "tool_confirm_required") {
+                ui.meta.textContent = "awaiting operator approval…";
+                const approved = await confirmDialog({
+                  title: "Confirm Delamain action",
+                  message: `${evt.summary || "Delamain wants to change operator records."}${evt.detail ? `\n\n${evt.detail}` : ""}`,
+                  confirmText: "APPROVE",
+                });
+                try {
+                  await api.post("/api/assistant/confirm", { id: evt.id, approved: !!approved });
+                } catch (err) {
+                  toast(err.message || "Could not send confirmation", "error");
+                }
               } else if (evt.type === "tool_start") {
                 const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
                 ui.meta.textContent = `running ${evt.name || "tool"} · ${secs}s`;
