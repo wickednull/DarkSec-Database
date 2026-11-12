@@ -775,3 +775,27 @@ def test_display_theme_accent_and_font_scale_roundtrip(client):
     assert float(settings["font_scale"]) == 1.2
     bad = client.put("/api/settings", json={"font_scale": 3.0})
     assert bad.status_code == 400
+
+
+def test_assistant_reads_vault_note_without_model(client):
+    from darksec import config
+    from darksec.db import Database
+
+    status = client.get("/api/vault/status").json()
+    if not status.get("configured"):
+        client.post("/api/vault/setup", json={"passphrase": "correct horse battery"})
+    else:
+        client.post("/api/vault/unlock", json={"passphrase": "correct horse battery"})
+    title = _unique("water-note")
+    marker = _unique("boil-water")
+    created = client.post("/api/notes", json={"title": title, "body": marker, "tags": "water"})
+    assert created.status_code == 200
+    db = Database(config.DB_PATH)
+    before = db.one("SELECT count(*) c FROM notes")["c"]
+    r = client.post("/api/assistant/chat/stream", json={"prompt": f"read me my vault note {title}"})
+    assert r.status_code == 200
+    assert marker in r.text
+    assert '"type": "done"' in r.text
+    after = db.one("SELECT count(*) c FROM notes")["c"]
+    assert after == before  # reading must not create a new note
+    client.post("/api/vault/lock")

@@ -497,6 +497,46 @@ _TOOL_ACTIONS = re.compile(
 )
 
 
+_VAULT_READ = re.compile(
+    r"\b(?:read|retrieve|show|open|list|find|load|search|recall|get|pull up|"
+    r"bring up|display|print|recover|access|what(?:'s| is)|summari[sz]e|tell me|"
+    r"do i have|is there)\b.{0,50}\b(?:note|notes|vault)\b|"
+    r"\b(?:note|notes|vault)\b.{0,50}\b(?:read|retrieve|show|open|list|find|"
+    r"load|search|recall|get|contents?|what(?:'s| is)|summari[sz]e|tell me|"
+    r"pull up|bring up|display|print|recover|access)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_VAULT_SAVE = re.compile(
+    r"\b(?:save|store|write|record|remember|add|create|update|put)\b.{0,50}\b(?:note|notes|vault)\b|"
+    r"\b(?:note|notes|vault)\b.{0,50}\b(?:save|store|write|record|remember|add|create|update|put)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def vault_read_intent(query: str) -> bool:
+    return bool(_VAULT_READ.search(str(query or "")))
+
+
+def vault_save_intent(query: str) -> bool:
+    return bool(_VAULT_SAVE.search(str(query or "")))
+
+
+def vault_read_only_intent(query: str) -> bool:
+    return vault_read_intent(query) and not vault_save_intent(query)
+
+
+_VAULT_ANALYZE = re.compile(
+    r"\b(summar\w*|analy\w*|compare|explain|interpret|review|assess|"
+    r"what does .{0,40} mean|find contradictions|extract|list the actions)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def vault_direct_read_intent(query: str) -> bool:
+    """True for simple read/list requests that can be answered without the model."""
+    return vault_read_only_intent(query) and not _VAULT_ANALYZE.search(str(query or ""))
+
+
 def tools_relevant(query: str) -> bool:
     """Whether a turn is likely to need a tool call.
 
@@ -505,7 +545,8 @@ def tools_relevant(query: str) -> bool:
     asks for live conditions, a library lookup, or a save action.
     """
     text = str(query or "")
-    return bool(_TOOL_HINTS.search(text) or _TOOL_ACTIONS.search(text))
+    return bool(_TOOL_HINTS.search(text) or _TOOL_ACTIONS.search(text)
+                or vault_read_intent(text))
 
 
 _TIME_HINTS = re.compile(
@@ -536,8 +577,12 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
         sys += (
             "\nYou can act on the operator's system with these tools: "
             "get_live_status, get_library_document (find a named manual by title), "
-            "search_library (topic search), save_log_entry (plaintext mission log) and "
-            "save_note (encrypted vault note; requires an unlocked vault). Use "
+            "search_library (topic search), list_vault_notes and get_vault_note "
+            "(encrypted vault notes; require an unlocked vault), save_log_entry "
+            "(plaintext mission log) and save_note (encrypted vault note; requires an "
+            "unlocked vault). Use list_vault_notes/get_vault_note whenever the operator "
+            "asks to read, retrieve, open, list or show a vault note. Never call save_note "
+            "for a read request. Use "
             "get_live_status before answering questions about current conditions and say "
             "how old cached data is. Call write tools only when the operator asks you to "
             "save/record something. Writes are rate-limited by the server."
@@ -655,6 +700,38 @@ def tool_specs() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "list_vault_notes",
+                "description": "List encrypted vault notes by title/tag/date. Requires an unlocked vault.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "description": "Maximum notes to list (default 30)."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_vault_note",
+                "description": (
+                    "Read a specific encrypted vault note by title or id. Use this when asked to "
+                    "retrieve, read, open or show a note. Never save a new note for a read request."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Note title or distinctive words."},
+                        "id": {"type": "integer", "description": "Note id if known."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "save_log_entry",
                 "description": "Save a short note to the plaintext mission log when asked to record/log something.",
                 "parameters": {
@@ -701,6 +778,35 @@ def _tool_call_args(tc: dict) -> tuple[str, dict]:
     return name, args
 
 
+def _tool_fallback_text(events: list[dict]) -> str:
+    """Extract readable text from a successful vault tool result.
+
+    Small models sometimes return an empty content field after a tool call.
+    Rather than surfacing an empty answer, read the note/list back directly.
+    """
+    for event in reversed(events or []):
+        result = event.get("result") if isinstance(event, dict) else None
+        if not isinstance(result, dict):
+            continue
+        note = result.get("note")
+        if isinstance(note, dict) and note.get("body"):
+            return f"**{note.get('title') or 'Vault note'}**\n\n{note['body']}"
+        notes = result.get("notes")
+        if isinstance(notes, list) and notes:
+            return "Encrypted vault notes:\n\n" + "\n".join(
+                f"- **{n.get('title')}** — updated {n.get('updated')}"
+                for n in notes[:30] if isinstance(n, dict)
+            )
+    errors = []
+    for event in reversed(events or []):
+        result = event.get("result") if isinstance(event, dict) else None
+        if isinstance(result, dict) and result.get("error"):
+            errors.append(str(result["error"])[:300])
+    if errors:
+        return "I couldn't complete that request: " + "; ".join(errors[:2])
+    return ""
+
+
 def _tool_result_text(result: Any) -> str:
     try:
         text = json.dumps(result, ensure_ascii=False, default=str)
@@ -715,7 +821,11 @@ def _tools_for_turn(cfg: dict, prompt: str, tool_executor) -> list[dict] | None:
         return None
     if cfg.get("tools_auto", True) and not tools_relevant(prompt):
         return None
-    return tool_specs()
+    specs = tool_specs()
+    if vault_read_only_intent(prompt):
+        specs = [spec for spec in specs
+                 if spec["function"]["name"] not in ("save_note", "save_log_entry")]
+    return specs
 
 
 def _chat_request(db: Database, prompt: str, history: list[dict] | None = None, context: Any = None, model: str | None = None, think: bool | None = None, stream: bool = False, images: list | None = None, tools: list | None = None):
@@ -787,6 +897,8 @@ def chat(db: Database, prompt: str, history: list[dict] | None = None, context: 
         content = str(thinking_text).strip()
     if not str(content).strip() and isinstance(data, dict) and data.get("response"):
         content = str(data.get("response"))
+    if not str(content).strip() and tool_events:
+        content = _tool_fallback_text(tool_events)
     thinking_text = str(thinking_text or "").strip()
     done_reason = data.get("done_reason") if isinstance(data, dict) else None
     truncated = done_reason == "length"
@@ -884,6 +996,8 @@ def chat_stream(db: Database, prompt: str, history: list[dict] | None = None, co
                     yield {"type": "tool", "name": name, "result": out, "model": final_model}
                 payload["messages"] = messages
                 continue
+            if not content_acc.strip() and tool_events:
+                content_acc = _tool_fallback_text(tool_events)
             if not content_acc.strip() and thinking_acc.strip():
                 content_acc = thinking_acc.strip()
             yield {

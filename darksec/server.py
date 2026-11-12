@@ -29,6 +29,7 @@ import time
 import requests
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urljoin, urlsplit
@@ -627,6 +628,195 @@ def ai_note_save(d: Database, v, title: str, body: str, tags: str = "",
 
 
 
+
+
+# ------------------------------------------------------------------ vault reads
+def _norm_note_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _vault_note_records(d: Database, v, limit: int = 500) -> list[dict]:
+    if not v.configured():
+        raise ValueError("Vault is not configured. Set it up in SECURITY first.")
+    if not v.unlocked():
+        raise ValueError("Vault is locked. Unlock it to read notes.")
+    out = []
+    for row in d.query(
+        "SELECT id, ts, updated, cipher FROM notes ORDER BY updated DESC, id DESC LIMIT ?",
+        (max(1, min(int(limit or 500), 2000)),),
+    ):
+        try:
+            payload = json.loads(v.decrypt(row["cipher"]))
+        except Exception:
+            continue
+        out.append({
+            "id": row["id"],
+            "title": str(payload.get("title") or "UNTITLED"),
+            "body": str(payload.get("body") or ""),
+            "tags": str(payload.get("tags") or ""),
+            "ts": row["ts"],
+            "updated": row["updated"] or row["ts"],
+        })
+    return out
+
+
+def ai_vault_notes_list(d: Database, v, limit: int = 30) -> dict:
+    notes = _vault_note_records(d, v)
+    try:
+        limit = max(1, min(int(limit or 30), 200))
+    except (TypeError, ValueError):
+        limit = 30
+    return {
+        "ok": True,
+        "count": len(notes),
+        "notes": [
+            {"id": n["id"], "title": n["title"], "tags": n["tags"],
+             "updated": n["updated"], "chars": len(n["body"])}
+            for n in notes[:limit]
+        ],
+    }
+
+
+def ai_vault_note_get(d: Database, v, note_id=None, title: str | None = None,
+                      max_body: int = 4000) -> dict:
+    notes = _vault_note_records(d, v)
+    if not notes:
+        return {"ok": False, "error": "The encrypted vault has no notes."}
+    if note_id not in (None, ""):
+        try:
+            wanted = int(note_id)
+        except (TypeError, ValueError):
+            wanted = None
+        if wanted is not None:
+            for note in notes:
+                if int(note["id"]) == wanted:
+                    return _vault_note_payload(note, max_body)
+    query = _norm_note_text(title or "")
+    if not query:
+        return {"ok": False, "error": "Provide a note title or id.",
+                "available": [n["title"] for n in notes[:12]]}
+    q_tokens = set(query.split())
+    scored = []
+    for note in notes:
+        nt = _norm_note_text(note["title"])
+        nb = _norm_note_text(note["body"])[:4000]
+        n_tokens = set(nt.split())
+        if query == nt:
+            score = 1.0
+        elif query in nt or (len(nt) >= 6 and nt in query):
+            score = 0.96
+        elif query in nb:
+            score = 0.78
+        else:
+            overlap = len(q_tokens & n_tokens) / max(1, len(q_tokens))
+            body_overlap = len(q_tokens & set(nb.split())) / max(1, len(q_tokens))
+            score = max(SequenceMatcher(None, query, nt).ratio() * 0.82,
+                        overlap * 0.9, body_overlap * 0.55)
+        if score >= 0.28:
+            scored.append((score, note))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if not scored:
+        return {"ok": False,
+                "error": f"No vault note matched {title!r}.",
+                "available": [n["title"] for n in notes[:12]]}
+    if len(scored) > 1 and scored[0][0] - scored[1][0] < 0.12 and scored[0][0] < 0.9:
+        return {"ok": False, "ambiguous": True,
+                "error": "Multiple vault notes matched. Specify the exact title or id.",
+                "matches": [
+                    {"id": n["id"], "title": n["title"], "updated": n["updated"]}
+                    for _, n in scored[:6]
+                ]}
+    return _vault_note_payload(scored[0][1], max_body)
+
+
+def _vault_note_payload(note: dict, max_body: int = 4000) -> dict:
+    body = note.get("body") or ""
+    truncated = len(body) > max_body
+    return {
+        "ok": True,
+        "note": {
+            "id": note["id"], "title": note["title"],
+            "body": body[:max_body], "tags": note.get("tags") or "",
+            "updated": note.get("updated"),
+            "truncated": truncated,
+        },
+    }
+
+
+def ai_vault_read_reply(d: Database, v, prompt: str) -> str:
+    """Deterministic reply for a read/list vault request (no model needed)."""
+    notes = _vault_note_records(d, v)
+    if not notes:
+        return "Your encrypted vault has no notes yet."
+    text = str(prompt or "")
+    wants_list = bool(re.search(
+        r"\b(?:list|all (?:my |the )?(?:vault )?notes|what notes|which notes|"
+        r"how many notes|show (?:me )?(?:all )?(?:my |the )?notes|"
+        r"what do i have|what's in (?:my |the )?vault)\b", text, re.I))
+    query = re.sub(
+        r"\b(?:please|can you|could you|would you|will you|read|retrieve|show|open|list|"
+        r"find|load|search|recall|get|pull up|bring up|display|print|recover|access|"
+        r"do i have|is there|any|what is|what's|tell me|me|my|the|a|an|note|notes|from|"
+        r"in|inside|vault|to|aloud|out|contents?|of|about|for|stored|saved)\b",
+        " ", text, flags=re.I,
+    )
+    query = re.sub(r"[^A-Za-z0-9 _-]", " ", query)
+    query = re.sub(r"\s+", " ", query).strip(" .")
+    if wants_list or not query:
+        lines = [f"- **{n['title']}** — updated {n['updated']} ({len(n['body'])} chars)"
+                 for n in notes[:30]]
+        more = f"\n\n({len(notes) - 30} more not shown)" if len(notes) > 30 else ""
+        return "Encrypted vault notes:\n\n" + "\n".join(lines) + more
+    result = ai_vault_note_get(d, v, title=query, max_body=12000)
+    if result.get("ok"):
+        note = result["note"]
+        out = f"**{note['title']}** — updated {note['updated']}\n\n{note['body']}"
+        if note.get("truncated"):
+            out += "\n\n_(Note truncated for display.)_"
+        return out
+    if result.get("ambiguous"):
+        lines = [f"- **{m['title']}** (#{m['id']}) — updated {m['updated']}"
+                 for m in result.get("matches") or []]
+        return ("I found multiple vault notes matching that request. Which one?\n\n"
+                + "\n".join(lines))
+    available = result.get("available") or [n["title"] for n in notes[:12]]
+    return ("No vault note matched that request. Available notes:\n\n"
+            + "\n".join(f"- {t}" for t in available)
+            + "\n\nNo new note was saved.")
+
+
+def vault_fast_events(d: Database, v, prompt: str):
+    """Deterministic stream for simple vault read/list requests.
+
+    Avoids a model round-trip (and the empty-response/timeout failure mode)
+    when the operator just wants a note read back.
+    """
+    if v.configured() and not v.unlocked():
+        yield {
+            "type": "vault_unlock_required",
+            "tool": "vault_read",
+            "detail": "Delamain needs to read an encrypted note. Unlock the vault to continue; the note opens automatically after unlock.",
+        }
+        deadline = time.time() + 120.0
+        while time.time() < deadline and not v.unlocked():
+            time.sleep(0.4)
+        yield {"type": "vault_unlock_result", "tool": "vault_read",
+               "unlocked": bool(v.unlocked())}
+        if not v.unlocked():
+            yield {"type": "done", "ok": True, "model": "vault", "content":
+                   "Vault is locked. Unlock it in SECURITY to read encrypted notes.",
+                   "thinking": "", "thinking_present": False, "tools": [],
+                   "created_at": utcnow()}
+            return
+    try:
+        content = ai_vault_read_reply(d, v, prompt)
+    except Exception as exc:
+        content = f"Could not read the encrypted vault: {str(exc)[:300]}"
+    yield {"type": "done", "ok": True, "model": "vault", "content": content,
+           "thinking": "", "thinking_present": False, "tools": [],
+           "created_at": utcnow()}
+
+
 def assistant_vault_preflight(v):
     """Pause a save_note tool call until the operator unlocks the vault.
 
@@ -635,17 +825,20 @@ def assistant_vault_preflight(v):
     instance to become unlocked before the tool is allowed to run.
     """
     def preflight(name: str, args: dict):
-        if name != "save_note" or not v.configured() or v.unlocked():
+        if name not in ("save_note", "list_vault_notes", "get_vault_note"):
+            return None
+        if not v.configured() or v.unlocked():
             return None
         args = args if isinstance(args, dict) else {}
         title = str(args.get("title") or "Delamain note")[:200]
+        verb = "save" if name == "save_note" else "read"
 
         def events():
             yield {
                 "type": "vault_unlock_required",
                 "tool": name,
                 "title": title,
-                "detail": "Delamain needs to save an encrypted note. Unlock the vault to continue; the save runs automatically after unlock.",
+                "detail": f"Delamain needs to {verb} an encrypted note. Unlock the vault to continue; the request runs automatically after unlock.",
             }
             deadline = time.time() + 120.0
             while time.time() < deadline and not v.unlocked():
@@ -1003,12 +1196,15 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         return {"ok": True}
 
     # ------------------------------------------------------------ assistant (local Ollama)
-    def assistant_tool_executor(d: Database, v):
+    def assistant_tool_executor(d: Database, v, prompt: str = ""):
         """Execute the narrow set of local tools Delamain is allowed to call."""
+        read_only = assistant.vault_read_only_intent(prompt)
         def execute(name: str, args: dict) -> dict:
             args = args if isinstance(args, dict) else {}
             name = str(name or "").strip()
             try:
+                if read_only and name in ("save_note", "save_log_entry"):
+                    return {"ok": False, "error": "Blocked: the operator asked to read/retrieve a vault note, not save one."}
                 if name == "get_live_status":
                     return assistant_live_status_compact(d, v)
                 if name == "get_library_document":
@@ -1031,6 +1227,11 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                             "truncated": excerpt.get("truncated"),
                             "focus": excerpt.get("focus"),
                             "note": excerpt.get("note")}
+                if name == "list_vault_notes":
+                    return ai_vault_notes_list(d, v, args.get("limit") or 30)
+                if name == "get_vault_note":
+                    return ai_vault_note_get(d, v, args.get("id"),
+                                             args.get("title") or args.get("query"))
                 if name == "save_log_entry":
                     return ai_log_save(d, args.get("title"), args.get("body"), args.get("category") or "GENERAL")
                 if name == "save_note":
@@ -1086,8 +1287,20 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         image_paths = [p for p in (assistant.save_image(x) for x in images) if p]
         # Do not audit full prompt/content by default (may contain sensitive notes).
         d.audit("ASSISTANT_CHAT", json.dumps({"model": model or d.get_setting("ollama_model", ""), "prompt_chars": len(prompt), "has_context": bool(context), "think": think, "images": len(image_paths)}), request.client.host if request.client else "")
+        v = vault(request)
+        direct = None
+        if assistant.vault_direct_read_intent(prompt):
+            if v.configured() and not v.unlocked():
+                raise HTTPException(status_code=403, detail="Vault is locked. Unlock it to read encrypted notes.")
+            try:
+                content = ai_vault_read_reply(d, v, prompt)
+            except Exception as exc:
+                content = f"Could not read the encrypted vault: {str(exc)[:300]}"
+            direct = {"ok": True, "model": "vault", "content": content,
+                      "thinking": "", "thinking_present": False, "tools": [],
+                      "created_at": utcnow()}
         try:
-            result = await run_in_threadpool(assistant.chat, d, prompt, history, context, model, think, image_paths, assistant_tool_executor(d, vault(request)))
+            result = direct or await run_in_threadpool(assistant.chat, d, prompt, history, context, model, think, image_paths, assistant_tool_executor(d, v, prompt))
             # Persist to conversation history when requested.
             if conversation_id is not None:
                 try:
@@ -1143,9 +1356,13 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             final_model = use_model
             v = vault(request)
             try:
-                for chunk in assistant.chat_stream(d, prompt, history, context, model, think, image_paths,
-                                                   assistant_tool_executor(d, v),
-                                                   assistant_vault_preflight(v)):
+                if assistant.vault_direct_read_intent(prompt):
+                    iterator = vault_fast_events(d, v, prompt)
+                else:
+                    iterator = assistant.chat_stream(d, prompt, history, context, model, think, image_paths,
+                                                     assistant_tool_executor(d, v, prompt),
+                                                     assistant_vault_preflight(v))
+                for chunk in iterator:
                     yield json.dumps(chunk, ensure_ascii=False, default=str) + "\n"
                     if isinstance(chunk, dict) and chunk.get("type") == "done":
                         final_content = chunk.get("content") or final_content

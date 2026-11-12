@@ -21,6 +21,7 @@ def tmpdb(tmp_path):
 def test_tool_specs_shape():
     names = [t["function"]["name"] for t in assistant.tool_specs()]
     assert set(names) == {"get_live_status", "get_library_document", "search_library",
+                          "list_vault_notes", "get_vault_note",
                           "save_log_entry", "save_note"}
     for spec in assistant.tool_specs():
         assert spec["type"] == "function"
@@ -203,3 +204,54 @@ def test_vault_preflight_releases_after_unlock(monkeypatch):
         "save_note", {"title": "Pending", "body": "secret"}))
     assert events[0]["type"] == "vault_unlock_required"
     assert events[-1] == {"type": "vault_unlock_result", "tool": "save_note", "unlocked": True}
+
+
+def test_vault_read_tools_list_and_get(tmpdb):
+    vault = Vault(tmpdb)
+    vault.setup("correct horse battery staple")
+    server.ai_note_save(tmpdb, vault, "Water Plan", "Boil water for one minute.", "water")
+    server.ai_note_save(tmpdb, vault, "Radio Plan", "Channel 3 at 19:00.", "comms")
+
+    listed = server.ai_vault_notes_list(tmpdb, vault)
+    assert listed["ok"] and listed["count"] == 2
+    assert {n["title"] for n in listed["notes"]} == {"Water Plan", "Radio Plan"}
+
+    got = server.ai_vault_note_get(tmpdb, vault, title="water plan")
+    assert got["ok"] and got["note"]["title"] == "Water Plan"
+    assert "Boil water" in got["note"]["body"]
+    assert tmpdb.one("SELECT count(*) c FROM notes")["c"] == 2  # read did not create a note
+
+    listed_reply = server.ai_vault_read_reply(tmpdb, vault, "list my vault notes")
+    assert "Water Plan" in listed_reply and "Radio Plan" in listed_reply
+    read_reply = server.ai_vault_read_reply(tmpdb, vault, "read me the water plan note")
+    assert "Boil water" in read_reply
+    assert tmpdb.one("SELECT count(*) c FROM notes")["c"] == 2
+
+    vault.lock()
+    with pytest.raises(ValueError, match="Vault is locked"):
+        server.ai_vault_read_reply(tmpdb, vault, "read the water plan note")
+
+
+def test_read_intent_does_not_expose_save_tools():
+    cfg = {"tools": True, "tools_auto": False}
+    specs = assistant._tools_for_turn(cfg, "read me my water vault note", lambda name, args: {})
+    names = {spec["function"]["name"] for spec in specs}
+    assert "get_vault_note" in names and "list_vault_notes" in names
+    assert "save_note" not in names and "save_log_entry" not in names
+
+    save_specs = assistant._tools_for_turn(cfg, "save a note titled water plan", lambda name, args: {})
+    save_names = {spec["function"]["name"] for spec in save_specs}
+    assert "save_note" in save_names
+
+    assert assistant.vault_direct_read_intent("read the water note") is True
+    assert assistant.vault_direct_read_intent("summarize the water note") is False
+
+
+def test_vault_fast_events_returns_note_without_model(tmpdb):
+    vault = Vault(tmpdb)
+    vault.setup("correct horse battery staple")
+    server.ai_note_save(tmpdb, vault, "Water Plan", "Boil water for one minute.", "water")
+    events = list(server.vault_fast_events(tmpdb, vault, "read me the water plan note"))
+    assert events[-1]["type"] == "done"
+    assert "Boil water" in events[-1]["content"]
+    assert tmpdb.one("SELECT count(*) c FROM notes")["c"] == 1
