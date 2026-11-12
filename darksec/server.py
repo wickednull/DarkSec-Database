@@ -1594,6 +1594,169 @@ def vault_save_fast_events(d: Database, v, prompt: str, history: list[dict] | No
     return events()
 
 
+def _calc_catalog_entry(name: str) -> dict | None:
+    return next((entry for entry in CALC_CATALOG if entry.get("name") == name), None)
+
+
+def ai_calc_list(name: str = "", group: str = "") -> dict:
+    wanted_name = str(name or "").strip()
+    wanted_group = str(group or "").strip().upper()
+    items = []
+    for entry in CALC_CATALOG:
+        if wanted_group and str(entry.get("group") or "").upper() != wanted_group:
+            continue
+        if wanted_name and wanted_name != entry.get("name"):
+            continue
+        item = {"name": entry.get("name"), "label": entry.get("label"),
+                "group": entry.get("group")}
+        if wanted_name:
+            item["fields"] = [
+                {"name": field.get("name"), "label": field.get("label"),
+                 "type": field.get("type"), "unit": field.get("unit")}
+                for field in (entry.get("fields") or [])
+            ]
+        items.append(item)
+    return {"ok": True, "count": len(items), "calculators": items[:80]}
+
+
+def ai_calculate(name: str, params: dict | None = None) -> dict:
+    import inspect
+    calc_name = str(name or "").strip()
+    fn = CALC_FUNCS.get(calc_name)
+    entry = _calc_catalog_entry(calc_name)
+    if fn is None:
+        matches = [{"name": e.get("name"), "label": e.get("label"), "group": e.get("group")}
+                   for e in CALC_CATALOG
+                   if calc_name.lower() in str(e.get("name") or "").lower()
+                   or calc_name.lower() in str(e.get("label") or "").lower()][:12]
+        return {"ok": False, "error": f"Unknown calculator {calc_name!r}.",
+                "matches": matches}
+    payload = params if isinstance(params, dict) else {}
+    try:
+        signature = inspect.signature(fn)
+        kwargs = {}
+        for pname, param in signature.parameters.items():
+            if pname not in payload or payload[pname] in ("", None):
+                continue
+            value = payload[pname]
+            ann = param.annotation
+            if ann in (int, float) or ann in ("int", "float"):
+                value = float(value)
+                if ann is int or ann == "int":
+                    value = int(value)
+            kwargs[pname] = value
+        result = fn(**kwargs)
+        return {"ok": True, "name": calc_name,
+                "label": (entry or {}).get("label") or calc_name,
+                "result": result}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300],
+                "name": calc_name,
+                "fields": (entry or {}).get("fields") or []}
+
+
+def ai_convert_coordinates(lat, lon) -> dict:
+    try:
+        la = float(lat)
+        lo = float(lon)
+        if not (-90 <= la <= 90 and -180 <= lo <= 180):
+            return {"ok": False, "error": "Coordinates out of range."}
+        return {"ok": True, **geo.format_coord(la, lo)}
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "lat and lon are required numbers."}
+
+
+def _compass_point(bearing: float) -> str:
+    points = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+              "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    return points[int((float(bearing) % 360) / 22.5 + 0.5) % 16]
+
+
+def ai_distance_bearing(d: Database, lat1=None, lon1=None, lat2=None, lon2=None) -> dict:
+    s = d.all_settings()
+    try:
+        if lat1 is None or lon1 is None:
+            lat1, lon1 = float(s.get("lat")), float(s.get("lon"))
+        la1, lo1, la2, lo2 = float(lat1), float(lon1), float(lat2), float(lon2)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Valid start and destination coordinates are required."}
+    if not (-90 <= la1 <= 90 and -180 <= lo1 <= 180 and
+            -90 <= la2 <= 90 and -180 <= lo2 <= 180):
+        return {"ok": False, "error": "Coordinates out of range."}
+    distance_m = geo.haversine(la1, lo1, la2, lo2)
+    distance_km = distance_m / 1000.0
+    bearing = geo.initial_bearing(la1, lo1, la2, lo2)
+    mid = geo.midpoint(la1, lo1, la2, lo2)
+    return {
+        "ok": True,
+        "start": {"lat": la1, "lon": lo1},
+        "destination": {"lat": la2, "lon": lo2},
+        "distance_m": round(distance_m, 1),
+        "distance_km": round(distance_km, 3),
+        "distance_mi": round(distance_m / 1609.344, 3),
+        "bearing_deg": round(bearing % 360, 1),
+        "bearing_cardinal": _compass_point(bearing),
+        "midpoint": {"lat": round(mid[0], 6), "lon": round(mid[1], 6)},
+    }
+
+
+def ai_waypoints_list(d: Database, query: str = "", radius_km=None, limit: int = 25) -> dict:
+    try:
+        limit = max(1, min(int(limit or 25), 100))
+    except (TypeError, ValueError):
+        limit = 25
+    q = str(query or "").strip()
+    rows = d.query("SELECT * FROM waypoints ORDER BY name LIMIT 2000")
+    s = d.all_settings()
+    center = None
+    if radius_km not in (None, ""):
+        try:
+            center = (float(s.get("lat")), float(s.get("lon")))
+            radius = float(radius_km)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "A valid operator position and radius_km are required."}
+    out = []
+    for row in rows:
+        if q and q.lower() not in f"{row['name']} {row['type']} {row['note']}".lower():
+            continue
+        item = {"id": row["id"], "name": row["name"], "lat": row["lat"], "lon": row["lon"],
+                "ele": row["ele"], "type": row["type"], "note": str(row["note"] or "")[:300]}
+        if center is not None:
+            distance_km = geo.haversine(center[0], center[1], row["lat"], row["lon"]) / 1000.0
+            if distance_km > radius:
+                continue
+            item["distance_km"] = round(distance_km, 2)
+        out.append(item)
+    if center is not None:
+        out.sort(key=lambda item: item.get("distance_km", 0))
+    return {"ok": True, "count": len(out[:limit]), "waypoints": out[:limit]}
+
+
+def ai_waypoint_create(d: Database, name: str, lat, lon, ele=None, type: str = "WAYPOINT",
+                       note: str = "") -> dict:
+    heading = str(name or "").strip()[:200]
+    try:
+        la, lo = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "name, lat and lon are required."}
+    if not heading or not (-90 <= la <= 90 and -180 <= lo <= 180):
+        return {"ok": False, "error": "Valid name, lat and lon are required."}
+    try:
+        elevation = float(ele) if ele not in (None, "") else None
+    except (TypeError, ValueError):
+        elevation = None
+    now = utcnow()
+    waypoint_id = d.insert("waypoints", {
+        "name": heading, "lat": la, "lon": lo, "ele": elevation,
+        "type": str(type or "WAYPOINT").strip().upper()[:40] or "WAYPOINT",
+        "note": str(note or "").strip()[:1000], "created": now, "updated": now,
+    })
+    d.audit("ASSISTANT_WAYPOINT_CREATE", f"id={waypoint_id} {heading[:100]}")
+    return {"ok": True, "waypoint": _ai_row(d.one("SELECT * FROM waypoints WHERE id=?", (waypoint_id,))),
+            "undo": _register_undo({"kind": "waypoint_delete", "id": waypoint_id},
+                                    f"Created waypoint: {heading}")}
+
+
 def vault_fast_events(d: Database, v, prompt: str):
     """Deterministic stream for simple vault read/list requests.
 
@@ -1685,6 +1848,9 @@ def _confirm_preview(d: Database, name: str, args: dict) -> tuple[str, str]:
             if args.get("method"):
                 bits.append(str(args["method"]))
             return ("Log water test", " · ".join(bits))
+        if name == "create_waypoint":
+            return ("Create waypoint", str(args.get("name") or "")
+                    + (f" — {args.get('lat')}, {args.get('lon')}" if args.get("lat") is not None else ""))
         if name == "write_system_file":
             raw = str(args.get("path") or "")
             try:
@@ -2260,6 +2426,23 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                         return {"ok": False, "error": "Blocked: the operator did not explicitly ask to write a file."}
                     return ai_system_write(d, args.get("path") or "", args.get("content") or "",
                                            bool(args.get("overwrite")), bool(args.get("append")))
+                if name == "list_calculators":
+                    return ai_calc_list(args.get("name") or "", args.get("group") or "")
+                if name == "calculate":
+                    return ai_calculate(args.get("name") or "", args.get("parameters") or {})
+                if name == "convert_coordinates":
+                    return ai_convert_coordinates(args.get("lat"), args.get("lon"))
+                if name == "distance_bearing":
+                    return ai_distance_bearing(d, args.get("lat1"), args.get("lon1"),
+                                               args.get("lat2"), args.get("lon2"))
+                if name == "list_waypoints":
+                    return ai_waypoints_list(d, args.get("query") or "",
+                                             args.get("radius_km"), args.get("limit") or 25)
+                if name == "create_waypoint":
+                    return ai_waypoint_create(d, args.get("name"), args.get("lat"),
+                                              args.get("lon"), args.get("ele"),
+                                              args.get("type") or "WAYPOINT",
+                                              args.get("note") or "")
                 if name == "save_log_entry":
                     return ai_log_save(d, args.get("title"), args.get("body"), args.get("category") or "GENERAL")
                 if name == "save_note":
@@ -2569,6 +2752,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                        1 if data.get("checked") else 0, utcnow()))
         elif kind == "water_delete":
             d.execute("DELETE FROM water_log WHERE id=?", (int(data.get("id")),))
+        elif kind == "waypoint_delete":
+            d.execute("DELETE FROM waypoints WHERE id=?", (int(data.get("id")),))
         else:
             raise HTTPException(status_code=400, detail="Unknown undo action")
         d.audit("ASSISTANT_UNDO", str(entry.get("label") or kind)[:300])

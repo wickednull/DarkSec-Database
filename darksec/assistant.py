@@ -31,6 +31,7 @@ class ToolDenied(Exception):
 CONFIRMABLE_TOOLS = {
     "create_task", "complete_task", "adjust_inventory", "create_incident",
     "resolve_incident", "update_checklist", "log_water_test", "write_system_file",
+    "create_waypoint",
 }
 DEFAULT_BASE = "http://127.0.0.1:11434"
 DEFAULT_KEEP_ALIVE = "30m"
@@ -604,6 +605,14 @@ _WATER_HINTS = re.compile(r"\b(water test|water log|chlorine|turbidity|potable|w
 _LOG_HINTS = re.compile(r"\b(mission log|journal|log entr(?:y|ies)|what did i (?:log|record)|log (?:this|that|it)|record (?:this|that|it))\b", re.I)
 _LIBRARY_HINTS = re.compile(r"\b(manuals?|documents?|pdfs?|books?|guides?|handbooks?|library|field manual)\b", re.I)
 _VAULT_HINTS = re.compile(r"\b(note|notes|vault)\b", re.I)
+_CALC_HINTS = re.compile(
+    r"\b(calc|calculator|calculate|wind chill|heat index|dew point|wet bulb|"
+    r"humidex|pressure altitude|density altitude|lightning distance|beaufort|"
+    r"unit conversion|convert units)\b", re.I)
+_NAV_HINTS = re.compile(
+    r"\b(coordinates?|latitude|longitude|dms|utm|mgrs|bearing|distance|how far|"
+    r"waypoints?|navigation|navigate|direction|heading|my position|"
+    r"current position|grid reference)\b", re.I)
 
 _TOOL_GROUPS = {
     "vault": {"list_vault_notes", "get_vault_note", "edit_vault_note", "save_note"},
@@ -616,6 +625,8 @@ _TOOL_GROUPS = {
     "library": {"get_library_document", "search_library"},
     "live": {"get_live_status"},
     "system": {"list_system_directory", "read_system_file", "write_system_file"},
+    "calc": {"list_calculators", "calculate"},
+    "nav": {"convert_coordinates", "distance_bearing", "list_waypoints", "create_waypoint"},
 }
 
 
@@ -639,6 +650,10 @@ def select_tool_names(cfg: dict, prompt: str) -> set[str] | None:
         selected |= _TOOL_GROUPS["log"]
     if _LIBRARY_HINTS.search(text):
         selected |= _TOOL_GROUPS["library"]
+    if _CALC_HINTS.search(text):
+        selected |= _TOOL_GROUPS["calc"]
+    if _NAV_HINTS.search(text):
+        selected |= _TOOL_GROUPS["nav"]
     if _TOOL_HINTS.search(text):
         selected.add("get_live_status")
     system_intent = bool(cfg.get("system_tools") and _SYSTEM_HINTS.search(text))
@@ -1124,6 +1139,103 @@ def tool_specs(cfg: dict | None = None) -> list[dict]:
                         "tags": {"type": "string", "description": "Optional replacement tags."},
                     },
                     "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_calculators",
+                "description": "List built-in calculators, optionally filtered by group or exact name.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Exact calculator name for field details."},
+                        "group": {"type": "string", "description": "Optional group, e.g. WEATHER or MEDICAL."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate",
+                "description": "Run a built-in calculator by name with a parameters object. Use list_calculators if unsure.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Calculator name, e.g. wind_chill_c."},
+                        "parameters": {"type": "object", "description": "Calculator field values."},
+                    },
+                    "required": ["name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "convert_coordinates",
+                "description": "Convert decimal latitude/longitude to DD, DMS, UTM and MGRS.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "lat": {"type": "number", "description": "Latitude in decimal degrees."},
+                        "lon": {"type": "number", "description": "Longitude in decimal degrees."},
+                    },
+                    "required": ["lat", "lon"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "distance_bearing",
+                "description": "Distance, initial bearing, cardinal direction and midpoint between two points. Omit start to use operator position.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "lat1": {"type": "number", "description": "Optional start latitude."},
+                        "lon1": {"type": "number", "description": "Optional start longitude."},
+                        "lat2": {"type": "number", "description": "Destination latitude."},
+                        "lon2": {"type": "number", "description": "Destination longitude."},
+                    },
+                    "required": ["lat2", "lon2"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_waypoints",
+                "description": "List/search waypoints; optionally only those within a radius of the operator.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Optional name/type/note search."},
+                        "radius_km": {"type": "number", "description": "Optional radius from operator position."},
+                        "limit": {"type": "integer", "description": "Max waypoints (default 25)."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_waypoint",
+                "description": "Create a waypoint when explicitly asked. Requires operator approval.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Waypoint name."},
+                        "lat": {"type": "number", "description": "Latitude."},
+                        "lon": {"type": "number", "description": "Longitude."},
+                        "ele": {"type": "number", "description": "Optional elevation."},
+                        "type": {"type": "string", "description": "Optional type, e.g. CAMP, WATER, HAZARD."},
+                        "note": {"type": "string", "description": "Optional note."},
+                    },
+                    "required": ["name", "lat", "lon"],
                 },
             },
         },

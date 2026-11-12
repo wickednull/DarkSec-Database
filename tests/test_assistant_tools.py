@@ -26,7 +26,9 @@ def test_tool_specs_shape():
         "search_mission_log", "list_tasks", "create_task", "complete_task",
         "query_inventory", "adjust_inventory", "create_incident",
         "resolve_incident", "read_checklist", "update_checklist",
-        "read_water_log", "log_water_test", "save_log_entry", "save_note",
+        "read_water_log", "log_water_test", "list_calculators", "calculate",
+        "convert_coordinates", "distance_bearing", "list_waypoints", "create_waypoint",
+        "save_log_entry", "save_note",
     }
     for spec in assistant.tool_specs():
         assert spec["type"] == "function"
@@ -461,6 +463,14 @@ def test_tool_selection_is_intent_scoped():
         {**base, "system_tools": True}, "read the file notes.txt", lambda name, args: {})}
     assert file_names == {"list_system_directory", "read_system_file", "write_system_file"}
 
+    calc_names = {s["function"]["name"] for s in assistant._tools_for_turn(
+        base, "calculate wind chill for 0 C and 20 km/h", lambda name, args: {})}
+    assert "calculate" in calc_names and "adjust_inventory" not in calc_names
+
+    nav_names = {s["function"]["name"] for s in assistant._tools_for_turn(
+        base, "convert 43.48 -111.98 to mgrs and show the bearing", lambda name, args: {})}
+    assert "convert_coordinates" in nav_names and "distance_bearing" in nav_names
+
 
 def test_write_preflight_requires_confirmation(tmpdb):
     vault = Vault(tmpdb)
@@ -479,3 +489,25 @@ def test_write_preflight_requires_confirmation(tmpdb):
         server._CONFIRM_PENDING[first["id"]]["approved"] = False
     with pytest.raises(assistant.ToolDenied):
         list(denied)
+
+
+def test_calculators_and_navigation_tools(tmpdb):
+    calc_list = server.ai_calc_list()
+    assert calc_list["ok"] and calc_list["count"] > 10
+    assert any(c["name"] == "wind_chill_c" for c in calc_list["calculators"])
+    calc = server.ai_calculate("wind_chill_c", {"temp_c": 0, "wind_kmh": 20})
+    assert calc["ok"] and "result" in calc
+    unknown = server.ai_calculate("not_a_calculator")
+    assert unknown["ok"] is False
+
+    coords = server.ai_convert_coordinates(43.48, -111.98)
+    assert coords["ok"] and coords["mgrs"] and coords["utm"]
+
+    dist = server.ai_distance_bearing(tmpdb, 43.48, -111.98, 43.50, -112.00)
+    assert dist["ok"] and 0 < dist["distance_km"] < 10
+    assert dist["bearing_cardinal"]
+
+    created = server.ai_waypoint_create(tmpdb, "Ridge Cache", 43.5, -112.0, type="CACHE")
+    assert created["ok"] and created.get("undo", {}).get("token")
+    waypoints = server.ai_waypoints_list(tmpdb, query="ridge")
+    assert waypoints["ok"] and any(w["name"] == "Ridge Cache" for w in waypoints["waypoints"])
