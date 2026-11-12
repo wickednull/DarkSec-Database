@@ -702,3 +702,22 @@ def test_tile_source_cooldown_suppresses_repeated_fetches(monkeypatch):
         assert len(calls) == 1
     finally:
         tilecache._source_offline_until.clear()
+
+
+def test_image_only_documents_are_not_reextracted_every_index(tmpdb):
+    from darksec import library
+
+    name = "SCANNED MANUAL.pdf"
+    doc_id = _add_doc(tmpdb, name, "", category="MANUALS")
+    doc = {
+        "path": f"/tmp/{name}", "name": name, "category": "MANUALS",
+        "rel_path": f"manuals/{name}", "size": 0, "mtime": 1.0, "ext": ".pdf",
+    }
+    _, needs_text = library._upsert_meta(tmpdb, doc)
+    assert needs_text is False
+    _, forced = library._upsert_meta(tmpdb, doc, force=True)
+    assert forced is True
+    doc["size"] = 123
+    _, changed = library._upsert_meta(tmpdb, doc)
+    assert changed is True
+    assert tmpdb.one("SELECT text_ts FROM library_docs WHERE id=?", (doc_id,))["text_ts"] is None

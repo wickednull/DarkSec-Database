@@ -212,15 +212,22 @@ def _upsert_meta(db: Database, doc: dict, force: bool = False) -> tuple[int, boo
     row = db.one("SELECT * FROM library_docs WHERE path=?", (doc["path"],))
     if row:
         text = row["text"] or ""
+        attempted = bool(row["text_ts"])
         same = int(row["size"] or 0) == int(doc["size"]) and abs(float(row["mtime"] or 0) - doc["mtime"]) < 1
-        db.update("library_docs", row["id"], {
+        fields = {
             "name": doc["name"], "category": doc["category"], "rel_path": doc["rel_path"],
             "size": doc["size"], "mtime": doc["mtime"],
-        })
+        }
         if not same or force:
             text = ""
+            fields.update({"text": "", "chars": 0, "text_ts": None})
+        db.update("library_docs", row["id"], fields)
         db.fts_upsert(row["id"], doc["name"], doc["rel_path"], doc["category"], text)
-        return row["id"], (not text)
+        # An empty text_ts means extraction has not been attempted yet. Once a
+        # scanned/image-only PDF has been tried, do not re-run it on every
+        # startup; a size/mtime change or FORCE RE-EXTRACT will retry it.
+        needs_text = (not text) and (force or not same or not attempted)
+        return row["id"], needs_text
     new_id = db.insert("library_docs", {
         "path": doc["path"], "name": doc["name"], "category": doc["category"],
         "rel_path": doc["rel_path"], "size": doc["size"], "mtime": doc["mtime"],

@@ -550,7 +550,7 @@ class Database:
             for row in legacy:
                 if not str(row["path"]).lower().endswith((".pdf", ".epub", ".cbz")):
                     continue
-                self.execute("UPDATE library_docs SET text='', chars=0 WHERE id=?", (row["id"],))
+                self.execute("UPDATE library_docs SET text='', chars=0, text_ts=NULL WHERE id=?", (row["id"],))
                 self.fts_upsert(row["id"], row["name"], row["rel_path"],
                                 row["category"], "")
             self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('library_pages_v1',?)",
