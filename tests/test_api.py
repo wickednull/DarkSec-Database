@@ -927,3 +927,59 @@ def test_brief_markdown_and_save(client):
     row = Database(config.DB_PATH).one("SELECT * FROM log_entries WHERE id=?", (body["id"],))
     assert "OPERATOR NOTE: test snapshot" in row["body"]
     assert "DARKSEC" in before and "FIELD SITUATION REPORT" in row["body"]
+
+
+def test_encrypted_chat_history_roundtrip(client):
+    import darksec.server as srv
+    from darksec import config
+    from darksec.db import Database
+    from darksec.security import Vault
+
+    status = client.get("/api/vault/status").json()
+    if not status.get("configured"):
+        client.post("/api/vault/setup", json={"passphrase": "correct horse battery"})
+    else:
+        client.post("/api/vault/unlock", json={"passphrase": "correct horse battery"})
+
+    r = client.put("/api/settings", json={"assistant_history_encrypted": True})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/settings").json()["assistant_history_encrypted"] is True
+
+    conv = client.post("/api/assistant/conversations", json={"title": "secret planning"}).json()
+    assert conv.get("id")
+    cid = conv["id"]
+
+    db = Database(config.DB_PATH)
+    raw = db.one("SELECT title, encrypted FROM assistant_conversations WHERE id=?", (cid,))
+    assert raw["encrypted"] == 1 and "secret" not in raw["title"]
+
+    v = Vault(db)
+    v.unlock("correct horse battery")
+    mid = srv.history_add_message(db, v, cid, "user", "sensitive route", "[]", "test-model")
+    raw_msg = db.one("SELECT content, encrypted FROM assistant_messages WHERE id=?", (mid,))
+    assert raw_msg["encrypted"] == 1 and "sensitive route" not in raw_msg["content"]
+
+    listed = client.get("/api/assistant/conversations").json()
+    assert listed["encrypted"] is True
+    assert any(i["id"] == cid and i["title"] == "secret planning" for i in listed["items"])
+    msgs = client.get(f"/api/assistant/conversations/{cid}/messages").json()
+    assert msgs["items"][0]["content"] == "sensitive route"
+
+    renamed = client.patch(f"/api/assistant/conversations/{cid}", json={"title": "renamed secret"})
+    assert renamed.json()["title"] == "renamed secret"
+    raw = db.one("SELECT title FROM assistant_conversations WHERE id=?", (cid,))
+    assert "renamed" not in raw["title"]
+
+    client.post("/api/vault/lock")
+    blocked = client.get("/api/assistant/conversations").json()
+    assert blocked["locked"] is True and blocked["items"] == []
+    assert client.put("/api/settings", json={"assistant_history_encrypted": True}).status_code == 200
+
+    client.post("/api/vault/unlock", json={"passphrase": "correct horse battery"})
+    r = client.put("/api/settings", json={"assistant_history_encrypted": False})
+    assert r.status_code == 200, r.text
+    raw = db.one("SELECT title, encrypted FROM assistant_conversations WHERE id=?", (cid,))
+    assert raw["encrypted"] == 0 and raw["title"] == "renamed secret"
+    raw_msg = db.one("SELECT content, encrypted FROM assistant_messages WHERE id=?", (mid,))
+    assert raw_msg["encrypted"] == 0 and raw_msg["content"] == "sensitive route"
+    client.post("/api/vault/lock")

@@ -434,6 +434,7 @@ export async function render(root) {
   const assistantSystemTools = checkbox("Allow Delamain system file tools (list/read/write, non-sudo)", !!settings.assistant_system_tools);
   const assistantSystemRoot = input({ value: settings.assistant_system_root || "~", placeholder: "~" });
   const assistantMedicalTools = checkbox("Allow Delamain medical record reads (patients, vitals, meds)", !!settings.assistant_medical_tools);
+  const assistantHistoryEncrypted = checkbox("Encrypt chat history with the vault (requires unlocked vault)", !!settings.assistant_history_encrypted);
   const assistantLibrary = checkbox("Auto-include library excerpts for manual/document questions", settings.assistant_library_context !== false);
   const assistantHistoryFilter = checkbox("Filter risky/refused topics from chat history", settings.assistant_history_filter !== false);
   const ollamaBase = input({ value: settings.ollama_base_url || "http://127.0.0.1:11434", placeholder: "http://127.0.0.1:11434" });
@@ -449,7 +450,7 @@ export async function render(root) {
     sub: "Local AI model integration for assistant chat and field support",
     icon: "cpu",
     body: h("div", { class: "col gap-8" },
-      h("div", { class: "row wrap gap-16" }, assistantEnabled, assistantThink, assistantTools, assistantToolsAuto, assistantSystemTools, assistantMedicalTools, assistantLibrary, assistantHistoryFilter),
+      h("div", { class: "row wrap gap-16" }, assistantEnabled, assistantThink, assistantTools, assistantToolsAuto, assistantSystemTools, assistantMedicalTools, assistantHistoryEncrypted, assistantLibrary, assistantHistoryFilter),
       h("div", { class: "form-grid" },
         field("Ollama base URL", ollamaBase, "Local endpoint. Default: http://127.0.0.1:11434"),
         field("Model", ollamaModel, "Must be pulled in Ollama (e.g. `ollama pull llama3.2`)."),
@@ -465,7 +466,8 @@ export async function render(root) {
       h("div", { class: "callout small", text: "Thinking/reasoning can improve complex answers but is much slower on CPU-only systems (especially Qwen 3.5). If responses stall, disable thinking or increase timeout." }),
       h("div", { class: "callout small amber", text: "The app calls Ollama through the local backend. AI output can be wrong or incomplete—verify critical medical, navigation, legal, and hazard decisions." }),
       h("div", { class: "callout small amber", text: "System file tools run as your user with no sudo. Writes are restricted to the configured root, existing files are backed up, and credential/key paths are blocked. Leave this off unless you need it." }),
-      h("div", { class: "callout small amber", text: "Medical record tools are read-only and expose patient identities, vitals and medication history to the local model. Verify patient identity and do not treat AI output as diagnosis or prescription." })),
+      h("div", { class: "callout small amber", text: "Medical record tools are read-only and expose patient identities, vitals and medication history to the local model. Verify patient identity and do not treat AI output as diagnosis or prescription." }),
+      h("div", { class: "callout small amber", text: "Encrypted chat history stores conversation titles and messages with the vault key. The vault must be configured and unlocked; when it is locked, chats are not saved and history cannot be read. Toggling the setting migrates existing history while the vault is unlocked." })),
   });
   grid.appendChild(assistantPanel);
 
@@ -478,6 +480,7 @@ export async function render(root) {
       assistant_system_tools: assistantSystemTools.querySelector("input").checked,
       assistant_system_root: assistantSystemRoot.value.trim() || "~",
       assistant_medical_tools: assistantMedicalTools.querySelector("input").checked,
+      assistant_history_encrypted: assistantHistoryEncrypted.querySelector("input").checked,
       assistant_library_context: assistantLibrary.querySelector("input").checked,
       assistant_history_filter: assistantHistoryFilter.querySelector("input").checked,
       ollama_base_url: ollamaBase.value.trim(),

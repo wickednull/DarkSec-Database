@@ -605,6 +605,92 @@ def ai_log_save(d: Database, title: str, body: str, category: str = "GENERAL") -
             "limit_note": f"Saved to mission log (AI category). Max {AI_LOG_MAX_PER_HOUR}/hour, {AI_LOG_TOTAL_CAP} total."}
 
 
+def history_encrypted(d: Database) -> bool:
+    return bool(d.get_setting("assistant_history_encrypted", False))
+
+
+def history_guard(d: Database, v) -> dict | None:
+    """Return an error payload when encrypted history is on but unavailable."""
+    if not history_encrypted(d):
+        return None
+    if not v.configured():
+        return {"ok": False, "unconfigured": True, "locked": False,
+                "error": ("Encrypted chat history is on, but the vault is not configured. "
+                          "Set up the vault in SECURITY or turn off encrypted history in Settings.")}
+    if not v.unlocked():
+        return {"ok": False, "unconfigured": False, "locked": True,
+                "error": "Vault is locked. Unlock it to read or store chat history."}
+    return None
+
+
+def history_add_message(d: Database, v, conversation_id, role: str, content: str,
+                        images: str = "[]", model: str = "", meta: str = "") -> int | None:
+    """Persist one chat message, encrypting it when encrypted history is on."""
+    if conversation_id in (None, ""):
+        return None
+    if history_guard(d, v):
+        return None
+    try:
+        cid = int(conversation_id)
+    except (TypeError, ValueError):
+        return None
+    row = {
+        "conversation_id": cid, "role": str(role or "user"),
+        "content": str(content or ""), "images": str(images or "[]"),
+        "model": model, "meta": meta or "", "created_at": utcnow(),
+    }
+    if history_encrypted(d):
+        row["content"] = v.encrypt(row["content"])
+        row["images"] = v.encrypt(row["images"])
+        row["encrypted"] = 1
+    new_id = d.insert("assistant_messages", row)
+    d.execute("UPDATE assistant_conversations SET updated_at=? WHERE id=?", (utcnow(), cid))
+    return new_id
+
+
+def history_apply_encryption(d: Database, v, enabled: bool) -> None:
+    """Migrate existing conversations/messages to or from vault encryption."""
+    convs = d.query("SELECT id, title, encrypted FROM assistant_conversations")
+    msgs = d.query("SELECT id, content, images, encrypted FROM assistant_messages")
+    if enabled:
+        if not v.configured():
+            raise ValueError("Set up the encrypted vault before enabling encrypted chat history.")
+        if not v.unlocked():
+            raise ValueError("Unlock the vault before enabling encrypted chat history.")
+        for row in convs:
+            if int(row["encrypted"] or 0):
+                continue
+            d.update("assistant_conversations", row["id"],
+                     {"title": v.encrypt(str(row["title"] or "")), "encrypted": 1})
+        for row in msgs:
+            if int(row["encrypted"] or 0):
+                continue
+            d.update("assistant_messages", row["id"], {
+                "content": v.encrypt(str(row["content"] or "")),
+                "images": v.encrypt(str(row["images"] or "[]")),
+                "encrypted": 1,
+            })
+        d.audit("ASSISTANT_HISTORY_ENCRYPT", f"conversations={len(convs)} messages={len(msgs)}")
+        return
+    if not v.unlocked():
+        raise ValueError("Unlock the vault before disabling encrypted chat history; "
+                         "the existing history cannot be decrypted while locked.")
+    for row in convs:
+        if not int(row["encrypted"] or 0):
+            continue
+        d.update("assistant_conversations", row["id"],
+                 {"title": v.decrypt(str(row["title"] or "")), "encrypted": 0})
+    for row in msgs:
+        if not int(row["encrypted"] or 0):
+            continue
+        d.update("assistant_messages", row["id"], {
+            "content": v.decrypt(str(row["content"] or "")),
+            "images": v.decrypt(str(row["images"] or "[]")),
+            "encrypted": 0,
+        })
+    d.audit("ASSISTANT_HISTORY_DECRYPT", f"conversations={len(convs)} messages={len(msgs)}")
+
+
 def ai_sitrep(d: Database, v=None, max_chars: int = 6000) -> dict:
     """Generate the current field SITREP from local data."""
     try:
@@ -3031,9 +3117,13 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             # Persist to conversation history when requested.
             if conversation_id is not None:
                 try:
-                    d.insert("assistant_messages", {"conversation_id": conversation_id, "role": "user", "content": prompt, "images": json.dumps(image_paths), "model": model or d.get_setting("ollama_model", ""), "meta": "", "created_at": utcnow()})
-                    d.insert("assistant_messages", {"conversation_id": conversation_id, "role": "assistant", "content": result.get("content") or "", "images": "[]", "model": result.get("model"), "meta": result.get("done_reason") or "", "created_at": utcnow()})
-                    d.execute("UPDATE assistant_conversations SET updated_at=? WHERE id=?", (utcnow(), conversation_id))
+                    history_add_message(d, v, conversation_id, "user", prompt,
+                                        json.dumps(image_paths),
+                                        model or d.get_setting("ollama_model", ""))
+                    history_add_message(d, v, conversation_id, "assistant",
+                                        result.get("content") or "", "[]",
+                                        result.get("model") or "",
+                                        result.get("done_reason") or "")
                 except Exception:
                     pass
             d.audit("ASSISTANT_OK", json.dumps({"model": result.get("model"), "chars": len(result.get("content") or "")}), request.client.host if request.client else "")
@@ -3102,9 +3192,13 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                         except Exception: pass
                         if conversation_id is not None:
                             try:
-                                d.insert("assistant_messages", {"conversation_id": conversation_id, "role": "user", "content": prompt, "images": json.dumps(image_paths), "model": model or d.get_setting("ollama_model", ""), "meta": "", "created_at": utcnow()})
-                                d.insert("assistant_messages", {"conversation_id": conversation_id, "role": "assistant", "content": final_content or "", "images": "[]", "model": final_model, "meta": chunk.get("done_reason") or "", "created_at": utcnow()})
-                                d.execute("UPDATE assistant_conversations SET updated_at=? WHERE id=?", (utcnow(), conversation_id))
+                                history_add_message(d, v, conversation_id, "user", prompt,
+                                                    json.dumps(image_paths),
+                                                    model or d.get_setting("ollama_model", ""))
+                                history_add_message(d, v, conversation_id, "assistant",
+                                                    final_content or "", "[]",
+                                                    final_model or "",
+                                                    chunk.get("done_reason") or "")
                             except Exception:
                                 pass
             except Exception as e:
@@ -3118,32 +3212,91 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     @app.get("/api/assistant/conversations")
     def assistant_conversations_list(request: Request):
         d = db(request)
-        rows = d.query("SELECT c.id, c.title, c.created_at, c.updated_at, "
+        v = vault(request)
+        guard = history_guard(d, v)
+        if guard:
+            return {"items": [], **guard}
+        rows = d.query("SELECT c.id, c.title, c.created_at, c.updated_at, c.encrypted, "
                        "(SELECT count(*) FROM assistant_messages m WHERE m.conversation_id=c.id) AS msg_count "
                        "FROM assistant_conversations c ORDER BY c.updated_at DESC")
-        return {"items": [dict(r) for r in rows]}
+        items = []
+        for row in rows:
+            item = dict(row)
+            encrypted = int(item.pop("encrypted", 0) or 0)
+            if encrypted:
+                try:
+                    item["title"] = v.decrypt(str(item.get("title") or ""))
+                except Exception:
+                    item["title"] = "[encrypted title]"
+            items.append(item)
+        return {"items": items, "encrypted": history_encrypted(d)}
 
     @app.post("/api/assistant/conversations")
     def assistant_conversations_create(request: Request, payload: dict = Body(default={})):
         d = db(request)
+        v = vault(request)
+        guard = history_guard(d, v)
+        if guard:
+            return guard
+        payload = payload if isinstance(payload, dict) else {}
         title = str(payload.get("title") or "New chat").strip()[:120] or "New chat"
-        cid = d.insert("assistant_conversations", {"title": title, "created_at": utcnow(), "updated_at": utcnow()})
-        return {"id": cid, "title": title, "created_at": utcnow(), "updated_at": utcnow()}
+        encrypted = history_encrypted(d)
+        now = utcnow()
+        cid = d.insert("assistant_conversations", {
+            "title": v.encrypt(title) if encrypted else title,
+            "encrypted": 1 if encrypted else 0,
+            "created_at": now, "updated_at": now,
+        })
+        return {"ok": True, "id": cid, "title": title, "created_at": now, "updated_at": now}
+
+    @app.patch("/api/assistant/conversations/{conv_id}")
+    def assistant_conversation_rename(request: Request, conv_id: int, payload: dict = Body(default={})):
+        d = db(request)
+        v = vault(request)
+        guard = history_guard(d, v)
+        if guard:
+            return guard
+        payload = payload if isinstance(payload, dict) else {}
+        title = str(payload.get("title") or "").strip()[:120]
+        if not title:
+            raise HTTPException(status_code=400, detail="title is required")
+        row = d.one("SELECT id FROM assistant_conversations WHERE id=?", (conv_id,))
+        if not row:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        encrypted = history_encrypted(d)
+        d.update("assistant_conversations", conv_id, {
+            "title": v.encrypt(title) if encrypted else title,
+            "encrypted": 1 if encrypted else 0,
+            "updated_at": utcnow(),
+        })
+        return {"ok": True, "id": conv_id, "title": title}
 
     @app.get("/api/assistant/conversations/{conv_id}/messages")
     def assistant_conversation_messages(request: Request, conv_id: int):
         d = db(request)
-        rows = d.query("SELECT id, conversation_id, role, content, images, model, meta, created_at "
+        v = vault(request)
+        guard = history_guard(d, v)
+        if guard:
+            return {"items": [], **guard}
+        rows = d.query("SELECT id, conversation_id, role, content, images, model, meta, encrypted, created_at "
                        "FROM assistant_messages WHERE conversation_id=? ORDER BY id ASC", (conv_id,))
         out = []
         for r in rows:
             item = dict(r)
+            encrypted = int(item.pop("encrypted", 0) or 0)
+            if encrypted:
+                try:
+                    item["content"] = v.decrypt(str(item.get("content") or ""))
+                    item["images"] = v.decrypt(str(item.get("images") or "[]"))
+                except Exception:
+                    item["content"] = "[message could not be decrypted]"
+                    item["images"] = "[]"
             try:
                 item["images"] = json.loads(item.get("images") or "[]")
             except Exception:
                 item["images"] = []
             out.append(item)
-        return {"items": out}
+        return {"items": out, "encrypted": history_encrypted(d)}
 
     @app.delete("/api/assistant/conversations/{conv_id}")
     def assistant_conversation_delete(request: Request, conv_id: int):
@@ -3341,7 +3494,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     raise HTTPException(status_code=400, detail=f"{key} out of range")
                 value = f
             if key in ("sdr_tx_enabled", "sdr_tx_attested", "sdr_amp", "scanlines", "sound",
-                       "map_vector", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter"):
+                       "map_vector", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter", "assistant_system_tools", "assistant_medical_tools", "assistant_history_encrypted"):
                 value = bool(value)
             if key in ("callsign", "team", "operator", "timezone", "units", "date_format",
                        "grid_format", "accent", "tile_source", "mbtiles_path", "dem_mbtiles_path",
@@ -3379,6 +3532,12 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     raise HTTPException(status_code=400, detail=f"{key} file does not exist")
             if key == "dem_encoding" and value and str(value) not in ("terrarium", "mapbox", "custom"):
                 raise HTTPException(status_code=400, detail="dem_encoding must be terrarium, mapbox, or custom")
+            if key == "assistant_history_encrypted":
+                if value != bool(current.get("assistant_history_encrypted")):
+                    try:
+                        history_apply_encryption(d, vault(request), value)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc))
             d.set_setting(key, value)
         if "lan_access_enabled" in payload:
             lm = getattr(request.app.state, "lan_manager", None)

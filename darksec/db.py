@@ -532,6 +532,13 @@ class Database:
         if "recurrence" not in task_cols:
             self.execute("ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT ''")
 
+        # Encrypted chat history marks each row so plaintext history can be
+        # migrated in place without guessing from the content.
+        for table in ("assistant_conversations", "assistant_messages"):
+            cols = {r["name"] for r in self.query(f"PRAGMA table_info({table})")}
+            if "encrypted" not in cols:
+                self.execute(f"ALTER TABLE {table} ADD COLUMN encrypted INTEGER DEFAULT 0")
+
         # Document citations need page boundaries in the stored text. Older
         # indexes joined PDF pages with newlines; clear those once so the next
         # background index re-extracts them with form feeds.

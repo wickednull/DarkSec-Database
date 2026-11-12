@@ -1122,6 +1122,7 @@ body.no-scan .fx-scan { display: none; }
   padding: 0; border-bottom: 0; background: transparent;
 }
 .assistant-side .assistant-convbar select { flex: 1 1 100%; width: 100%; }
+.assistant-side .assistant-convbar > .col { flex: 1 1 100%; }
 .assistant-transcript {
   flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable;
   padding: 12px 14px;

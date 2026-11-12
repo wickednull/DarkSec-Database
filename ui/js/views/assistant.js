@@ -143,12 +143,13 @@ export async function render(root) {
   root.appendChild(layout);
 
   // Conversation picker
-  const convSelect = select([{ value: "", label: "Select conversation…" }], state.conversationId ? String(state.conversationId) : "");
-  const newConvBtn = btn("NEW CHAT", { size: "sm", icon: "plus", onClick: createConversation });
+  const newConvBtn = btn("NEW CHAT", { size: "sm", icon: "plus", onClick: () => createConversation() });
+  const renameConvBtn = btn("RENAME", { size: "sm", tone: "ghost", icon: "edit", onClick: () => renameConversation() });
   const saveChatBtn = btn("SAVE CHAT TO VAULT", { size: "sm", tone: "ghost", icon: "lock", onClick: saveChatToVault });
-  const delConvBtn = btn("DELETE", { size: "sm", tone: "danger", icon: "trash", onClick: deleteConversation });
+  const delConvBtn = btn("DELETE", { size: "sm", tone: "danger", icon: "trash", onClick: () => deleteConversation() });
+  const convState = h("div", { class: "col gap-6" });
   const convContainer = h("div", { class: "assistant-convbar" });
-  convContainer.append(convSelect, newConvBtn, saveChatBtn, delConvBtn);
+  convContainer.append(convState, newConvBtn, renameConvBtn, saveChatBtn, delConvBtn);
   async function saveChatToVault() {
     const msgs = (state.messages || []).filter((m) => m && (m.role === "user" || m.role === "assistant") && String(m.content || "").trim());
     if (!msgs.length) { toast("No chat messages to save", "warn"); return; }
@@ -462,93 +463,57 @@ export async function render(root) {
     return true;
   }
 
-  async function loadConversations() {
-    try {
-      const res = await api.get("/api/assistant/conversations");
-      const items = res?.items || [];
-      const opts = [{ value: "", label: "Select conversation…" }, ...items.map(c => ({ value: String(c.id), label: `${c.title || "Chat"} (${c.msg_count || 0})` }))];
-      const newSel = select(opts, state.conversationId ? String(state.conversationId) : "");
-      newSel.addEventListener("change", () => {
-        const v = newSel.value;
-        if (v) loadConversation(parseInt(v, 10));
-        else { state.conversationId = null; state.messages = []; transcript.replaceChildren(intro); }
-      });
-      convSelect.replaceWith(newSel);
-      // keep reference
-      // eslint-disable-next-line no-global-assign
-      // update convSelect variable by reassigning in closure scope not possible; instead use a wrapper
-    } catch (e) { toast(e.message, "error"); }
-  }
-
-  // We need a mutable reference to the select element; use an object wrapper.
-  // Rework: store select in state and replace via parent.
-  // The above approach is awkward; instead implement simpler picker rebuild.
-  // (We'll instead keep a container.)
-
   async function loadConversation(id) {
     try {
       state.conversationId = id;
       const res = await api.get(`/api/assistant/conversations/${id}/messages`);
+      if (res?.locked || res?.unconfigured) {
+        state.conversationId = null;
+        state.messages = [];
+        transcript.replaceChildren(intro);
+        toast(res.error || "Conversation history is unavailable", "warn");
+        return;
+      }
       const items = res?.items || [];
       state.messages = items.map(m => ({ role: m.role, content: m.content || "", meta: m.created_at || nowTs(), images: Array.isArray(m.images) ? m.images : [] }));
       transcript.replaceChildren(intro);
       for (const m of state.messages) addMsg(m.role, m.content, m.meta, m.images, { record: false });
-      toast(`Loaded conversation ${id}`, "ok");
     } catch (e) { toast(e.message, "error"); }
   }
 
-  async function createConversation() {
-    try {
-      const c = await api.post("/api/assistant/conversations", { title: "New chat" });
-      state.conversationId = c.id;
-      state.messages = [];
-      transcript.replaceChildren(intro);
-      await loadConversations();
-      // select it
-      const sel = document.querySelector("select");
-      if (sel) sel.value = String(c.id);
-      toast("New conversation created", "ok");
-    } catch (e) { toast(e.message, "error"); }
-  }
-
-  async function deleteConversation() {
-    if (!state.conversationId) { toast("No conversation selected", "warn"); return; }
-    if (!confirm("Delete this conversation and its messages?")) return;
-    try {
-      await api.del(`/api/assistant/conversations/${state.conversationId}`);
-      state.conversationId = null;
-      state.messages = [];
-      transcript.replaceChildren(intro);
-      await loadConversations();
-      toast("Conversation deleted", "ok");
-    } catch (e) { toast(e.message, "error"); }
-  }
-
-  // Fix conversation picker: use a container and rebuild select inside it.
-  // We appended convSelect already; but loadConversations replaces it and loses reference.
-  // To keep it simple, rebuild picker in a container.
-  // Remove the previous convBar select by rebuilding convBar contents each load.
-  // We'll instead create a container and manage select inside.
-
-  // Insert the current conversation select at the front when loading.
   async function rebuildConvPicker() {
     try {
       const res = await api.get("/api/assistant/conversations");
+      const old = convContainer.querySelector("select");
+      if (res?.locked || res?.unconfigured) {
+        if (old) old.remove();
+        convState.replaceChildren(h("div", { class: "callout small amber", text: res.error || "Encrypted chat history is unavailable." }));
+        convState.appendChild(res.locked
+          ? btn("UNLOCK VAULT", { size: "sm", tone: "primary", icon: "lock", onClick: async () => {
+              if (await promptVaultUnlock("Unlock the vault to load encrypted chat history.")) {
+                await rebuildConvPicker();
+              }
+            } })
+          : btn("OPEN SECURITY", { size: "sm", icon: "settings", onClick: () => { location.hash = "#/security"; } }));
+        return;
+      }
       const items = res?.items || [];
-      const opts = [{ value: "", label: "Select conversation…" }, ...items.map(c => ({ value: String(c.id), label: `${c.title || "Chat"} (${c.msg_count || 0})` }))];
+      convState.replaceChildren();
+      if (res?.encrypted) convState.appendChild(h("span", { class: "badge", text: "ENCRYPTED HISTORY" }));
+      const opts = [
+        { value: "", label: items.length ? "Select conversation…" : "No saved conversations" },
+        ...items.map(c => ({ value: String(c.id), label: `${c.title || "Chat"} (${c.msg_count || 0})` })),
+      ];
       const newSel = select(opts, state.conversationId ? String(state.conversationId) : "");
       newSel.addEventListener("change", () => {
         const v = newSel.value;
         if (v) loadConversation(parseInt(v, 10));
         else { state.conversationId = null; state.messages = []; transcript.replaceChildren(intro); }
       });
-      // remove old select
-      const old = convContainer.querySelector("select");
-      if (old) old.remove();
-      convContainer.insertBefore(newSel, convContainer.firstChild);
+      if (old) old.replaceWith(newSel);
+      else convContainer.insertBefore(newSel, convContainer.firstChild);
     } catch (e) { toast(e.message, "error"); }
   }
-  // initial
   await rebuildConvPicker();
 
   main.appendChild(panel({
@@ -597,11 +562,11 @@ export async function render(root) {
     )
   }));
 
-  // createConversation should refresh picker
-  // redefine createConversation to rebuild picker
-  async function createConversation2() {
+  async function createConversation() {
     try {
-      const c = await api.post("/api/assistant/conversations", { title: "New chat" });
+      const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+      const c = await api.post("/api/assistant/conversations", { title: `Chat ${stamp}` });
+      if (!c?.id) { toast(c?.error || "Could not create conversation", "warn"); return; }
       state.conversationId = c.id;
       state.messages = [];
       transcript.replaceChildren(intro);
@@ -611,9 +576,26 @@ export async function render(root) {
       toast("New conversation created", "ok");
     } catch (e) { toast(e.message, "error"); }
   }
-  newConvBtn.onclick = createConversation2;
 
-  async function deleteConversation2() {
+  async function renameConversation() {
+    if (!state.conversationId) { toast("Select a conversation first", "warn"); return; }
+    const sel = convContainer.querySelector("select");
+    const current = sel?.selectedOptions?.[0]?.textContent?.replace(/\s*\(\d+\)\s*$/, "").trim() || "";
+    const title = prompt("Conversation title", current);
+    if (title === null) return;
+    const clean = title.trim().slice(0, 120);
+    if (!clean) { toast("Title cannot be empty", "warn"); return; }
+    try {
+      const res = await api.patch(`/api/assistant/conversations/${state.conversationId}`, { title: clean });
+      if (res?.ok === false) { toast(res.error || "Rename failed", "warn"); return; }
+      await rebuildConvPicker();
+      const next = convContainer.querySelector("select");
+      if (next) next.value = String(state.conversationId);
+      toast("Conversation renamed", "ok");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function deleteConversation() {
     if (!state.conversationId) { toast("No conversation selected", "warn"); return; }
     if (!confirm("Delete this conversation and its messages?")) return;
     try {
@@ -625,7 +607,6 @@ export async function render(root) {
       toast("Conversation deleted", "ok");
     } catch (e) { toast(e.message, "error"); }
   }
-  delConvBtn.onclick = deleteConversation2;
 
   async function send() {
     const text = (promptInput.value || "").trim();
@@ -633,15 +614,21 @@ export async function render(root) {
     if (state.sending) return;
     const model = state.selectedModel || store.settings?.ollama_model || status?.model || "";
     if (!model) { toast("Select an installed model first (Detect Models)", "warn"); return; }
-    // ensure conversation
+    // Ensure a conversation exists. If encrypted history is locked or the
+    // vault is unconfigured, continue without persistence instead of blocking
+    // the operator's question.
     if (!state.conversationId) {
       try {
         const c = await api.post("/api/assistant/conversations", { title: (text || "Image chat").slice(0, 60) });
-        state.conversationId = c.id;
-        await rebuildConvPicker();
-        const sel = convContainer.querySelector("select");
-        if (sel) sel.value = String(c.id);
-      } catch (e) { toast(e.message, "error"); return; }
+        if (c?.id) {
+          state.conversationId = c.id;
+          await rebuildConvPicker();
+          const sel = convContainer.querySelector("select");
+          if (sel) sel.value = String(c.id);
+        } else {
+          toast(`${c?.error || "Chat history unavailable"}; this chat will not be saved.`, "warn");
+        }
+      } catch (e) { toast(`Chat will not be saved: ${e.message}`, "warn"); }
     }
     let pending = null;
     let pendingTicker = null;
