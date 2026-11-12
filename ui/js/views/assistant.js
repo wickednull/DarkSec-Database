@@ -118,16 +118,17 @@ export async function render(root) {
   } });
   focusBtn.id = "assistantFocusBtn";
 
-  root.appendChild(pageHead({
+  const assistantHead = pageHead({
     kicker: "COMMAND // DELAMAIN",
     title: "Delamain",
-    desc: "Local, operator-controlled AI assistant backed by Ollama. Supports chat history, image attachments for vision models, voice input/output (browser-dependent), and indexed document retrieval.",
     actions: [
       focusBtn,
       btn("SETTINGS", { icon: "settings", tone: "ghost", onClick: () => { location.hash = "#/settings"; } }),
       btn("DETECT MODELS", { icon: "refresh", onClick: refreshModels }),
     ],
-  }));
+  });
+  assistantHead.classList.add("assistant-head");
+  root.appendChild(assistantHead);
 
   if (!status?.reachable || !status?.model) {
     root.appendChild(alertStrip(
@@ -136,7 +137,7 @@ export async function render(root) {
     ));
   }
 
-  const layout = h("div", { class: "assistant-layout mt-14" });
+  const layout = h("div", { class: "assistant-layout mt-8" });
   const main = h("div", { class: "col gap-12 assistant-main" });
   const side = h("div", { class: "col gap-12 assistant-side" });
   layout.append(main, side);
