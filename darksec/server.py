@@ -1294,6 +1294,145 @@ def ai_water_test_log(d: Database, source: str = "", volume_l=None, method: str 
     return {"ok": True, "item": row}
 
 
+_SYSTEM_DENY_PARTS = {
+    ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".password-store",
+    "keyrings", "id_rsa", "id_ed25519", "credentials", "tokens", ".env",
+    ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".authinfo",
+    "secrets", "secret", "token", "gcloud", "azure", "darksec-nightwatch",
+}
+_SYSTEM_DENY_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".kdbx")
+_SYSTEM_DENY_PATHS = (
+    "/etc/shadow", "/etc/sudoers", "/etc/sudoers.d", "/root",
+    "/proc", "/sys", "/dev", "/boot", "/bin", "/sbin", "/usr", "/lib",
+    "/lib64", "/var/lib", "/run",
+)
+
+
+def _system_root(d: Database) -> Path:
+    raw = str(d.get_setting("assistant_system_root", "~") or "~").strip() or "~"
+    return Path(os.path.expanduser(raw)).resolve()
+
+
+def _system_path(d: Database, raw: str) -> tuple[Path, Path]:
+    root = _system_root(d)
+    candidate = Path(os.path.expanduser(str(raw or ".")))
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    target = candidate.resolve()
+    if target != root and root not in target.parents:
+        raise ValueError(f"Path is outside the configured system-tools root ({root}).")
+    try:
+        rel_parts = [p.lower() for p in target.relative_to(root).parts]
+    except ValueError:
+        rel_parts = [p.lower() for p in target.parts]
+    if any(part in _SYSTEM_DENY_PARTS for part in rel_parts):
+        raise ValueError("Path is blocked by the system-tools credential policy.")
+    if target.suffix.lower() in _SYSTEM_DENY_SUFFIXES:
+        raise ValueError("Credential/key file extensions are blocked.")
+    target_text = str(target)
+    if any(target_text == p or target_text.startswith(p.rstrip("/") + "/")
+           for p in _SYSTEM_DENY_PATHS):
+        raise ValueError("System path is blocked by policy.")
+    app_data = Path(config.DATA_DIR).resolve()
+    if target == app_data or app_data in target.parents:
+        raise ValueError("The application data directory is blocked from assistant file tools.")
+    return root, target
+
+
+def ai_system_list(d: Database, path: str = ".", limit: int = 200) -> dict:
+    if not d.get_setting("assistant_system_tools", False):
+        return {"ok": False, "error": "System file tools are disabled in Settings."}
+    try:
+        limit = max(1, min(int(limit or 200), 500))
+    except (TypeError, ValueError):
+        limit = 200
+    try:
+        root, target = _system_path(d, path)
+        if not target.exists():
+            return {"ok": False, "error": f"Path does not exist: {target}"}
+        if not target.is_dir():
+            return {"ok": False, "error": f"Not a directory: {target}"}
+        entries = []
+        for entry in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))[:limit]:
+            if entry.name.lower() in _SYSTEM_DENY_PARTS:
+                continue
+            try:
+                st = entry.stat()
+                entries.append({
+                    "name": entry.name,
+                    "type": "dir" if entry.is_dir() else "file",
+                    "size": st.st_size if entry.is_file() else None,
+                    "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+                })
+            except OSError:
+                entries.append({"name": entry.name, "type": "unknown", "size": None, "modified": None})
+        d.audit("ASSISTANT_SYSTEM_LIST", str(target)[:300])
+        return {"ok": True, "root": str(root), "path": str(target),
+                "count": len(entries), "entries": entries}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+
+
+def ai_system_read(d: Database, path: str, max_chars: int = 6000) -> dict:
+    if not d.get_setting("assistant_system_tools", False):
+        return {"ok": False, "error": "System file tools are disabled in Settings."}
+    try:
+        max_chars = max(200, min(int(max_chars or 6000), 20000))
+    except (TypeError, ValueError):
+        max_chars = 6000
+    try:
+        root, target = _system_path(d, path)
+        if not target.exists() or not target.is_file():
+            return {"ok": False, "error": f"File not found: {target}"}
+        if target.stat().st_size > 5_000_000:
+            return {"ok": False, "error": "File is larger than the 5 MB read limit."}
+        raw = target.read_bytes()
+        if b"\x00" in raw[:4096]:
+            return {"ok": False, "error": "Binary file; only text files can be read."}
+        text = raw.decode("utf-8", errors="replace")
+        d.audit("ASSISTANT_SYSTEM_READ", str(target)[:300])
+        return {"ok": True, "root": str(root), "path": str(target),
+                "chars": len(text), "truncated": len(text) > max_chars,
+                "content": text[:max_chars]}
+    except PermissionError:
+        return {"ok": False, "error": "Permission denied (non-sudo tools cannot elevate)."}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+
+
+def ai_system_write(d: Database, path: str, content: str, overwrite: bool = False,
+                    append: bool = False) -> dict:
+    if not d.get_setting("assistant_system_tools", False):
+        return {"ok": False, "error": "System file tools are disabled in Settings."}
+    text = str(content or "")
+    if len(text.encode("utf-8", errors="ignore")) > 1_000_000:
+        return {"ok": False, "error": "Content exceeds the 1 MB write limit."}
+    try:
+        root, target = _system_path(d, path)
+        if target.exists() and target.is_dir():
+            return {"ok": False, "error": f"Target is a directory: {target}"}
+        if not target.parent.exists() or not target.parent.is_dir():
+            return {"ok": False, "error": f"Parent directory does not exist: {target.parent}"}
+        if target.exists() and not overwrite and not append:
+            return {"ok": False, "exists": True,
+                    "error": "File exists. Set overwrite=true to replace it (a .bak backup is created)."}
+        backup = None
+        if target.exists() and not append and target.stat().st_size <= 5_000_000:
+            backup = target.parent / (target.name + ".bak")
+            shutil.copy2(target, backup)
+        mode = "a" if append else "w"
+        with open(target, mode, encoding="utf-8") as handle:
+            handle.write(text)
+        d.audit("ASSISTANT_SYSTEM_WRITE", f"{target} bytes={len(text.encode('utf-8'))} append={bool(append)} overwrite={bool(overwrite)}")
+        return {"ok": True, "root": str(root), "path": str(target),
+                "bytes": len(text.encode("utf-8")), "append": bool(append),
+                "backup": str(backup) if backup else None}
+    except PermissionError:
+        return {"ok": False, "error": "Permission denied (non-sudo tools cannot elevate)."}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+
+
 def vault_fast_events(d: Database, v, prompt: str):
     """Deterministic stream for simple vault read/list requests.
 
@@ -1797,6 +1936,15 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     return ai_water_test_log(d, args.get("source") or "",
                                              args.get("volume_l"), args.get("method") or "",
                                              args.get("chlorine_ppm"), args.get("note") or "")
+                if name == "list_system_directory":
+                    return ai_system_list(d, args.get("path") or ".", args.get("limit") or 200)
+                if name == "read_system_file":
+                    return ai_system_read(d, args.get("path") or "", args.get("max_chars") or 6000)
+                if name == "write_system_file":
+                    if not assistant.system_write_intent(prompt):
+                        return {"ok": False, "error": "Blocked: the operator did not explicitly ask to write a file."}
+                    return ai_system_write(d, args.get("path") or "", args.get("content") or "",
+                                           bool(args.get("overwrite")), bool(args.get("append")))
                 if name == "save_log_entry":
                     return ai_log_save(d, args.get("title"), args.get("body"), args.get("category") or "GENERAL")
                 if name == "save_note":

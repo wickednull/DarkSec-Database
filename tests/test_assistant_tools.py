@@ -343,3 +343,52 @@ def test_incident_checklist_and_water_tools(tmpdb):
     assert logged["ok"] and logged["item"]["chlorine_status"] == "LOW"
     recent = server.ai_water_log_read(tmpdb)
     assert recent["ok"] and recent["items"][0]["id"] == logged["item"]["id"]
+
+
+def test_system_file_tools_are_opt_in_and_rooted(tmpdb, tmp_path):
+    from pathlib import Path
+
+    root = Path(tmpdb.path).parent
+    if root == tmp_path or root not in Path(tmpdb.path).parents:
+        root = tmp_path
+    (root / "notes.txt").write_text("hello field", encoding="utf-8")
+    (root / ".ssh").mkdir(exist_ok=True)
+    (root / ".ssh" / "id_rsa").write_text("secret", encoding="utf-8")
+
+    disabled = server.ai_system_read(tmpdb, str(root / "notes.txt"))
+    assert disabled["ok"] is False and "disabled" in disabled["error"]
+
+    tmpdb.set_setting("assistant_system_tools", True)
+    tmpdb.set_setting("assistant_system_root", str(root))
+
+    listed = server.ai_system_list(tmpdb, ".")
+    assert listed["ok"] and any(e["name"] == "notes.txt" for e in listed["entries"])
+    assert not any(e["name"] == ".ssh" for e in listed["entries"])
+
+    read = server.ai_system_read(tmpdb, "notes.txt")
+    assert read["ok"] and read["content"] == "hello field"
+    denied = server.ai_system_read(tmpdb, ".ssh/id_rsa")
+    assert denied["ok"] is False
+
+    outside = server.ai_system_read(tmpdb, "../outside.txt")
+    assert outside["ok"] is False
+
+    new = server.ai_system_write(tmpdb, "new.txt", "first")
+    assert new["ok"]
+    exists = server.ai_system_write(tmpdb, "new.txt", "second")
+    assert exists["ok"] is False and exists.get("exists") is True
+    replaced = server.ai_system_write(tmpdb, "new.txt", "second", overwrite=True)
+    assert replaced["ok"] and (root / "new.txt.bak").read_text(encoding="utf-8") == "first"
+    appended = server.ai_system_write(tmpdb, "new.txt", " plus", append=True)
+    assert appended["ok"] and (root / "new.txt").read_text(encoding="utf-8") == "second plus"
+
+
+def test_system_tools_only_in_spec_when_enabled():
+    base = assistant.tool_specs()
+    base_names = {s["function"]["name"] for s in base}
+    assert "read_system_file" not in base_names
+    enabled = assistant.tool_specs({"system_tools": True})
+    enabled_names = {s["function"]["name"] for s in enabled}
+    assert {"list_system_directory", "read_system_file", "write_system_file"} <= enabled_names
+    assert assistant.system_write_intent("write this to a file") is True
+    assert assistant.system_write_intent("list my files") is False

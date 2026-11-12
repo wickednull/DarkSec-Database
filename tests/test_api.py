@@ -799,3 +799,15 @@ def test_assistant_reads_vault_note_without_model(client):
     after = db.one("SELECT count(*) c FROM notes")["c"]
     assert after == before  # reading must not create a new note
     client.post("/api/vault/lock")
+
+
+def test_system_file_tools_setting_roundtrip(client):
+    r = client.put("/api/settings", json={
+        "assistant_system_tools": True,
+        "assistant_system_root": "~",
+    })
+    assert r.status_code == 200
+    settings = client.get("/api/settings").json()
+    assert settings["assistant_system_tools"] is True
+    assert settings["assistant_system_root"] == "~"
+    client.put("/api/settings", json={"assistant_system_tools": False})

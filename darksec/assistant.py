@@ -54,6 +54,8 @@ def _settings(db: Database) -> dict:
         "tools": bool(s.get("assistant_tools", True)),
         "tools_auto": bool(s.get("assistant_tools_auto", True)),
         "library_context": bool(s.get("assistant_library_context", True)),
+        "system_tools": bool(s.get("assistant_system_tools", False)),
+        "system_root": str(s.get("assistant_system_root") or "~").strip() or "~",
         "keep_alive": str(s.get("assistant_keep_alive") or DEFAULT_KEEP_ALIVE).strip() or DEFAULT_KEEP_ALIVE,
         "opsec_mode": bool(s.get("opsec_mode", False)),
         "units": s.get("units") or "metric",
@@ -550,6 +552,21 @@ def vault_direct_read_intent(query: str) -> bool:
             and not _VAULT_ANALYZE.search(str(query or "")))
 
 
+_SYSTEM_WRITE = re.compile(r"\b(?:write|save|create|append|edit|update|replace|put)\b", re.IGNORECASE)
+
+
+def system_write_intent(query: str) -> bool:
+    return bool(_SYSTEM_WRITE.search(str(query or "")))
+
+
+_SYSTEM_HINTS = re.compile(
+    r"\b(?:file|files|folder|folders|directory|directories|desktop|documents|"
+    r"downloads|home directory|path|read .{0,30}file|write .{0,30}file|"
+    r"save .{0,30}file|list .{0,30}files?)\b",
+    re.IGNORECASE,
+)
+
+
 _RECORD_WRITE = re.compile(
     r"\b(?:add|create|adjust|set|mark|complete|resolve|check|uncheck|tick|log|"
     r"record|update|change|remove|delete|decrement|increment|consume|consume[ds]?|"
@@ -628,6 +645,14 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
             "how old cached data is. Call write tools only when the operator asks you to "
             "save/record something. Writes are rate-limited by the server."
         )
+        if cfg.get("system_tools"):
+            sys += (
+                "\nSystem file tools are enabled by the operator (non-sudo). They are restricted "
+                "to the configured root; sensitive credential paths are blocked by the server. "
+                "Use list_system_directory/read_system_file only when asked to inspect files, and "
+                "write_system_file only when explicitly asked to save or edit a file. Report the "
+                "exact path and whether an existing file was overwritten."
+            )
     msgs = [{"role": "system", "content": sys}]
 
     kept: list[dict] = []
@@ -685,13 +710,13 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
     return msgs
 
 
-def tool_specs() -> list[dict]:
+def tool_specs(cfg: dict | None = None) -> list[dict]:
     """Local tools Delamain may call. Write tools are rate-limited server-side.
 
     Descriptions are intentionally short: tool schemas are sent with the prompt
     and cost prefill time on CPU. Keep just enough for the model to choose well.
     """
-    return [
+    specs = [
         {
             "type": "function",
             "function": {
@@ -1030,6 +1055,67 @@ def tool_specs() -> list[dict]:
             },
         },
     ]
+    if cfg and cfg.get("system_tools"):
+        specs.extend([
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_system_directory",
+                    "description": (
+                        "List files and folders outside the app under the operator-configured "
+                        "system-tools root. Non-sudo; read-only."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Directory path, relative to the root or absolute within it."},
+                            "limit": {"type": "integer", "description": "Max entries (default 200)."},
+                        },
+                        "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_system_file",
+                    "description": (
+                        "Read a text file outside the app under the configured root. "
+                        "Non-sudo; sensitive credential paths are blocked."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "File path, relative to the root or absolute within it."},
+                            "max_chars": {"type": "integer", "description": "Max characters to return (default 6000)."},
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_system_file",
+                    "description": (
+                        "Write a text file outside the app under the configured root. "
+                        "Use only when the operator explicitly asks to save or edit a file. "
+                        "Existing files require overwrite=true and are backed up first."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "File path, relative to the root or absolute within it."},
+                            "content": {"type": "string", "description": "Text content to write."},
+                            "overwrite": {"type": "boolean", "description": "Required to replace an existing file."},
+                            "append": {"type": "boolean", "description": "Append instead of replacing."},
+                        },
+                        "required": ["path", "content"],
+                    },
+                },
+            },
+        ])
+    return specs
 
 
 def _tool_call_args(tc: dict) -> tuple[str, dict]:
@@ -1087,9 +1173,11 @@ def _tools_for_turn(cfg: dict, prompt: str, tool_executor) -> list[dict] | None:
     """Decide whether this turn gets the (expensive) tool definitions."""
     if not tool_executor or not cfg.get("tools", True):
         return None
-    if cfg.get("tools_auto", True) and not tools_relevant(prompt):
+    if cfg.get("tools_auto", True) and not tools_relevant(prompt) and not (
+        cfg.get("system_tools") and _SYSTEM_HINTS.search(prompt)
+    ):
         return None
-    specs = tool_specs()
+    specs = tool_specs(cfg)
     if vault_read_only_intent(prompt) or vault_edit_intent(prompt):
         specs = [spec for spec in specs
                  if spec["function"]["name"] not in ("save_note", "save_log_entry")]
