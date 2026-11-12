@@ -1128,6 +1128,7 @@ body.no-scan .fx-scan { display: none; }
   padding: 12px 14px;
 }
 .assistant-composer {
+  flex: none;
   border-top: 1px solid var(--line); padding: 10px 12px 12px;
   background: rgba(0, 0, 0, .18);
 }
@@ -1145,7 +1146,7 @@ body.no-scan .fx-scan { display: none; }
 }
 @media (max-width: 860px) {
   .assistant-layout { grid-template-columns: 1fr; height: auto; min-height: 0; }
-  .assistant-main { height: min(64dvh, 680px); }
+  .assistant-main { height: max(320px, min(64dvh, 680px)); }
   .assistant-side { max-height: none; overflow: visible; }
 }
 
@@ -1154,15 +1155,14 @@ body.no-scan .fx-scan { display: none; }
    and prevents the chat from being clipped below the fold. */
 @media (min-width: 861px) {
   .main:has(> .view > .assistant-layout) > .view {
-    height: 100%;
-    min-height: 420px;
+    min-height: 100%;
     display: flex;
     flex-direction: column;
   }
   .main:has(> .view > .assistant-layout) .assistant-layout {
-    flex: 1 1 auto;
+    flex: 1 1 0;
     height: auto;
-    min-height: 0;
+    min-height: 360px;
   }
 }
 
@@ -1174,4 +1174,15 @@ body.no-scan .fx-scan { display: none; }
 }
 @media (max-height: 720px) {
   .main:has(> .view > .assistant-layout) .assistant-composer textarea { min-height: 56px; }
+  /* At short heights let the page scroll instead of nesting a scroll area:
+     wheel input over the transcript must be able to reach the composer. */
+  .main:has(> .view > .assistant-layout) > .view { min-height: 0; display: block; }
+  .main:has(> .view > .assistant-layout) .assistant-layout {
+    flex: none;
+    height: auto;
+    min-height: 0;
+  }
+  .main:has(> .view > .assistant-layout) .assistant-main,
+  .main:has(> .view > .assistant-layout) .assistant-chat { height: auto; }
+  .main:has(> .view > .assistant-layout) .assistant-transcript { overflow-y: visible; }
 }
