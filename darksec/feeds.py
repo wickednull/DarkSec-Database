@@ -1482,13 +1482,14 @@ def _get_text_with_fallbacks(url: str, header_sets: list[dict], timeout: int = T
     raise RuntimeError("request failed")
 
 
-def _rsoe_enrich(items: list[dict], limit: int = 40) -> None:
-    """Fetch detail pages for the most significant events to add coordinates.
+def _rsoe_enrich(items: list[dict], limit: int = 400) -> None:
+    """Fetch detail pages for events that still need coordinates.
 
-    One request per event is expensive, so only the top few by severity/time
-    are enriched. Unenriched events still appear in the cached intel list.
+    The list page has no coordinates. Detail pages do, so enrich every event
+    that is not already cached with a position. Previously enriched items are
+    reused by _refresh_rsoe(), which keeps routine refreshes cheap.
     """
-    targets = items[:max(0, limit)]
+    targets = [it for it in items if it.get("lat") is None][:max(0, limit)]
 
     def fetch(item: dict) -> None:
         try:
@@ -1513,19 +1514,34 @@ def _rsoe_enrich(items: list[dict], limit: int = 40) -> None:
             return
 
     if targets:
-        with ThreadPoolExecutor(max_workers=6) as pool:
+        with ThreadPoolExecutor(max_workers=10) as pool:
             list(pool.map(fetch, targets))
 
 
 def _refresh_rsoe(db: Database, row) -> list[dict]:
-    """Fetch the RSOE EDIS list page and enrich a subset with coordinates."""
+    """Fetch the RSOE EDIS list page and enrich all events with coordinates."""
     url = (row["url"] or "").strip() or "https://rsoe-edis.org/eventList"
+    try:
+        previous = json.loads(row["payload"] or "{}").get("items") or []
+    except Exception:
+        previous = []
+    prev_by_id = {
+        str(it.get("id")): it for it in previous
+        if it.get("id") and it.get("lat") is not None and it.get("lon") is not None
+    }
     resp = requests.get(url, headers=UA, timeout=TIMEOUT)
     resp.raise_for_status()
     items = _parse_rsoe(resp.text, row["name"])
     if not items:
         raise RuntimeError("RSOE EDIS returned no parsable events")
-    _rsoe_enrich(items, limit=40)
+    for item in items:
+        cached = prev_by_id.get(str(item.get("id")))
+        if cached:
+            item["lat"] = cached.get("lat")
+            item["lon"] = cached.get("lon")
+            if len(str(cached.get("summary") or "")) > len(str(item.get("summary") or "")):
+                item["summary"] = cached.get("summary")
+    _rsoe_enrich(items, limit=400)
     return items
 
 

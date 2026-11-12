@@ -738,3 +738,27 @@ def test_gdelt_legacy_items_are_revalidated():
     assert fixed["title"] == "Israel bombs lebanons churches"
     assert fixed["severity"] == "ALERT"
     assert fixed["label_version"] == feeds.GDELT_LABEL_VERSION
+
+
+def test_rsoe_parser_keeps_all_categories():
+    from darksec import feeds
+
+    html = """
+    <h4 class="categoryNameMobil">Earthquake</h4>
+    <div class="event-card red">
+      <h5 class="title">M 5.1 - Test quake</h5>
+      <table><tr><td class="eventDate">2026-11-11 10:00:00</td>
+      <td class="location">Testland</td>
+      <td class="details"><a href="https://rsoe-edis.org/eventList/details/1/0">Details</a></td></tr></table>
+    </div>
+    <h4 class="categoryNameMobil">War</h4>
+    <div class="event-card orange">
+      <h5 class="title">Ceasefire violation reported</h5>
+      <table><tr><td class="eventDate">2026-11-11 11:00:00</td>
+      <td class="location">Border region</td>
+      <td class="details"><a href="https://rsoe-edis.org/eventList/details/2/0">Details</a></td></tr></table>
+    </div>
+    """
+    items = feeds._parse_rsoe(html)
+    assert {item["category"] for item in items} == {"Earthquake", "War"}
+    assert {item["id"] for item in items} == {"1", "2"}

@@ -326,7 +326,7 @@ export async function render(root, params = {}) {
         cls: "span-2",
         tools: [btn("REFRESH", { size: "sm", tone: "ghost", onClick: () => refreshFeed(rsoe) })],
         body: rsoe.count
-          ? buildFeedItemList(rsoe, 12, { showSummary: true })
+          ? buildRsoePanel(rsoe)
           : emptyState("RSOE EDIS not cached yet", "Refresh intel while online to ingest https://rsoe-edis.org/eventList.", "alert"),
       }));
     }
@@ -409,6 +409,7 @@ export async function render(root, params = {}) {
       return wrap;
     }
     const list = h("div", { class: "list" });
+    if (opts.scroll) Object.assign(list.style, { maxHeight: "440px", overflow: "auto" });
     for (const it of items.slice(0, limit)) {
       const row = h("div", { class: "list-item" });
       const main = h("div", { class: "li-main" });
@@ -420,12 +421,41 @@ export async function render(root, params = {}) {
       }
       row.appendChild(main);
       const tools = h("div", { class: "row gap-6 mt-6 wrap" });
+      if (it.category) tools.appendChild(badge(it.category, "muted"));
       if (it.time) tools.appendChild(badge(fmt.ago(it.time), "muted"));
       if (it.url) tools.appendChild(h("a", { class: "badge cyan", href: it.url, target: "_blank", rel: "noopener noreferrer", text: "READ" }));
       row.appendChild(tools);
       list.appendChild(row);
     }
     wrap.appendChild(list);
+    return wrap;
+  }
+
+  function buildRsoePanel(f) {
+    const wrap = h("div", { class: "col gap-8" });
+    const items = f.items || [];
+    if (!items.length) {
+      wrap.appendChild(emptyState("RSOE EDIS not cached yet", "Refresh intel while online to ingest https://rsoe-edis.org/eventList.", "alert"));
+      return wrap;
+    }
+    const counts = {};
+    for (const it of items) {
+      const cat = it.category || "Uncategorized";
+      counts[cat] = (counts[cat] || 0) + 1;
+    }
+    const cats = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const sel = select([
+      { value: "", label: `All categories (${items.length})` },
+      ...cats.map(([cat, n]) => ({ value: cat, label: `${cat} (${n})` })),
+    ], "");
+    const host = h("div");
+    const renderList = () => {
+      const filtered = sel.value ? items.filter((it) => (it.category || "Uncategorized") === sel.value) : items;
+      host.replaceChildren(buildFeedItemList({ ...f, items: filtered }, filtered.length, { showSummary: true, scroll: true }));
+    };
+    sel.addEventListener("change", renderList);
+    wrap.append(sel, host);
+    renderList();
     return wrap;
   }
 

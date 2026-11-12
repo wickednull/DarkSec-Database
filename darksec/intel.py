@@ -847,7 +847,7 @@ def overview(db: Database, lat: float | None, lon: float | None, elevation_m: fl
             latf = lonf = None
     except (TypeError, ValueError):
         latf = lonf = None
-    events = live_events(db, limit=250)
+    events = live_events(db, limit=600)
     aq = air_quality(db)
     aq_val = (aq or {}).get("aqi")
     threat = threat_index(db, events, latf, lonf, aqi=aq_val)
@@ -873,6 +873,18 @@ def overview(db: Database, lat: float | None, lon: float | None, elevation_m: fl
     
     feeds = feedstore.list_feeds(db)
     feeds_full = feedstore.list_feeds(db, item_limit=None)
+    # The intel RSOE panel filters all categories, but the default feed listing
+    # caps items at 30. Attach the full cached RSOE list for that one source.
+    try:
+        rsoe_full = next((f for f in feeds_full if f.get("id") == "rsoe_edis"), None)
+        if rsoe_full:
+            for f in feeds:
+                if f.get("id") == "rsoe_edis":
+                    f["items"] = rsoe_full.get("items") or []
+                    f["count"] = rsoe_full.get("count") or len(f["items"])
+                    break
+    except Exception:
+        pass
     critical = [i for f in feeds_full for i in (f.get("items") or [])
                 if str(i.get("severity") or "INFO").upper() in CRITICAL_SEVERITIES]
     sun = None
