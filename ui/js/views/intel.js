@@ -64,8 +64,8 @@ export async function render(root, params = {}) {
   const diseaseSummary = data.disease_summary || null;
   const feeds = data.feeds || [];
   const threatBand = String(threat.band || "NO DATA");
-  let pizzint = null;
-  try { pizzint = await api.get("/api/pizzint"); } catch (err) { pizzint = { error: err.message }; }
+  let defcon = null;
+  try { defcon = await api.get("/api/defcon"); } catch (err) { defcon = { error: err.message }; }
   const positionInfo = positionConfidence(store.settings || {});
   const observer = opsecActive(store.settings) ? "OP//MASKED" : fmt.coord(store.settings?.lat, store.settings?.lon, 4);
   const feedById = Object.fromEntries(feeds.map((f) => [f.id, f]));
@@ -115,30 +115,46 @@ export async function render(root, params = {}) {
     render(root);
   });
 
-  // Pizza intelligence (PizzINT) panel
-  if (pizzint) {
-    const locs = pizzint.locations || [];
-    const doughcon = pizzint.doughcon != null ? `DOUGHCON ${pizzint.doughcon}` : "DOUGHCON ?";
-    const status = pizzint.status || (pizzint.error ? "UNAVAILABLE" : "");
+  // DEFCON tracker panel
+  if (defcon) {
+    const lvl = Number.isFinite(defcon.level) ? defcon.level : null;
+    const tone = lvl == null ? "muted" : lvl <= 2 ? "red" : lvl === 3 ? "amber" : "green";
+    const label = lvl != null ? `DEFCON ${lvl}${defcon.codename ? ` (${defcon.codename})` : ""}` : "DEFCON ?";
     const body = h("div", { class: "col gap-6" });
-    body.appendChild(h("div", { class: "row gap-8 items-center" },
-      badge(doughcon, pizzint.doughcon >= 4 ? "green" : pizzint.doughcon === 3 ? "amber" : "red"),
-      h("span", { class: "small", text: status }),
-      pizzint.error ? h("span", { class: "tiny muted", text: `(${pizzint.error})` }) : null));
-    if (locs.length) {
+    body.appendChild(h("div", { class: "row gap-8 wrap items-center" },
+      badge(label, tone),
+      defcon.readiness ? h("span", { class: "small", text: defcon.readiness }) : null,
+      defcon.updated ? h("span", { class: "tiny muted", text: `Updated ${fmt.date(defcon.updated)}` }) : null,
+      defcon.error ? h("span", { class: "tiny muted", text: `(${defcon.error})` }) : null));
+    if (defcon.driver) {
+      body.appendChild(h("div", { class: "small" },
+        h("b", { text: "Primary driver: " }),
+        h("span", { text: defcon.driver })));
+    }
+    if (defcon.summary) body.appendChild(h("p", { class: "small muted", text: defcon.summary.slice(0, 600) }));
+    const cmds = (defcon.commands || []).filter((c) => c.level != null);
+    if (cmds.length) {
       const list = h("div", { class: "row wrap gap-6" });
-      for (const l of locs) {
-        list.appendChild(h("span", { class: "badge muted", text: `${l.name}: ${l.status}${l.distance ? " · " + l.distance : ""}` }));
+      for (const c of cmds) {
+        const ct = c.level <= 2 ? "red" : c.level === 3 ? "amber" : "green";
+        list.appendChild(h("span", {
+          class: `badge ${ct}`,
+          title: c.description || "",
+          text: `${c.name} · ${c.level}`,
+        }));
       }
       body.appendChild(list);
+      if (defcon.commands_raised != null && defcon.commands_total) {
+        body.appendChild(h("div", { class: "tiny muted", text: `${defcon.commands_raised} of ${defcon.commands_total} commands currently raised.` }));
+      }
     }
-    body.appendChild(h("div", { class: "tiny muted", text: "Advisory OSINT only. Pizza activity is not a verified military indicator. Source: pizzint.watch" }));
+    body.appendChild(h("div", { class: "tiny muted", text: "Official DEFCON levels are classified. Values are defconlevel.com's OSINT estimate, not government-confirmed. Verify with official channels. Source: defconlevel.com" }));
     root.appendChild(panel({
-      title: "Pizza Intelligence (PizzINT)", icon: "flame",
-      sub: "Open-source readiness signal from public pizza activity near sensitive sites",
+      title: "DEFCON Tracker", icon: "shield",
+      sub: "Current global alert level and combatant-command postures",
       tools: [btn("REFRESH", { size: "sm", icon: "refresh", onClick: async () => {
-        try { pizzint = await api.post("/api/pizzint/refresh"); render(root); }
-        catch (err) { toast(err.message || "PizzINT refresh failed", "error"); }
+        try { defcon = await api.post("/api/defcon/refresh"); render(root); }
+        catch (err) { toast(err.message || "DEFCON refresh failed", "error"); }
       } })],
       body,
     }));

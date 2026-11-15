@@ -16,7 +16,7 @@ from typing import Any
 
 import psutil
 
-from . import config, feeds, intel, pizzint, sdr, sitrep
+from . import config, defcon, feeds, intel, sdr, sitrep
 from .db import Database, utcnow
 
 
@@ -76,7 +76,7 @@ def system_info() -> dict:
 # SITREP
 # --------------------------------------------------------------------------
 
-def readiness(db: Database, include_pizzint: bool = True) -> dict:
+def readiness(db: Database, include_defcon: bool = True) -> dict:
     """Automated operational readiness derived from local state and cached intel.
 
     Readiness is scored as 100 minus capped operational risk across:
@@ -132,14 +132,14 @@ def readiness(db: Database, include_pizzint: bool = True) -> dict:
     cached_feeds = sum(1 for f in feed_rows if f.get("status") in ("OK", "STALE"))
     feed_coverage = (cached_feeds / len(feed_rows)) if feed_rows else 1.0
 
-    # PizzINT: advisory OSINT readiness signal from public pizza activity.
+    # DEFCON: advisory OSINT alert level published by defconlevel.com.
     # Callers that must avoid network I/O (assistant tools) can skip it.
-    pizzint_data = {}
-    if include_pizzint:
+    defcon_data = {}
+    if include_defcon:
         try:
-            pizzint_data = pizzint.fetch() or {}
+            defcon_data = defcon.fetch() or {}
         except Exception:
-            pizzint_data = {}
+            defcon_data = {}
 
     # Count critical cached events within 2000 km of the operator so distant
     # global headlines do not inflate the dashboard alert strip.
@@ -218,13 +218,18 @@ def readiness(db: Database, include_pizzint: bool = True) -> dict:
         threat_risk += min(6.0, 1.5 * min(4, critical_intel_count))
     threat_risk = min(35.0, threat_risk)
 
-    # PizzINT advisory signal: low DOUGHCON (1-2) raises threat risk; 5 is nominal.
-    doughcon = pizzint_data.get("doughcon")
-    if isinstance(doughcon, int):
-        if doughcon <= 2:
-            threat_risk = min(35.0, threat_risk + 12.0)
-        elif doughcon == 3:
-            threat_risk = min(35.0, threat_risk + 5.0)
+    # DEFCON advisory signal: lower numbers mean higher readiness. DEFCON 5
+    # is nominal; 1-3 add progressively more threat risk.
+    defcon_level = defcon_data.get("level")
+    if isinstance(defcon_level, int):
+        if defcon_level <= 1:
+            threat_risk = min(35.0, threat_risk + 25.0)
+        elif defcon_level == 2:
+            threat_risk = min(35.0, threat_risk + 16.0)
+        elif defcon_level == 3:
+            threat_risk = min(35.0, threat_risk + 7.0)
+        elif defcon_level == 4:
+            threat_risk = min(35.0, threat_risk + 3.0)
 
     supply_risk = min(25.0, 7.0 * len(low_stock) + 4.0 * len(expiring))
     # INTEL measures coverage and freshness, not event severity. Critical
@@ -277,9 +282,12 @@ def readiness(db: Database, include_pizzint: bool = True) -> dict:
     if feed_rows and feed_coverage < 0.5:
         signals.append({"category": "INTEL",
                         "text": f"Only {cached_feeds}/{len(feed_rows)} intel feeds cached; run SYNC NOW when networked"})
-    if isinstance(doughcon, int) and doughcon <= 3:
+    if isinstance(defcon_level, int) and defcon_level <= 3:
+        detail = defcon_data.get("driver") or defcon_data.get("readiness") or ""
+        codename = defcon_data.get("codename") or ""
+        label = f"DEFCON {defcon_level}" + (f" ({codename})" if codename else "")
         signals.append({"category": "THREATS",
-                        "text": f"PizzINT DOUGHCON {doughcon}: {pizzint_data.get('status', '')}".strip()})
+                        "text": f"{label}{': ' + detail if detail else ''} (OSINT estimate, defconlevel.com)"})
     if not have_position:
         signals.append({"category": "POSITION", "text": "No position set; location-scoped threat and map results are unavailable"})
     elif source == "unverified":
@@ -299,7 +307,16 @@ def readiness(db: Database, include_pizzint: bool = True) -> dict:
         "signals": signals,
         "categories": categories,
         "threat": {"score": int(local_threat_score), "band": local_threat.get("band"), "events_scoped": bool(local_threat.get("events_scoped"))},
-        "pizzint": {"doughcon": doughcon, "status": pizzint_data.get("status", "")},
+        "defcon": {
+            "level": defcon_level,
+            "codename": defcon_data.get("codename", ""),
+            "readiness": defcon_data.get("readiness", ""),
+            "driver": defcon_data.get("driver", ""),
+            "updated": defcon_data.get("updated"),
+            "commands_raised": defcon_data.get("commands_raised"),
+            "commands_total": defcon_data.get("commands_total"),
+            "error": defcon_data.get("error"),
+        },
         "nearby_critical_count": nearby_critical,
         "updated": utcnow(),
     }

@@ -332,12 +332,45 @@ def test_search_and_manual(client):
     assert doc.status_code == 200 and doc.text
 
 
-# ------------------------------------------------------------------- pizzint
-def test_pizzint_shape(client):
-    data = client.get("/api/pizzint").json()
-    assert "source" in data
-    assert "doughcon" in data
-    assert isinstance(data.get("locations", []), list)
+# -------------------------------------------------------------------- defcon
+def test_defcon_parser_extracts_current_level():
+    from darksec import defcon
+
+    page = """
+    <div class="current-badge level-3">
+      <span class="badge-number">DEFCON 3</span>
+      <span class="badge-codename">ROUND HOUSE</span>
+    </div>
+    <time datetime="2026-01-02T03:04:05+00:00">Jan 2, 2026 (UTC)</time>
+    <p class="hero-lead"><strong>DEFCON 3 (ROUND HOUSE):</strong> heightened
+      readiness. Test situation summary. <a href="#">Read more &rarr;</a></p>
+    <p class="hero-driver"><strong>Primary driver:</strong> <a href="#">Test driver</a></p>
+    <p class="section-sub"><strong>2 of 2 commands currently raised.</strong></p>
+    <a href="/commands/centcom" class="command-card">
+      <img alt="CENTCOM - DEFCON 2">
+      <div class="command-meta"><h3>CENTCOM</h3><p>Central Command</p></div>
+    </a>
+    """
+    data = defcon._parse(page)
+    assert data["level"] == 3
+    assert data["codename"] == "ROUND HOUSE"
+    assert data["readiness"] == "heightened readiness"
+    assert data["summary"] == "Test situation summary."
+    assert data["driver"] == "Test driver"
+    assert data["commands_raised"] == 2 and data["commands_total"] == 2
+    assert data["commands"] == [{
+        "slug": "centcom", "name": "CENTCOM",
+        "description": "Central Command", "level": 2,
+    }]
+
+
+def test_defcon_shape(client):
+    data = client.get("/api/defcon").json()
+    assert data["source"] == "defconlevel.com"
+    assert "level" in data
+    assert isinstance(data.get("commands", []), list)
+    if data.get("error") is None:
+        assert data["level"] in (1, 2, 3, 4, 5)
 
 
 # ---------------------------------------------------------------------- lan

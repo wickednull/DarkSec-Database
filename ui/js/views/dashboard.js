@@ -81,13 +81,14 @@ export async function render(root, params) {
     : syncOnline
       ? (sync.enabled === false ? "ONLINE · AUTO-SYNC OFF" : "LIVE · AUTO-SYNC ON")
       : "OFFLINE · CACHED DATA";
-  const pz = (dash.readiness || {}).pizzint || {};
-  const pzBadge = pz.doughcon != null
-    ? badge(`PIZZINT DOUGHCON ${pz.doughcon}`, pz.doughcon >= 4 ? "green" : pz.doughcon === 3 ? "amber" : "red")
+  const dc = (dash.readiness || {}).defcon || {};
+  const dcBadge = dc.level != null
+    ? badge(`DEFCON ${dc.level}${dc.codename ? ` · ${dc.codename}` : ""}`,
+        dc.level <= 2 ? "red" : dc.level === 3 ? "amber" : "green")
     : null;
   root.appendChild(h("div", { class: "row gap-8 wrap mt-10" },
     badge(syncText, syncTone),
-    pzBadge,
+    dcBadge,
     h("span", { class: "tiny muted", text: `Last refresh ${fmt.ago(sync.last_success)} · ${sync.feed_ok ?? "?"}/${sync.feed_total ?? "?"} feeds cached · dashboard refreshes every 60 s` })));
 
   /* ------------------------------------------------------------- hero */

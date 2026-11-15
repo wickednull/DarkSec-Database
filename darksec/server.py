@@ -378,7 +378,7 @@ def assistant_live_status(d: Database, vault_obj=None) -> dict:
         if len(alerts) >= 8:
             break
     try:
-        ready = readiness(d, include_pizzint=False)
+        ready = readiness(d, include_defcon=False)
     except Exception:
         ready = {}
     vault_state = vault_obj.status() if vault_obj is not None else None
@@ -5995,16 +5995,16 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"QR generation failed: {exc}")
 
-    # --------------------------------------------------------------- pizza intelligence (PizzINT)
-    @app.get("/api/pizzint")
-    def pizzint_get(request: Request):
-        from . import pizzint
-        return pizzint.fetch()
+    # --------------------------------------------------------------- DEFCON tracker (OSINT)
+    @app.get("/api/defcon")
+    def defcon_get(request: Request):
+        from . import defcon
+        return defcon.fetch()
 
-    @app.post("/api/pizzint/refresh")
-    def pizzint_refresh(request: Request):
-        from . import pizzint
-        return pizzint.fetch(force=True)
+    @app.post("/api/defcon/refresh")
+    def defcon_refresh(request: Request):
+        from . import defcon
+        return defcon.fetch(force=True)
 
     # --------------------------------------------------------------- manual
     @app.get("/api/manual")
