@@ -2851,6 +2851,37 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         db(request).audit(action, detail, request.client.host if request.client else "")
         return {"ok": True}
 
+    # ------------------------------------------------------------ program updates
+    @app.get("/api/update/status")
+    def update_status():
+        from . import updater
+        return updater.status()
+
+    @app.post("/api/update/check")
+    def update_check(request: Request):
+        from . import updater
+        result = updater.check()
+        db(request).audit(
+            "UPDATE_CHECK",
+            f"behind={result.get('behind')} error={result.get('error') or ''} "
+            f"remote={result.get('remote_url') or ''}"[:500],
+            request.client.host if request.client else "",
+        )
+        return result
+
+    @app.post("/api/update/apply")
+    def update_apply(request: Request):
+        from . import updater
+        result = updater.apply()
+        db(request).audit(
+            "UPDATE_APPLY",
+            f"ok={result.get('ok')} updated={result.get('updated')} "
+            f"{result.get('old_commit') or ''}->{result.get('new_commit') or ''} "
+            f"error={result.get('error') or ''}"[:800],
+            request.client.host if request.client else "",
+        )
+        return result
+
     # ------------------------------------------------------------ assistant (local Ollama)
     def assistant_tool_executor(d: Database, v, prompt: str = ""):
         """Execute the narrow set of local tools Delamain is allowed to call."""

@@ -2,7 +2,7 @@ import { api, download } from "../api.js";
 import { store } from "../store.js";
 import {
   h, panel, pageHead, btn, field, input, select, checkbox, badge, toast,
-  modal, fmt, loading, emptyState,
+  modal, fmt, loading, emptyState, confirmDialog,
 } from "../components.js";
 import {
   kv, progressBar, statusTone, positionConfidence, manualPositionMetadata, gpsPositionMetadata,
@@ -32,7 +32,7 @@ export async function render(root) {
   root.appendChild(pageHead({
     kicker: "SYSTEM // CONFIGURATION",
     title: "System Settings",
-    desc: "Local identity, position, radio limits, offline maps and data custody. Nothing here is sent to a remote service.",
+    desc: "Local identity, position, radio limits, offline maps and data custody. Network actions are explicit and labeled.",
     actions: [
       btn("REFRESH", { icon: "refresh", onClick: () => render(root) }),
       btn("BACKUP DATA", { icon: "save", tone: "primary", onClick: backupNow }),
@@ -527,6 +527,25 @@ export async function render(root) {
   grid.appendChild(sysPanel);
   loadAudit(auditBox);
 
+  /* ------------------------------------------------------ program updates */
+  const updateBox = h("div", { class: "col" });
+  const updateMsg = h("div", { class: "callout small", text: "Checking local update state…" });
+  const updateCheckBtn = btn("CHECK FOR UPDATES", { icon: "refresh", onClick: checkUpdates });
+  const updateApplyBtn = btn("UPDATE NOW", { tone: "primary", icon: "download", onClick: applyUpdate, disabled: true });
+  const updatePanel = panel({
+    title: "Program updates",
+    icon: "download",
+    cls: "span-2",
+    sub: "Fast-forward only · from the configured git remote",
+    body: h("div", { class: "col gap-8" },
+      updateBox,
+      updateMsg,
+      h("div", { class: "row wrap gap-6" }, updateCheckBtn, updateApplyBtn),
+      h("div", { class: "callout small", text: "Updating fetches and fast-forwards program files from origin. Operator data in fielddata/ is ignored by git and is never changed. Uncommitted changes to tracked files block the update; untracked files are kept. Restart DarkSec after a successful update to run the new code. Checking for updates contacts the configured remote." })),
+  });
+  grid.appendChild(updatePanel);
+  loadUpdateStatus();
+
   /* ------------------------------------------------------------ backups */
   const backupsBox = h("div", { class: "list" });
   const backupPanel = panel({
@@ -599,6 +618,100 @@ export async function render(root) {
       status = await store.loadStatus({ force: true });
     } catch (err) {
       toast(err.message || "Could not save settings", "error");
+    }
+  }
+
+  let updateInfo = null;
+
+  function renderUpdate(info) {
+    updateInfo = info || {};
+    const rows = [
+      ["Install", updateInfo.root || (updateInfo.frozen ? "packaged build" : "not a git checkout")],
+      ["Version", `${updateInfo.version || status.version || "—"}${updateInfo.commit ? ` · ${updateInfo.commit}` : ""}`],
+      ["Branch", updateInfo.branch || "—"],
+      ["Remote", updateInfo.remote_url || "—"],
+      ["Working tree", updateInfo.dirty == null ? "unknown"
+        : updateInfo.dirty ? `modified · ${updateInfo.dirty_count} tracked file(s)`
+        : updateInfo.untracked_count ? `clean · ${updateInfo.untracked_count} untracked file(s)`
+        : "clean"],
+    ];
+    if (updateInfo.subject) rows.push(["Current commit", `${updateInfo.commit_date || ""} · ${updateInfo.subject}`]);
+    if (updateInfo.latest?.commit) rows.push(["Latest", `${updateInfo.latest.commit_date || ""} · ${updateInfo.latest.subject || ""}`]);
+    if (updateInfo.checked_at) rows.push(["Last check", fmt.date(updateInfo.checked_at)]);
+    if (updateInfo.behind != null) rows.push(["Status", updateInfo.behind > 0 ? `${updateInfo.behind} update commit(s) available` : "up to date"]);
+    updateBox.replaceChildren(kv(rows));
+    if (updateInfo.dirty_files?.length) {
+      const more = updateInfo.dirty_count > updateInfo.dirty_files.length ? " …" : "";
+      updateBox.appendChild(h("div", { class: "tiny muted wrap-any", text: `Local changes: ${updateInfo.dirty_files.join(", ")}${more}` }));
+    }
+    if (updateInfo.untracked_count) {
+      updateBox.appendChild(h("div", { class: "tiny muted", text: `${updateInfo.untracked_count} untracked file(s) will be kept; the update stops only if one would be overwritten.` }));
+    }
+    let text;
+    if (updateInfo.error) text = updateInfo.error;
+    else if (updateInfo.frozen) text = "Packaged builds cannot self-update. Install a newer release.";
+    else if (updateInfo.repo === false) text = "This installation is not a git checkout, so self-update is unavailable.";
+    else if (updateInfo.dirty) text = updateInfo.reason || "Local changes block updates.";
+    else if (updateInfo.update_available) text = `Update available${updateInfo.latest?.commit ? `: ${updateInfo.latest.commit} · ${updateInfo.latest.subject}` : `: ${updateInfo.behind} commit(s) behind`}.`;
+    else if (updateInfo.behind === 0) text = "Already up to date.";
+    else text = "Press CHECK FOR UPDATES to contact the configured remote.";
+    const problem = !!(updateInfo.error || updateInfo.frozen || updateInfo.repo === false || updateInfo.dirty || updateInfo.update_available);
+    updateMsg.className = `callout small ${problem ? "amber" : ""}`.trim();
+    updateMsg.textContent = text;
+    updateApplyBtn.disabled = !updateInfo.can_update;
+  }
+
+  async function loadUpdateStatus() {
+    try {
+      renderUpdate(await api.get("/api/update/status"));
+    } catch (err) {
+      updateMsg.className = "callout small amber";
+      updateMsg.textContent = err.message || "Update status unavailable";
+    }
+  }
+
+  async function checkUpdates() {
+    const label = updateCheckBtn.querySelector("span");
+    const original = label?.textContent;
+    updateCheckBtn.disabled = true;
+    if (label) label.textContent = "CHECKING…";
+    try {
+      const info = await api.post("/api/update/check");
+      renderUpdate(info);
+      if (info.error) toast(info.error, "error");
+      else if (info.update_available) toast(`${info.behind} update commit(s) available`, "warn");
+      else toast("Already up to date");
+    } catch (err) {
+      toast(err.message || "Update check failed", "error");
+    } finally {
+      updateCheckBtn.disabled = false;
+      if (label && original) label.textContent = original;
+    }
+  }
+
+  async function applyUpdate() {
+    const ok = await confirmDialog({
+      title: "Update DarkSec",
+      message: `Fetch and fast-forward program files from ${updateInfo?.remote_url || "origin"}? Operator data in fielddata/ is not changed. DarkSec must be restarted afterward.`,
+      confirmText: "UPDATE",
+      requireText: "UPDATE",
+    });
+    if (!ok) return;
+    updateApplyBtn.disabled = true;
+    updateCheckBtn.disabled = true;
+    updateMsg.className = "callout small";
+    updateMsg.textContent = "Updating from origin…";
+    try {
+      const info = await api.post("/api/update/apply");
+      renderUpdate(info);
+      if (!info.ok) toast(info.error || "Update failed", "error");
+      else if (info.updated) toast("Updated. Restart DarkSec to run the new code.", "ok");
+      else toast(info.message || "Already up to date");
+    } catch (err) {
+      toast(err.message || "Update failed", "error");
+    } finally {
+      updateCheckBtn.disabled = false;
+      updateApplyBtn.disabled = !updateInfo?.can_update;
     }
   }
 

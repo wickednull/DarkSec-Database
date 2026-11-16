@@ -366,6 +366,18 @@ enablement and attestation are deliberately preserved rather than restored.
 Backups never contain PDFs or decrypted vault notes. Export JSON or CSV for
 interchange; keep a copy on removable media.
 
+## Program updates
+
+**Settings → Program updates** checks the installation's git remote and
+fast-forwards the program files from `origin`. It requires a real git checkout
+with an `origin` remote and no uncommitted changes to tracked files; local
+changes or a detached HEAD block the update instead of producing a merge.
+Untracked files are kept unless the incoming changes would overwrite one.
+Runtime data in
+`fielddata/` is ignored by git and is not touched. Packaged/frozen builds
+cannot self-update. Restart DarkSec after an update so the running process
+loads the new code.
+
 ## Security model and limits
 
 - The API binds to `127.0.0.1` only.

@@ -373,6 +373,24 @@ def test_defcon_shape(client):
         assert data["level"] in (1, 2, 3, 4, 5)
 
 
+# ------------------------------------------------------------ program updates
+def test_update_status_shape(client):
+    data = client.get("/api/update/status").json()
+    for key in ("app", "version", "frozen", "repo", "can_update", "dirty", "reason"):
+        assert key in data
+    assert isinstance(data["repo"], bool)
+    assert isinstance(data["can_update"], bool)
+
+
+def test_updater_clean_error_redacts_credentials():
+    from darksec import updater
+
+    message = updater._clean_error(
+        "fatal: unable to access 'https://user:secret@github.com/x/y.git/': 403"
+    )
+    assert "secret" not in message
+
+
 # ---------------------------------------------------------------------- lan
 def test_lan_status_shape(client):
     data = client.get("/api/lan/status").json()
