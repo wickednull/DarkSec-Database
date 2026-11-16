@@ -13,6 +13,20 @@ database.
 > calibrated instrument. Read the safety notes inside each module. In a real
 > emergency, contact local emergency services when possible.
 
+## Screenshots
+
+| World map | Focused map |
+| --- | --- |
+| ![World map](docs/screenshots/map-world.png) | ![Focused map](docs/screenshots/map-focused.png) |
+
+| DEFCON tracker | Situation report |
+| --- | --- |
+| ![DEFCON tracker](docs/screenshots/defcon-tracker.png) | ![Situation report](docs/screenshots/situation-report.png) |
+
+| Document library | Security & vault |
+| --- | --- |
+| ![Document library](docs/screenshots/document-library.png) | ![Security and vault](docs/screenshots/security-vault.png) |
+
 ## What is included
 
 - **SITREP dashboard** — readiness indicator, almanac, feeds, tasks, incidents,
