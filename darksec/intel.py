@@ -342,8 +342,14 @@ _SAT_CACHE_LOCK = threading.Lock()
 _SAT_CACHE_TTL = 60.0
 
 
-def live_satellites(db: Database, observer_lat: float, observer_lon: float, limit: int = 40) -> list[dict]:
-    """Propagate the latest CelesTrak TLE snapshot and return passes over the observer."""
+def live_satellites(db: Database, observer_lat: float, observer_lon: float,
+                    limit: int = 40, visible_only: bool = True) -> list[dict]:
+    """Propagate the latest CelesTrak TLE snapshot.
+
+    By default returns satellites currently above the observer's horizon. Pass
+    ``visible_only=False`` for the map layer, which wants a global picture
+    rather than a local pass list.
+    """
     # list_feeds intentionally omits the raw payload from API responses, so
     # read the cached TLE blob directly here.
     row = db.one("SELECT payload FROM feeds WHERE id='celestrak_tle' "
@@ -352,7 +358,7 @@ def live_satellites(db: Database, observer_lat: float, observer_lon: float, limi
         return []
     raw = row["payload"]
     cache_key = (round(float(observer_lat), 2), round(float(observer_lon), 2),
-                 len(raw), hash(raw))
+                 bool(visible_only), int(limit), len(raw), hash(raw))
     mono = time.monotonic()
     with _SAT_CACHE_LOCK:
         cached = _SAT_CACHE.get(cache_key)
@@ -369,8 +375,8 @@ def live_satellites(db: Database, observer_lat: float, observer_lon: float, limi
     from sgp4.api import Satrec
     from sgp4 import propagation
     now = datetime.now(timezone.utc)
-    obs_lat = math.radians(observer_lat)
-    obs_lon = math.radians(observer_lon)
+    theta = _gmst_rad(now)
+    obs = _observer_ecef(observer_lat, observer_lon)
     for it in items:
         line1 = it.get("line1"); line2 = it.get("line2")
         if not line1 or not line2:
@@ -386,32 +392,131 @@ def live_satellites(db: Database, observer_lat: float, observer_lon: float, limi
             alt_km = radius - 6371.0
             if alt_km < 80.0 or alt_km > 40000.0:
                 continue
-            # geocentric lat/lon
+            # SGP4 returns TEME (an ECI frame). Rotate into ECEF before
+            # deriving the sub-satellite point, otherwise every satellite
+            # appears at an inertial latitude instead of over the ground.
             x, y, z = r
-            rr = math.sqrt(x * x + y * y + z * z)
-            lon = math.atan2(y, x)
-            lat = math.asin(max(-1.0, min(1.0, z / rr))) if rr else 0.0
-            # elevation over observer
-            cos_e = math.cos(obs_lat) * math.cos(lat - obs_lon) + math.sin(obs_lat) * math.sin(lat)
-            sin_e = math.sin(lat) * math.cos(obs_lat) - math.cos(lat) * math.sin(obs_lat) * math.cos(obs_lon)
-            elev = math.asin(max(-1.0, min(1.0, sin_e / max(1e-9, math.sqrt(cos_e * cos_e + sin_e * sin_e))))) if cos_e > 0 else -math.pi / 2
-            if elev < math.radians(5.0):
+            ex = x * math.cos(theta) + y * math.sin(theta)
+            ey = -x * math.sin(theta) + y * math.cos(theta)
+            ez = z
+            rr = math.sqrt(ex * ex + ey * ey + ez * ez)
+            lon = math.atan2(ey, ex)
+            lat = math.asin(max(-1.0, min(1.0, ez / rr))) if rr else 0.0
+            elev_deg, az_deg = _look_angles((x, y, z), now, obs,
+                                             float(observer_lat), float(observer_lon))
+            if visible_only and elev_deg < 5.0:
                 continue
             out.append({
                 "norad": int(it.get("norad") or 0),
                 "name": str(it.get("name") or "UNKNOWN"),
-                "lat": math.degrees(lat), "lon": math.degrees(lon), "alt_km": round(alt_km, 1),
-                "elevation_deg": round(math.degrees(elev), 1),
+                "lat": round(math.degrees(lat), 5), "lon": round(math.degrees(lon), 5),
+                "alt_km": round(alt_km, 1),
+                "elevation_deg": round(elev_deg, 1),
+                "azimuth_deg": round(az_deg, 1),
+                "visible": elev_deg >= 0.0,
                 "source": "CelesTrak", "severity": "INFO", "time": utcnow(),
             })
         except Exception:
             continue
-    out.sort(key=lambda x: -x["elevation_deg"])
+    if visible_only:
+        out.sort(key=lambda x: -x["elevation_deg"])
+    else:
+        # The map wants a representative global picture plus the satellites
+        # currently overhead. Keep visible passes first, then fill with named
+        # stations/weather/amateur/science objects and a stable sample of the
+        # rest so the layer does not become thousands of Starlink dots.
+        visible = sorted([x for x in out if x["elevation_deg"] >= 5.0],
+                         key=lambda x: -x["elevation_deg"])
+        rest = [x for x in out if x["elevation_deg"] < 5.0]
+        chosen = visible[:max(1, int(limit) // 2)]
+        remaining = max(0, int(limit) - len(chosen))
+        preferred = [x for x in rest if _PASS_NAME_RE.search(x["name"])]
+        others = [x for x in rest if not _PASS_NAME_RE.search(x["name"])]
+        others.sort(key=lambda x: (x["name"], x["norad"]))
+        chosen += preferred[:remaining]
+        remaining = max(0, int(limit) - len(chosen))
+        chosen += others[:remaining]
+        out = chosen
     with _SAT_CACHE_LOCK:
         for old in [k for k, (ts, _) in _SAT_CACHE.items() if mono - ts > 600]:
             _SAT_CACHE.pop(old, None)
         _SAT_CACHE[cache_key] = (mono, out)
     return out[:limit]
+
+
+_SAT_TRACK_CACHE: dict[tuple, tuple[float, dict]] = {}
+_SAT_TRACK_LOCK = threading.Lock()
+_SAT_TRACK_TTL = 120.0
+
+
+def satellite_track(db: Database, norad: int, minutes: int = 90,
+                    step_seconds: int = 60) -> dict:
+    """Return a short ground track for one cached CelesTrak object."""
+    row = db.one("SELECT payload FROM feeds WHERE id='celestrak_tle' "
+                 "ORDER BY fetched_at DESC LIMIT 1")
+    if not row or not row["payload"]:
+        return {"norad": int(norad), "name": "", "points": [], "error": "No cached TLE"}
+    raw = row["payload"]
+    cache_key = (int(norad), int(minutes), int(step_seconds), len(raw), hash(raw))
+    mono = time.monotonic()
+    with _SAT_TRACK_LOCK:
+        cached = _SAT_TRACK_CACHE.get(cache_key)
+        if cached is not None and mono - cached[0] < _SAT_TRACK_TTL:
+            return cached[1]
+    try:
+        items = (json.loads(raw) or {}).get("items") or []
+    except Exception:
+        return {"norad": int(norad), "name": "", "points": [], "error": "Cached TLE is unreadable"}
+    item = next((it for it in items if str(it.get("norad") or "") == str(norad)), None)
+    if not item or not item.get("line1") or not item.get("line2"):
+        return {"norad": int(norad), "name": "", "points": [], "error": "Satellite TLE not found"}
+    try:
+        from sgp4.api import Satrec
+        from sgp4 import propagation
+        sat = Satrec.twoline2rv(item["line1"], item["line2"])
+        epoch = datetime(2000 + int(str(sat.epochyr or "20")), 1, 1,
+                         tzinfo=timezone.utc) + timedelta(days=float(sat.epochdays))
+    except Exception as exc:
+        return {"norad": int(norad), "name": item.get("name") or "", "points": [],
+                "error": f"TLE parse failed: {str(exc)[:120]}"}
+
+    now = datetime.now(timezone.utc)
+    half = timedelta(minutes=max(5, int(minutes)) / 2)
+    step = timedelta(seconds=max(10, int(step_seconds)))
+    stamp = now - half
+    end = now + half
+    points: list[dict] = []
+    while stamp <= end:
+        try:
+            r, _v = propagation.sgp4(sat, (stamp - epoch).total_seconds() / 60.0)
+        except Exception:
+            r = None
+        if r:
+            theta = _gmst_rad(stamp)
+            x, y, z = r
+            ex = x * math.cos(theta) + y * math.sin(theta)
+            ey = -x * math.sin(theta) + y * math.cos(theta)
+            ez = z
+            rr = math.sqrt(ex * ex + ey * ey + ez * ez)
+            if rr:
+                points.append({
+                    "time": stamp.isoformat(),
+                    "lat": round(math.degrees(math.asin(max(-1.0, min(1.0, ez / rr)))), 4),
+                    "lon": round(math.degrees(math.atan2(ey, ex)), 4),
+                })
+        stamp += step
+    data = {
+        "norad": int(norad),
+        "name": item.get("name") or "",
+        "minutes": int(minutes),
+        "step_seconds": int(step_seconds),
+        "points": points,
+    }
+    with _SAT_TRACK_LOCK:
+        for old in [k for k, (ts, _) in _SAT_TRACK_CACHE.items() if mono - ts > 600]:
+            _SAT_TRACK_CACHE.pop(old, None)
+        _SAT_TRACK_CACHE[cache_key] = (mono, data)
+    return data
 
 
 # --------------------------------------------------------- future pass planner

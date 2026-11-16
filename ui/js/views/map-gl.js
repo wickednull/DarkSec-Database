@@ -1,10 +1,10 @@
 /* WebGL/3D prototype map (MapLibre GL) alongside the classic canvas map.
    Uses local/offline-capable raster tiles: /api/map/tiles/{z}/{x}/{y}.png
    Raster style (no external glyphs/sprites). True DEM terrain requires raster-dem tiles. */
-import { api } from "../api.js";
+import { api, download } from "../api.js";
 import { store } from "../store.js";
 import { h, pageHead, btn, alertStrip, loading, fmt, toast, panel, checkbox, select, field, badge } from "../components.js";
-import { positionConfidence, opsecActive } from "./shared.js?v=opsec-1";
+import { positionConfidence, opsecActive, readTextFile } from "./shared.js?v=opsec-1";
 import * as U from "../units.js";
 
 let maplibrePromise = null;
@@ -112,17 +112,21 @@ export async function render(root) {
   let maplibregl;
   try { maplibregl = await loadMapLibre(); } catch (err) { root.replaceChildren(h("div", { class: "callout danger", text: err.message })); return; }
 
-  const state = { maxAgeHours: 0, show: { hazards:true, conflict:true, aircraft:true, sats:true, maritime:true, cables:true, cctv:true, cctvAlpr:true, wind:false, rain:false, cloud:false, terrain: !!demStatus?.available, waypoints:true, tracks:true, daynight:true, home:!hidePosition } };
-  let map = null, popup = null, daynightTimer = null, glLiveTimer = null, inspector = null;
+  const state = { maxAgeHours: 0, show: { hazards:true, conflict:true, aircraft:true, sats:true, satsOverheadOnly:false, maritime:true, cables:true, cctv:true, cctvAlpr:true, wind:false, rain:false, cloud:false, terrain: !!demStatus?.available, waypoints:true, tracks:true, daynight:true, home:!hidePosition }, live: true, lastRefresh: Date.now() };
+  let map = null, popup = null, daynightTimer = null, glLiveTimer = null, liveTimer = null, freshTimer = null, inspector = null;
+  let intelAlpr = { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };
+  let alprFetchTimer = null, alprQueryKey = "";
 
   root.replaceChildren();
   root.appendChild(pageHead({
-    kicker: "COMMAND // TERRAIN (GL PROTOTYPE)",
+    kicker: "COMMAND // TERRAIN (GL)",
     title: "Map & Terrain — 3D/GL",
     desc: `WebGL situational map over local/offline raster tiles. Pitch/rotate for 3D perspective. Position: ${hidePosition ? "OP//MASKED" : positionInfo.mapLabel}. DEM terrain, wind/rain/cloud overlays, and maritime/cables/CCTV layers use local cache when available.`,
     actions: [
       btn("2D CANVAS", { icon: "map", onClick: () => { location.hash = "#/map?renderer=2d"; } }),
       btn("3D GL", { icon: "layers", tone: "primary", onClick: () => { location.hash = "#/map?renderer=gl"; } }),
+      btn("IMPORT GPX", { icon: "upload", onClick: importGpxGl }),
+      btn("EXPORT GPX", { icon: "download", onClick: () => download("/api/map/gpx/export", "darksec-waypoints.gpx") }),
       btn("RESET", { icon: "target", onClick: () => map?.easeTo({ center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 4, pitch:0, bearing:0 }) }),
       btn("PITCH 45°", { icon: "layers", onClick: () => map?.easeTo({ pitch:45, duration:600 }) }),
       btn("GLOBE/FLAT", { icon: "globe", onClick: toggleProjection }),
@@ -173,16 +177,36 @@ export async function render(root) {
       setVis(key,on);
     }));
   }
-  layerBox.appendChild(h("div", { class:"tiny muted mt-6", text:"CCTV filters" }));
-  layerBox.appendChild(checkbox("Show ALPR-tagged CCTV (OSM audited tags)", !!state.show.cctvAlpr, (on)=>{ state.show.cctvAlpr=on; refreshIntelSources(); }));
+  layerBox.appendChild(h("div", { class:"tiny muted mt-6", text:"CCTV / satellite filters" }));
+  layerBox.appendChild(checkbox("Show global ALPR cameras (DeFlock/OSM)", !!state.show.cctvAlpr, (on)=>{ state.show.cctvAlpr=on; refreshIntelSources(); setAlprVis(); }));
+  layerBox.appendChild(checkbox("Satellites: only above horizon", !!state.show.satsOverheadOnly, (on)=>{ state.show.satsOverheadOnly=on; refreshIntelSources(); }));
+  const liveCheck = checkbox("Auto-refresh map intel (60s)", !!state.live, (on)=>{ state.live=on; scheduleLive(); });
+  const freshText = h("div", { class: "tiny muted", text: "Intel loaded" });
   const statsBox = h("div", { class: "tiny muted", text: "Loading..." });
   side.appendChild(panel({ title:"GL Layers", icon:"layers", body: h("div",{class:"col gap-8"},
-    field("INTEL AGE", ageSel), layerBox,
+    field("INTEL AGE", ageSel), layerBox, liveCheck, freshText,
     h("div", { class: "row wrap gap-6 mt-6" },
       btn("REFRESH DATA", { size:"sm", icon:"refresh", onClick: refreshData }),
       btn("FIT DATA", { size:"sm", tone:"ghost", onClick: fitData }))
   ) }));
   side.appendChild(panel({ title:"Situational Summary", icon:"globe", body: statsBox }));
+  const glLegend = h("div", { class: "map-legend" });
+  const legendItem = (label, color, shape = "dot") => {
+    const sw = h("i", { style: { background: color } });
+    if (shape === "diamond") sw.style.transform = "rotate(45deg)";
+    if (shape === "ring") { sw.style.background = "transparent"; sw.style.border = `1px solid ${color}`; sw.style.borderRadius = "50%"; }
+    if (shape === "dot") sw.style.borderRadius = "50%";
+    return h("span", {}, sw, document.createTextNode(label));
+  };
+  for (const [label, color, shape] of [
+    ["Hazard/disaster", "#5dff9a", "dot"], ["Critical event", "#ff5c5c", "dot"],
+    ["Conflict verified", "#ff8a3d", "diamond"], ["Conflict media", "#ffb02e", "diamond"],
+    ["Aircraft", "#48d7ff", "ring"], ["Satellite overhead", "#c78bff", "ring"],
+    ["Satellite below horizon", "#7a5a96", "ring"], ["Maritime/AIS", "#35c9ff", "dot"],
+    ["Cables", "#ffd166", "dot"], ["CCTV", "#b7ff6a", "dot"], ["ALPR (DeFlock/OSM)", "#ff66cc", "dot"],
+    ["Waypoint", "#5dff9a", "diamond"], ["Home", "#48d7ff", "ring"],
+  ]) glLegend.appendChild(legendItem(label, color, shape));
+  side.appendChild(panel({ title:"Legend", icon:"info", body: glLegend }));
   side.appendChild(panel({ title:"Inspector", icon:"info", body: inspector }));
 
   map = new maplibregl.Map({ container, style: rasterStyle(), center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 3.5, pitch:0, bearing:0, attributionControl:true, maxPitch:85 });
@@ -203,18 +227,26 @@ export async function render(root) {
 
   function setVis(key,on){
     const ids = {
-      hazards:['hazards'], conflict:['conflict'], aircraft:['aircraft','aircraft-hdg'], sats:['sats'],
+      hazards:['hazards'], conflict:['conflict'], aircraft:['aircraft','aircraft-hdg'], sats:['sats','sat-footprint','sat-footprint-fill','sat-track'],
       maritime:['maritime-cluster','maritime-pt'], cables:['cables-cluster','cables-pt'], cctv:['cctv-cluster','cctv-pt'],
       wind:['wind-pt','wind-dir'], rain:['rain-pt'], cloud:['cloud-pt'],
       terrain:['hillshade'],
       waypoints:['waypoints'], tracks:['tracks'], daynight:['night-fill','term-line','sun-pt'], home:['home-halo','home-dot'],
     }[key] || [];
     for (const id of ids) try { if (map.getLayer(id)) map.setLayoutProperty(id,'visibility', on?'visible':'none'); } catch {}
+    if (key === 'cctv') setAlprVis();
     if (key === 'terrain') {
       try {
         if (on && demStatus?.available && map.getSource('dem')) map.setTerrain({ source: 'dem', exaggeration: 1.15 });
         else if (typeof map.setTerrain === 'function') map.setTerrain(null);
       } catch {}
+    }
+  }
+
+  function setAlprVis(){
+    const on = !!(state.show.cctv && state.show.cctvAlpr);
+    for (const id of ['alpr-points', 'alpr-clusters']) {
+      try { if (map.getLayer(id)) map.setLayoutProperty(id,'visibility', on ? 'visible' : 'none'); } catch {}
     }
   }
 
@@ -238,7 +270,9 @@ export async function render(root) {
     }).filter(Boolean));
   }
   function satsGeo(){
-    return fc((intel?.satellites||[]).slice(0,150).map(s=>pt(s.lon,s.lat,{ kind:'sat', title:s.name||`NORAD ${s.norad||''}`, norad:s.norad, alt_km:s.alt_km, elevation_deg:s.elevation_deg, source:s.source||'CelesTrak/SGP4', time:s.time })).filter(Boolean));
+    let sats = intel?.satellites || [];
+    if (state.show.satsOverheadOnly) sats = sats.filter(s => s && s.visible !== false);
+    return fc(sats.slice(0,250).map(s=>pt(s.lon,s.lat,{ kind:'sat', title:s.name||`NORAD ${s.norad||''}`, norad:s.norad, alt_km:s.alt_km, elevation_deg:s.elevation_deg, azimuth_deg:s.azimuth_deg, visible:s.visible, source:s.source||'CelesTrak/SGP4', time:s.time })).filter(Boolean));
   }
   function tracksGeo(){
     const feats=[];
@@ -254,7 +288,8 @@ export async function render(root) {
     return fc((intel?.cables||[]).map(c=>pt(c.lon,c.lat,{ kind:'cable', title:c.title||c.cable_id||'Cable point', cable_id:c.cable_id, operator:c.operator, capacity:c.capacity, source:c.source, time:c.time, url:c.url })).filter(Boolean));
   }
   function cctvGeo(){
-    const items = (intel?.cctv||[]).filter(c => state.show.cctvAlpr !== false || !c.alpr);
+    const globalAlpr = (intelAlpr.dataset_count || 0) > 0;
+    const items = (intel?.cctv||[]).filter(c => !(globalAlpr && c.alpr) && (state.show.cctvAlpr !== false || !c.alpr));
     return fc(items.map(c=>pt(c.lon,c.lat,{
       kind: c.alpr ? 'alpr_camera' : 'cctv',
       title: c.title || c.camera_id || 'Camera',
@@ -265,6 +300,68 @@ export async function render(root) {
       summary: c.summary, stream_url: c.stream_url || '', feed_type: c.feed_type || c.feedType || '', frame_refresh_ms: c.frame_refresh_ms || c.frameRefreshMs || 0, credit: c.credit || '', license: c.license || '', id: c.id || c.camera_id || '',
     })).filter(Boolean));
   }
+  function alprPointsGeo(){
+    return fc((intelAlpr.points || []).map(p => pt(p.lon, p.lat, {
+      kind: 'alpr_camera',
+      title: p.title || 'ALPR camera',
+      camera_id: p.camera_id || p.osm_id || '',
+      alpr: true, flock_tagged: !!p.flock_tagged,
+      brand: p.brand || '', operator_name: p.operator_name || p.operator || '',
+      surveillance_type: p.surveillance_type || 'ALPR',
+      camera_type: p.camera_type || p.mount || '',
+      direction: p.direction, surveillance_zone: p.surveillance_zone || p.zone || '',
+      summary: p.summary || '', source: p.source || 'DeFlock / OpenStreetMap (ODbL)',
+      url: p.url || '', osm_timestamp: p.osm_timestamp || '',
+    })).filter(Boolean));
+  }
+  function alprClustersGeo(){
+    return fc((intelAlpr.clusters || []).map(c => pt(c.lon, c.lat, {
+      kind: 'alpr_cluster',
+      title: c.title || `${c.count || 0} ALPR cameras`,
+      count: c.count || 0,
+      brand: c.brand || '',
+      alpr: true,
+      source: 'DeFlock / OpenStreetMap (ODbL)',
+    })).filter(Boolean));
+  }
+  function satelliteFootprint(p, lngLat){
+    if (!map || !lngLat || String(p?.kind || '').toLowerCase() !== 'sat') { clearSatelliteFootprint(); return; }
+    const alt = Math.max(80, Number(p.alt_km) || 500);
+    const rhoDeg = Math.acos(Math.min(1, 6371 / (6371 + alt))) * 180 / Math.PI;
+    const ring = [];
+    for (let b = 0; b < 360; b += 5) ring.push(destination(lngLat.lng, lngLat.lat, b, rhoDeg * 111.32));
+    ring.push(ring[0]);
+    try {
+      map.getSource('sat-footprint')?.setData(fc([{
+        type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [ring] },
+      }]));
+    } catch {}
+  }
+  function clearSatelliteFootprint(){ try { map?.getSource('sat-footprint')?.setData(fc([])); } catch {} }
+  let satTrackToken = 0;
+  async function loadSatelliteTrack(norad){
+    const token = ++satTrackToken;
+    if (!norad) { clearSatelliteTrack(); return; }
+    try {
+      const data = await api.get(`/api/intel/satellite-track?norad=${encodeURIComponent(String(norad))}&minutes=90`);
+      if (token !== satTrackToken) return;
+      const coords = [];
+      let prevLon = null;
+      for (const pt of (data?.points || [])) {
+        let lon = Number(pt.lon);
+        if (prevLon != null) {
+          while (lon - prevLon > 180) lon -= 360;
+          while (lon - prevLon < -180) lon += 360;
+        }
+        prevLon = lon;
+        coords.push([lon, Number(pt.lat)]);
+      }
+      map?.getSource('sat-track')?.setData(fc(coords.length > 1 ? [{
+        type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: coords },
+      }] : []));
+    } catch { if (token === satTrackToken) clearSatelliteTrack(); }
+  }
+  function clearSatelliteTrack(){ satTrackToken++; try { map?.getSource('sat-track')?.setData(fc([])); } catch {} }
   function overlayGeo(kind){
     const d = kind==='wind'?overlayWind : kind==='rain'?overlayRain : overlayCloud;
     return d?.data && d.data.type === 'FeatureCollection' ? d.data : fc([]);
@@ -288,12 +385,21 @@ export async function render(root) {
     const cf = feats.length - hz;
     const summary = intel?.summary || {};
     const ov = (d)=> d?.data?.features?.length || 0;
-    statsBox.textContent = `Hazards ${hz} · Conflict ${cf} · Aircraft ${(intel?.aircraft||[]).length} · Sats ${(intel?.satellites||[]).length} · Maritime ${(intel?.maritime||[]).length} · Cables ${(intel?.cables||[]).length} · CCTV ${(intel?.cctv||[]).length} · Wind ${ov(overlayWind)} · Rain ${ov(overlayRain)} · Cloud ${ov(overlayCloud)}${summary.newest_age_hours!=null ? ` · newest intel ${Math.round(summary.newest_age_hours)}h` : ''}`;
+    const localAlpr = (intel?.cctv||[]).filter(c=>c.alpr).length;
+    const alprText = intelAlpr.dataset_count
+      ? `global ${intelAlpr.in_view ?? 0}/${intelAlpr.dataset_count}`
+      : `local ${localAlpr}`;
+    statsBox.textContent = `Hazards ${hz} · Conflict ${cf} · Aircraft ${(intel?.aircraft||[]).length} · Sats ${(intel?.satellites||[]).length} · Maritime ${(intel?.maritime||[]).length} · Cables ${(intel?.cables||[]).length} · CCTV ${(intel?.cctv||[]).length} (ALPR ${alprText}) · Wind ${ov(overlayWind)} · Rain ${ov(overlayRain)} · Cloud ${ov(overlayCloud)}${summary.newest_age_hours!=null ? ` · newest intel ${Math.round(summary.newest_age_hours)}h` : ''}`;
   }
   function refreshOverlaySources(){
     if (!map) return;
     const s = (id,data)=>{ try { if (map.getSource(id)) map.getSource(id).setData(data); } catch {} };
     s('wind', overlayGeo('wind')); s('wind-dir', windDirGeo()); s('rain', overlayGeo('rain')); s('cloud', overlayGeo('cloud'));
+  }
+  function refreshAlprSources(){
+    if (!map) return;
+    const s = (id,data)=>{ try { if (map.getSource(id)) map.getSource(id).setData(data); } catch {} };
+    s('alpr-points', alprPointsGeo()); s('alpr-clusters', alprClustersGeo());
   }
   function refreshIntelSources(){
     if (!map) return;
@@ -301,11 +407,41 @@ export async function render(root) {
     s('hazards', intelFeaturesFiltered('hazards')); s('conflict', intelFeaturesFiltered('conflict'));
     s('aircraft', aircraftGeo()); s('aircraft-hdg', aircraftHeadingGeo()); s('sats', satsGeo());
     s('maritime', maritimeGeo()); s('cables', cablesGeo()); s('cctv', cctvGeo());
+    refreshAlprSources();
     updateStats();
   }
-  async function refreshData(){
-    toast('Refreshing map data', 'warn');
+  async function refreshAlpr(force = false){
+    if (!map) return;
+    const b = map.getBounds();
+    const z = Math.round(map.getZoom());
+    const key = `${b.getWest().toFixed(3)},${b.getSouth().toFixed(3)},${b.getEast().toFixed(3)},${b.getNorth().toFixed(3)},${z}`;
+    if (!force && key === alprQueryKey) return;
+    alprQueryKey = key;
     try {
+      const data = await api.get(`/api/map/alpr?bbox=${b.getWest().toFixed(5)},${b.getSouth().toFixed(5)},${b.getEast().toFixed(5)},${b.getNorth().toFixed(5)}&zoom=${z}`);
+      intelAlpr = data || { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };
+      refreshAlprSources();
+      updateStats();
+    } catch { /* the map remains usable without the optional global ALPR layer */ }
+  }
+  function scheduleAlprFetch(){
+    if (alprFetchTimer) clearTimeout(alprFetchTimer);
+    alprFetchTimer = setTimeout(() => refreshAlpr(), 450);
+  }
+  async function refreshData({ silent = false } = {}){
+    if (!silent) toast('Refreshing map data', 'warn');
+    try {
+      if (silent) {
+        const i = await api.get('/api/map/intel').catch(()=>null);
+        if (i) {
+          intel = i;
+          refreshIntelSources();
+          await refreshAlpr(true);
+          state.lastRefresh = Date.now();
+          updateFreshness();
+        }
+        return;
+      }
       const [i,w,t,ds] = await Promise.all([
         api.get('/api/map/intel').catch(()=>null),
         api.get('/api/records/waypoints?limit=2000').then(r=>r.items||[]).catch(()=>[]),
@@ -316,9 +452,52 @@ export async function render(root) {
       if (map?.getSource('waypoints')) map.getSource('waypoints').setData(fc(waypoints.map(wp=>pt(wp.lon,wp.lat,{kind:'waypoint',title:wp.name,type:wp.type||'WAYPOINT',note:(wp.note||'').slice(0,180)})).filter(Boolean)));
       if (map?.getSource('tracks')) map.getSource('tracks').setData(tracksGeo());
       refreshIntelSources();
-      toast('Map data refreshed');
-    } catch (e) { toast(e.message || 'Refresh failed', 'error'); }
+      await refreshAlpr(true);
+      state.lastRefresh = Date.now();
+      updateFreshness();
+      if (!silent) toast('Map data refreshed');
+    } catch (e) { if (!silent) toast(e.message || 'Refresh failed', 'error'); }
   }
+
+  function updateFreshness(){
+    if (!freshText) return;
+    const opsec = !!store.settings?.opsec_mode;
+    const offline = store.state.online === false;
+    const age = state.lastRefresh ? Math.max(0, Math.round((Date.now() - state.lastRefresh) / 1000)) : null;
+    const ageText = age == null ? "intel —" : age < 60 ? `intel ${age}s ago` : `intel ${Math.round(age / 60)}m ago`;
+    freshText.textContent = `${ageText} · ${opsec ? "OPSEC" : offline ? "OFFLINE" : state.live ? "live 60s" : "manual"}`;
+  }
+
+  function scheduleLive(){
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+    if (freshTimer) { clearInterval(freshTimer); freshTimer = null; }
+    updateFreshness();
+    freshTimer = setInterval(updateFreshness, 10_000);
+    if (!state.live) return;
+    liveTimer = setInterval(async () => {
+      if (document.hidden) return;
+      if (store.settings?.opsec_mode) return;
+      if (store.state.online === false) return;
+      await refreshData({ silent: true });
+    }, 60_000);
+  }
+  async function importGpxGl(){
+    try {
+      const file = await readTextFile(".gpx,.xml");
+      if (!file) return;
+      const out = await api.post("/api/map/gpx/import", { gpx: file.text });
+      toast(`Imported ${out.waypoints || 0} waypoint(s), ${out.tracks || 0} track(s)`);
+      const [w, t] = await Promise.all([
+        api.get("/api/records/waypoints?limit=2000"),
+        api.get("/api/records/tracks?limit=500"),
+      ]);
+      waypoints = w.items || []; tracks = t.items || [];
+      if (map?.getSource('waypoints')) map.getSource('waypoints').setData(fc(waypoints.map(wp=>pt(wp.lon,wp.lat,{kind:'waypoint',title:wp.name,type:wp.type||'WAYPOINT',note:(wp.note||'').slice(0,180)})).filter(Boolean)));
+      if (map?.getSource('tracks')) map.getSource('tracks').setData(tracksGeo());
+      fitData();
+    } catch (err) { toast(err.message || "GPX import failed", "error"); }
+  }
+
   async function refreshOverlays(kind='all'){
     toast('Refreshing/caching overlays (requires online access)…', 'warn');
     try {
@@ -340,7 +519,7 @@ export async function render(root) {
     const coords = [];
     for (const f of (intel?.features||[])) { const c=f.geometry?.coordinates; if(c&&Number.isFinite(c[0])&&Number.isFinite(c[1])) coords.push(c); }
     for (const a of (intel?.aircraft||[]).slice(0,200)) if(Number.isFinite(Number(a.lon))&&Number.isFinite(Number(a.lat))) coords.push([Number(a.lon),Number(a.lat)]);
-    for (const s of (intel?.satellites||[]).slice(0,150)) if(Number.isFinite(Number(s.lon))&&Number.isFinite(Number(s.lat))) coords.push([Number(s.lon),Number(s.lat)]);
+    for (const s of (intel?.satellites||[]).slice(0,250)) if(Number.isFinite(Number(s.lon))&&Number.isFinite(Number(s.lat))) coords.push([Number(s.lon),Number(s.lat)]);
     for (const w of waypoints) if(Number.isFinite(Number(w.lon))&&Number.isFinite(Number(w.lat))) coords.push([Number(w.lon),Number(w.lat)]);
     if (coords.length < 1) { map.easeTo({ center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 4 }); return; }
     if (coords.length === 1) { map.easeTo({ center: coords[0], zoom: 8 }); return; }
@@ -399,6 +578,13 @@ export async function render(root) {
   function showInspector(p, lngLat){
     if (glLiveTimer) { clearInterval(glLiveTimer); glLiveTimer = null; }
     p = p || {};
+    if (String(p.kind || '').toLowerCase() === 'sat') {
+      satelliteFootprint(p, lngLat);
+      loadSatelliteTrack(p.norad);
+    } else {
+      clearSatelliteFootprint();
+      clearSatelliteTrack();
+    }
     const rows = Object.entries(p).filter(([k,v]) => v != null && v !== '' && !['geometry'].includes(k)).slice(0, 18);
     const isCamera = ['cctv', 'alpr_camera', 'camera'].includes(String(p.kind || '').toLowerCase()) || p.camera_id;
     const children = [
@@ -590,9 +776,23 @@ export async function render(root) {
     map.addSource('aircraft-hdg', { type:'geojson', data: aircraftHeadingGeo() });
     map.addLayer({ id:'aircraft-hdg', type:'line', source:'aircraft-hdg', paint:{ 'line-color':'rgba(72,215,255,0.45)','line-width':1.4 } });
     map.addSource('aircraft', { type:'geojson', data: aircraftGeo() });
-    map.addLayer({ id:'aircraft', type:'circle', source:'aircraft', paint:{ 'circle-radius':3.4,'circle-color':'#48d7ff','circle-stroke-color':'#061c24','circle-stroke-width':1 } });
+    map.addLayer({ id:'aircraft', type:'circle', source:'aircraft', paint:{
+      'circle-radius':['interpolate',['linear'],['coalesce',['get','alt_m'],0],0,3.0,3000,3.6,10000,4.4,13000,4.8],
+      'circle-color':'#48d7ff','circle-stroke-color':'#061c24','circle-stroke-width':1,
+    } });
     map.addSource('sats', { type:'geojson', data: satsGeo() });
-    map.addLayer({ id:'sats', type:'circle', source:'sats', paint:{ 'circle-radius':3.2,'circle-color':'#c78bff','circle-stroke-color':'#1b1024','circle-stroke-width':1 } });
+    map.addLayer({ id:'sats', type:'circle', source:'sats', paint:{
+      'circle-radius':['interpolate',['linear'],['coalesce',['get','alt_km'],500],400,2.8,2000,3.2,20000,4.2,36000,4.8],
+      'circle-color':['case',['==',['get','visible'],true],'#c78bff','#7a5a96'],
+      'circle-opacity':['case',['==',['get','visible'],true],0.95,0.5],
+      'circle-stroke-color':'#1b1024',
+      'circle-stroke-width':1,
+    } });
+    map.addSource('sat-footprint', { type:'geojson', data: fc([]) });
+    map.addLayer({ id:'sat-footprint-fill', type:'fill', source:'sat-footprint', paint:{ 'fill-color':'#c78bff','fill-opacity':0.035 } });
+    map.addLayer({ id:'sat-footprint', type:'line', source:'sat-footprint', paint:{ 'line-color':'#c78bff','line-width':1.2,'line-dasharray':[3,2],'line-opacity':0.55 } });
+    map.addSource('sat-track', { type:'geojson', data: fc([]) });
+    map.addLayer({ id:'sat-track', type:'line', source:'sat-track', paint:{ 'line-color':'#c78bff','line-width':1.5,'line-dasharray':[3,2],'line-opacity':0.65 } });
 
     function addClustered(name, data, opts) {
       const { color, stroke, clusterMaxZoom = 13, clusterRadius = 45, pointPaint = {} } = opts;
@@ -622,6 +822,25 @@ export async function render(root) {
         'circle-radius':['interpolate',['linear'],['zoom'],1,3.8,4,3.2,8,['case',['==',['get','alpr'],true],4.8,4.0],12,['case',['==',['get','alpr'],true],5.6,4.8],14,5.8],
       }
     });
+    // Global ALPR from DeFlock. Points are shown when zoomed in; clusters are
+    // shown at low zoom so the full national dataset stays navigateable.
+    map.addSource('alpr-points', { type:'geojson', data: alprPointsGeo() });
+    map.addLayer({ id:'alpr-points', type:'circle', source:'alpr-points', paint:{
+      'circle-radius':['interpolate',['linear'],['zoom'],1,4.2,5,5.0,9,6.2,14,7.5],
+      'circle-color':'#ff66cc',
+      'circle-stroke-color':'#33001f',
+      'circle-stroke-width':1.4,
+      'circle-opacity':0.96,
+    } });
+    map.addSource('alpr-clusters', { type:'geojson', data: alprClustersGeo() });
+    map.addLayer({ id:'alpr-clusters', type:'circle', source:'alpr-clusters', paint:{
+      'circle-radius':['interpolate',['linear'],['get','count'],1,8,100,10,1000,14,10000,18],
+      'circle-color':'#ff66cc',
+      'circle-opacity':0.62,
+      'circle-blur':0.2,
+      'circle-stroke-color':'#33001f',
+      'circle-stroke-width':1.2,
+    } });
 
     map.addSource('rain', { type:'geojson', data: overlayGeo('rain') });
     map.addLayer({ id:'rain-pt', type:'circle', source:'rain', paint:{
@@ -642,12 +861,21 @@ export async function render(root) {
 
     for (const [key,on] of Object.entries(state.show)) setVis(key,on);
 
-    const clickIds = ['hazards','conflict','aircraft','sats','maritime-pt','cables-pt','cctv-pt','wind-pt','rain-pt','cloud-pt','waypoints','home-dot'];
+    const clickIds = ['hazards','conflict','aircraft','sats','maritime-pt','cables-pt','cctv-pt','alpr-points','wind-pt','rain-pt','cloud-pt','waypoints','home-dot'];
     for (const lid of clickIds) {
       map.on('mouseenter', lid, ()=>{ map.getCanvas().style.cursor='pointer'; });
       map.on('mouseleave', lid, ()=>{ map.getCanvas().style.cursor=''; });
       map.on('click', lid, (e)=>{ const f=e.features?.[0]; if(!f) return; showInspector(f.properties||{}, e.lngLat); });
     }
+    map.on('click', (e) => { try { if (!map.queryRenderedFeatures(e.point).length) { clearSatelliteFootprint(); clearSatelliteTrack(); } } catch {} });
+    map.on('mouseenter', 'alpr-clusters', () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', 'alpr-clusters', () => { map.getCanvas().style.cursor = ''; });
+    map.on('click', 'alpr-clusters', (e) => {
+      const f = e.features?.[0];
+      if (!f) return;
+      map.easeTo({ center: f.geometry.coordinates, zoom: Math.min(18, map.getZoom() + 2), duration: 500 });
+    });
+    map.on('moveend', scheduleAlprFetch);
     for (const cid of ['maritime-cluster','cables-cluster','cctv-cluster']) {
       map.on('mouseenter', cid, ()=>{ map.getCanvas().style.cursor='pointer'; });
       map.on('mouseleave', cid, ()=>{ map.getCanvas().style.cursor=''; });
@@ -666,7 +894,9 @@ export async function render(root) {
     }
 
     daynightTimer = setInterval(()=>{ try { const dn=dayNightGeoJSON(); map.getSource('night')?.setData(dn.night); map.getSource('term')?.setData(dn.term); map.getSource('sunpt')?.setData(dn.sun); } catch {} }, 60000);
+    scheduleLive();
+    refreshAlpr(true);
   });
 
-  return () => { try { clearInterval(daynightTimer); clearInterval(glLiveTimer); popup?.remove(); map?.remove(); } catch {} };
+  return () => { try { clearInterval(daynightTimer); clearInterval(glLiveTimer); clearInterval(liveTimer); clearInterval(freshTimer); clearTimeout(alprFetchTimer); popup?.remove(); map?.remove(); } catch {} };
 }

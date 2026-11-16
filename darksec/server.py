@@ -4498,6 +4498,13 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             lat, lon = 0.0, 0.0
         return {"items": intel.live_satellites(d, lat, lon)}
 
+    @app.get("/api/intel/satellite-track")
+    def intel_satellite_track(request: Request,
+                              norad: int = Query(..., ge=1),
+                              minutes: int = Query(90, ge=15, le=360),
+                              step: int = Query(60, ge=10, le=600)):
+        return intel.satellite_track(db(request), norad, minutes=minutes, step_seconds=step)
+
     @app.get("/api/intel/satellite-passes")
     def intel_satellite_passes(request: Request,
                                hours: int = Query(12, ge=1, le=48),
@@ -4646,12 +4653,47 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             "summary": {**intel.map_summary(events), "maritime": len(maritime), "cables": len(cables), "cctv": len(cctv)},
             "features": features,
             "aircraft": intel.live_aircraft(d, limit=60),
-            "satellites": intel.live_satellites(d, lat, lon, limit=30),
+            "satellites": intel.live_satellites(d, lat, lon, limit=200, visible_only=False),
             "maritime": maritime,
             "cables": cables,
             "cctv": cctv,
             "bbox_applied": bool(bbox_vals),
         }
+
+    @app.get("/api/map/alpr")
+    def map_alpr(request: Request,
+                 bbox: str = Query("", max_length=120),
+                 zoom: int = Query(0, ge=0, le=22),
+                 limit: int = Query(4000, ge=100, le=20000)):
+        from . import alpr
+        vals = None
+        if bbox:
+            try:
+                parts = [float(x) for x in bbox.split(",")]
+                if len(parts) == 4:
+                    minlon, minlat, maxlon, maxlat = parts
+                    if (-180 <= minlon <= 180 and -180 <= maxlon <= 180
+                            and -90 <= minlat <= 90 and -90 <= maxlat <= 90):
+                        vals = (minlon, minlat, maxlon, maxlat)
+            except Exception:
+                vals = None
+        return alpr.features(vals, zoom=zoom, limit=limit)
+
+    @app.get("/api/map/alpr/status")
+    def map_alpr_status(request: Request):
+        from . import alpr
+        return alpr.status()
+
+    @app.post("/api/map/alpr/refresh")
+    async def map_alpr_refresh(request: Request):
+        from . import alpr
+        result = await run_in_threadpool(alpr.refresh, True)
+        db(request).audit(
+            "ALPR_REFRESH",
+            f"ok={result.get('ok')} counts={result.get('counts')} error={result.get('error') or ''}"[:500],
+            request.client.host if request.client else "",
+        )
+        return result
 
     # -------------------------------------------------------------- library
     @app.get("/api/library/stats")

@@ -74,14 +74,25 @@ catalog/feed items, with scheme/size/timeout limits and no arbitrary client URL
 fetching. Honor source terms, refresh limits, attribution, and any “no
 redistribution / on-view only / personal use / written permission” restrictions.
 
-## ALPR / License Plate Readers (audited OSM tags)
+## ALPR / License Plate Readers (DeFlock + audit OSM tags)
 
-OSM-tagged ALPR/ANPR locations may appear as camera metadata where present. These
-are **mapped locations/tags only** (community data), not live tracking, not plate
-data, and not a complete or authoritative registry. DarkSec marks likely ALPR/ANPR
-items from OSM tags (`surveillance:type`, `camera:type`, brand/tag heuristics) and
-provides an explicit map filter: **“Show ALPR-tagged CCTV (OSM audited tags)”**
-(2D and GL). Verify locations on OpenStreetMap and comply with local law/policy.
+ALPR/ANPR locations are **mapped locations/tags only** (community data), not live
+tracking, not plate data, and not a complete or authoritative registry.
+
+- **Global dataset** — Settings → Global ALPR cameras downloads the DeFlock
+  GeoJSON extracts for the US and Canada
+  (`data.dontgetflocked.com/cameras.geojson.gz` and `cameras-ca.geojson.gz`)
+  into `fielddata/maps/alpr/`. The map requests only the current viewport
+  (`/api/map/alpr`) and shows individual cameras when zoomed in or grid clusters
+  at low zoom. Data is cached for offline use and refreshed manually.
+- **Local OSM CCTV** — `public_cctv` still queries Overpass around the configured
+  position (bounded by `cctv_radius_km`) for nearby surveillance cameras. ALPR
+  items from that local query are shown as a fallback until the global dataset
+  is available.
+- **Attribution / limits** — DeFlock is an open-source project; ALPR locations are
+  OSM-derived (ODbL, © OpenStreetMap contributors). Community-mapped locations
+  may be stale, duplicated or wrong. Verify on OpenStreetMap and comply with
+  local law/policy.
 
 ## Caveats
 

@@ -435,6 +435,86 @@ def test_map_intel_includes_all_cached_layers(client):
     # Cached layers are returned globally (not filtered to operator proximity).
     assert any(abs(float(c.get("lon") or 0) - (-0.1278)) < 0.001 for c in data["cctv"])
 
+
+def test_alpr_dataset_parse_and_cluster(tmp_path, monkeypatch):
+    import json
+    from darksec import alpr
+
+    def feature(lon, lat, osm_id, brand, operator=""):
+        return {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": {
+                "osmId": osm_id, "osmType": "node", "brand": brand,
+                "operator": operator, "direction": 90,
+                "surveillanceZone": "traffic", "osmTimestamp": "2026-01-01T00:00:00Z",
+            },
+        }
+
+    cache = tmp_path / "alpr"
+    cache.mkdir()
+    us_features = [feature(-90.0, 35.0, 1, "flock safety", "City PD"),
+                   feature(-90.1, 35.1, 2, "Motorola Solutions"),
+                   feature(-90.2, 35.2, 3, "")]
+    us_features += [feature(-90.0 + i * 0.001, 35.0 + i * 0.001, 100 + i, "Flock Safety")
+                    for i in range(117)]
+    (cache / "us.geojson").write_text(json.dumps({
+        "type": "FeatureCollection", "features": us_features,
+    }), encoding="utf-8")
+    (cache / "ca.geojson").write_text(json.dumps({
+        "type": "FeatureCollection",
+        "features": [feature(-90.3, 35.3, 4, "Genetec")],
+    }), encoding="utf-8")
+    (cache / "meta.json").write_text(json.dumps({
+        "fetched_at": "2026-01-01T00:00:00+00:00",
+        "counts": {"us": len(us_features), "ca": 1},
+    }), encoding="utf-8")
+    monkeypatch.setattr(alpr, "CACHE_DIR", cache)
+    monkeypatch.setattr(alpr, "META_FILE", cache / "meta.json")
+    with alpr._LOCK:
+        alpr._CACHE.update({"key": None, "points": [], "error": None})
+    try:
+        st = alpr.status()
+        assert st["available"] is True
+        assert st["counts"] == {"us": 120, "ca": 1}
+        out = alpr.features((-91.0, 34.0, -89.0, 36.0), zoom=16, limit=200)
+        assert out["mode"] == "points"
+        assert out["in_view"] == 121
+        assert all(p["alpr"] is True for p in out["points"])
+        assert out["points"][0]["brand"] == "Flock Safety"
+        assert "openstreetmap.org" in out["points"][0]["url"]
+        clustered = alpr.features((-91.0, 34.0, -89.0, 36.0), zoom=4, limit=100)
+        assert clustered["mode"] == "clusters"
+        assert sum(c["count"] for c in clustered["clusters"]) == 121
+    finally:
+        with alpr._LOCK:
+            alpr._CACHE.update({"key": None, "points": [], "error": None})
+
+
+def test_alpr_endpoint_shape(client):
+    data = client.get("/api/map/alpr", params={"bbox": "-180,-90,180,90", "zoom": 4}).json()
+    assert data["mode"] in ("points", "clusters")
+    assert "dataset_count" in data
+    assert isinstance(data.get("points", []), list)
+    assert isinstance(data.get("clusters", []), list)
+
+
+def test_opensky_parser_uses_longitude_latitude_order():
+    from darksec import feeds
+
+    payload = {"states": [[
+        "a1b2c3", "TEST123", "United States", 1700000000, 1700000000,
+        -80.0, 35.0, 10000.0, False, 250.0, 90.0, 0.0, None, None, None,
+    ]]}
+    items = feeds._parse_opensky(payload)
+    assert len(items) == 1
+    item = items[0]
+    assert item["lat"] == 35.0
+    assert item["lon"] == -80.0
+    assert item["alt_m"] == 10000.0
+    assert item["speed_kmh"] == 900.0
+    assert item["heading_deg"] == 90.0
+
 # ---------------------------------------------------------------------- cctv
 def test_cctv_catalog_endpoints_shape(client):
     status = client.get("/api/cctv/catalog/status")

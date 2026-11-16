@@ -413,6 +413,21 @@ export async function render(root) {
   grid.appendChild(cctvCatalogPanel);
   loadCctvCatalog(cctvCatalogBox);
 
+  const alprGlobalBox = h("div", { class: "col gap-6" });
+  const alprGlobalPanel = panel({
+    title: "Global ALPR cameras",
+    sub: "DeFlock / OpenStreetMap · ODbL",
+    icon: "camera",
+    body: h("div", { class: "col" },
+      h("div", { class: "callout small", text: "Downloads the US and Canada DeFlock ALPR GeoJSON (~39 MB) into fielddata/maps/alpr. The map shows individual cameras when zoomed in and clusters at low zoom. Manual refresh only; locations are community-mapped — verify on OpenStreetMap." }),
+      h("div", { class: "row wrap mt-10 gap-6" },
+        btn("REFRESH GLOBAL ALPR", { icon: "download", tone: "primary", onClick: () => refreshGlobalAlpr(alprGlobalBox) }),
+        btn("STATUS", { icon: "info", onClick: () => loadAlprStatus(alprGlobalBox) })),
+      alprGlobalBox),
+  });
+  grid.appendChild(alprGlobalPanel);
+  loadAlprStatus(alprGlobalBox);
+
   /* ------------------------------------------------------------ security */
   const secPanel = panel({
     title: "Data custody",
@@ -1235,6 +1250,48 @@ export async function render(root) {
       const ok = (out.results || []).filter((r) => r.status === "OK").length;
       toast(`Feeds refreshed: ${ok}/${(out.results || []).length} OK`);
     } catch (err) { toast(err.message || "Feed refresh failed", "error"); }
+  }
+
+  async function loadAlprStatus(box) {
+    box.replaceChildren(loading("READING GLOBAL ALPR STATUS"));
+    try {
+      const st = await api.get("/api/map/alpr/status");
+      const counts = st.counts || {};
+      const total = Object.values(counts).reduce((sum, n) => sum + Number(n || 0), 0);
+      const rows = [
+        ["Dataset", st.available ? "AVAILABLE" : "NOT DOWNLOADED"],
+        ["Features", total ? fmt.num(total, 0) : "—"],
+        ["US / Canada", `${counts.us != null ? fmt.num(counts.us, 0) : "—"} / ${counts.ca != null ? fmt.num(counts.ca, 0) : "—"}`],
+        ["Downloaded", st.fetched_at ? fmt.ago(st.fetched_at) : "never"],
+        ["Size", fmt.bytes(st.bytes)],
+        ["Source", "deflock.org / OpenStreetMap (ODbL)"],
+      ];
+      const out = h("div", { class: "col gap-6" }, kv(rows));
+      if (st.error) out.appendChild(h("div", { class: "callout small amber", text: String(st.error).slice(0, 300) }));
+      if (!st.available) out.appendChild(h("div", { class: "callout small amber", text: "No global ALPR dataset cached yet. Use REFRESH GLOBAL ALPR while online." }));
+      box.replaceChildren(out);
+    } catch (err) {
+      box.replaceChildren(h("div", { class: "callout small amber", text: err.message || "Could not read global ALPR status" }));
+    }
+  }
+
+  async function refreshGlobalAlpr(box) {
+    const ok = await confirmDialog({
+      title: "Refresh global ALPR dataset",
+      message: "Download the US and Canada DeFlock ALPR GeoJSON (~39 MB) into fielddata/maps/alpr? This contacts data.dontgetflocked.com. Existing cached data remains if the download fails.",
+      confirmText: "DOWNLOAD",
+    });
+    if (!ok) return;
+    box.replaceChildren(h("div", { class: "callout small", text: "Downloading global ALPR dataset… this can take a minute." }));
+    try {
+      const result = await api.post("/api/map/alpr/refresh");
+      const total = Object.values(result.counts || {}).reduce((sum, n) => sum + Number(n || 0), 0);
+      if (result.ok) toast(`Global ALPR refreshed · ${fmt.num(total, 0)} features`, "ok");
+      else toast(result.error || "Global ALPR refresh failed", "error");
+    } catch (err) {
+      toast(err.message || "Global ALPR refresh failed", "error");
+    }
+    await loadAlprStatus(box);
   }
 
   async function loadCctvCatalog(box) {

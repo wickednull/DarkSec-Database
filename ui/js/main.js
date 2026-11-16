@@ -221,6 +221,9 @@ function bindChrome() {
   const vaultPill = document.getElementById("vaultPill");
   if (vaultPill) vaultPill.addEventListener("click", () => { location.hash = "#/security?tab=vault"; });
 
+  const defconPill = document.getElementById("defconPill");
+  if (defconPill) defconPill.addEventListener("click", () => { location.hash = "#/intel"; });
+
   const netPill = document.getElementById("netPill");
   if (netPill) netPill.addEventListener("click", async () => {
     try {
@@ -359,6 +362,20 @@ function updateStatusUI(status) {
   const disk = document.getElementById("sbDisk"); if (disk) disk.textContent = system.disk_pct ?? "—";
   const ready = document.getElementById("sbReadiness");
   if (ready) ready.textContent = `READINESS ${readiness.score ?? "—"} // ${readiness.band || "NO DATA"}`;
+
+  const defcon = readiness.defcon || {};
+  const defconPill = document.getElementById("defconPill");
+  const defconValue = document.getElementById("defconValue");
+  const defconCode = document.getElementById("defconCode");
+  if (defconValue) defconValue.textContent = defcon.level != null ? String(defcon.level) : "—";
+  if (defconCode) defconCode.textContent = defcon.level != null && defcon.codename ? ` · ${defcon.codename}` : "";
+  if (defconPill) {
+    const tone = defcon.level == null ? "" : defcon.level <= 2 ? "bad" : defcon.level === 3 ? "warn" : "ok";
+    defconPill.className = `top-pill defcon-pill ${tone}`.trim();
+    defconPill.title = defcon.level != null
+      ? `DEFCON ${defcon.level}${defcon.codename ? ` (${defcon.codename})` : ""} — ${defcon.readiness || "OSINT estimate"}${defcon.driver ? ` · ${defcon.driver}` : ""}. Source: defconlevel.com`
+      : "DEFCON estimate unavailable";
+  }
 
   const vault = status.vault || {};
   const vaultText = document.getElementById("vaultText");

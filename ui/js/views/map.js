@@ -76,12 +76,22 @@ export async function render(root, params = {}) {
   let intelMaritime = [];
   let intelCables = [];
   let intelCctv = [];
+  let intelAlpr = { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };
+  let alprQueryKey = "";
+  let alprFetchTimer = null;
+  let alprWarned = false;
   let intelSummaryData = null;
   let sunInfo = null;
   let declInfo = null;
   let selectedIntel = null; // { kind: 'event'|'aircraft'|'sat'|'maritime'|'cable'|'cctv', data, feature? }
   let intelMaxAgeHours = 0; // 0 = all
   let livePreviewTimer = null;
+  let liveTimer = null;
+  let hudLiveTimer = null;
+  let liveEnabled = true;
+  let lastIntelRefresh = 0;
+  let satTrack = null;
+  const satTrackCache = new Map();
   try {
     const [l, w, t, intel, cel, dec] = await Promise.all([
       api.get("/api/map/layers").catch(() => ({ vector: [], raster: [] })),
@@ -101,6 +111,7 @@ export async function render(root, params = {}) {
     intelCables = (intel && intel.cables) || [];
     intelCctv = (intel && intel.cctv) || [];
     intelSummaryData = (intel && intel.summary) || null;
+    lastIntelRefresh = Date.now();
     sunInfo = cel;
     declInfo = dec;
     try { coordNow = await api.get(`/api/map/coords?lat=${homeLat}&lon=${homeLon}`); } catch { coordNow = null; }
@@ -121,7 +132,7 @@ export async function render(root, params = {}) {
     places: true, graticule: true, tracks: true, waypoints: true,
     basemap: true, labels: true,
     intelEvents: true, intelConflict: true, intelAircraft: true, intelSats: true, intelMaritime: true, intelCables: true, intelCctv: true, intelDayNight: true,
-    clusterDense: true, cctvShowAlpr: true,
+    clusterDense: true, cctvShowAlpr: true, satsOverheadOnly: false,
   };
   const raster = (layers.raster || []);
   let tileAvailable = !!(raster.length || settings.mbtiles_path);
@@ -175,7 +186,8 @@ export async function render(root, params = {}) {
   const hudZoom = h("div", { class: "hud-box" }, "ZOOM ", h("b", { text: String(view.zoom) }));
   const hudCenter = h("div", { class: "hud-box" });
   const hudMode = h("div", { class: "hud-box" });
-  hud.append(hudZoom, hudCenter, hudMode);
+  const hudLive = h("div", { class: "hud-box" }, "INTEL —");
+  hud.append(hudZoom, hudCenter, hudMode, hudLive);
   shell.appendChild(hud);
 
   const tools = h("div", { class: "map-tools" });
@@ -270,7 +282,9 @@ export async function render(root, params = {}) {
   const displayOpts = h("div", { class: "col gap-4 mt-8", style: { borderTop: '1px solid var(--line)', paddingTop: '8px' } });
   displayOpts.appendChild(h("div", { class: "tiny muted", text: "DISPLAY / SCALE" }));
   displayOpts.appendChild(checkbox("Cluster dense markers (CCTV/cables/maritime)", visible.clusterDense, (on) => { visible.clusterDense = on; draw(); }));
-  displayOpts.appendChild(checkbox("Show ALPR-tagged CCTV (OSM audited tags)", visible.cctvShowAlpr, (on) => { visible.cctvShowAlpr = on; draw(); renderIntelDetails(); }));
+  displayOpts.appendChild(checkbox("Show global ALPR cameras (DeFlock/OSM)", visible.cctvShowAlpr, (on) => { visible.cctvShowAlpr = on; draw(); renderIntelDetails(); }));
+  displayOpts.appendChild(checkbox("Satellites: only above horizon", visible.satsOverheadOnly, (on) => { visible.satsOverheadOnly = on; draw(); renderIntelDetails(); }));
+  displayOpts.appendChild(checkbox("Auto-refresh map intel (60s)", liveEnabled, (on) => { liveEnabled = on; scheduleLive(); }));
   layerRows.appendChild(displayOpts);
   cacheStatusEl = h("div", { class: "map-cache-status tiny muted", text: cacheStatusText() });
   const intelSummaryEl = h("div", { class: "map-cache-status tiny", text: "Intel not loaded" });
@@ -293,7 +307,7 @@ export async function render(root, params = {}) {
       cacheStatusEl,
       h("div", { class: "row gap-6 mt-8" },
         btn("MANAGE OFFLINE MAP", { size: "sm", icon: "download", tone: "primary", onClick: openDownloadDialog }),
-        btn("REFRESH", { size: "sm", tone: "ghost", onClick: async () => { await refreshCache(); draw(); } }))),
+        btn("REFRESH", { size: "sm", tone: "ghost", onClick: async () => { await Promise.all([refreshCache(), refreshMapIntel(), refreshAlpr(true)]); draw(); } }))),
   }));
 
   function legendItem(label, color, shape = "diamond") {
@@ -328,6 +342,7 @@ export async function render(root, params = {}) {
       ["Maritime / AIS", "#35c9ff", "dot"],
       ["Cables / landing points", "#ffd166", "dot"],
       ["CCTV / cameras (OSM)", "#b7ff6a", "dot"],
+      ["ALPR camera (DeFlock/OSM)", "#ff66cc", "dot"],
       ["Night/terminator", "rgba(148,197,255,.6)", "dot"],
     ]],
   ];
@@ -339,7 +354,7 @@ export async function render(root, params = {}) {
     title: "Legend", icon: "info",
     body: h("div", { class: "col gap-6" },
       legend,
-      h("div", { class: "tiny dim", text: "Hazard dots scale with reported magnitude. Conflict diamonds are orange for monthly UCDP verified events and amber for unverified GDELT media reports; faded markers are older than 24 h. Satellite positions are propagated from cached TLEs, not observations." })),
+      h("div", { class: "tiny dim", text: "Hazard dots scale with reported magnitude. Conflict diamonds are orange for monthly UCDP verified events and amber for unverified GDELT media reports; faded markers are older than 24 h. Satellite positions are propagated from cached TLEs, not observations; bright satellites are above your horizon, dim ones are below it." })),
     flush: false,
   }));
 
@@ -418,11 +433,13 @@ export async function render(root, params = {}) {
     if (visible.intelMaritime) drawIntelMaritime(ctx, w, hh);
     if (visible.intelCables) drawIntelCables(ctx, w, hh);
     if (visible.intelCctv) drawIntelCctv(ctx, w, hh);
+    if (visible.intelCctv) drawIntelAlpr(ctx, w, hh);
     if (visible.intelDayNight) drawIntelDayNight(ctx, w, hh);
     drawPosition(ctx, w, hh);
     drawMeasure(ctx, w, hh);
     updateScale(w, hh);
     positionMapPopup();
+    scheduleAlprFetch();
   }
 
   /* ------------------------------------------------------- offline map packs */
@@ -456,6 +473,76 @@ export async function render(root, params = {}) {
         updateAttribution();
       }
     } catch { /* offline: keep last known values */ }
+  }
+
+  const globalAlprReady = () => (intelAlpr.dataset_count || 0) > 0;
+
+  async function refreshAlpr(force = false) {
+    const b = viewportBounds();
+    const z = Math.round(view.zoom);
+    const key = `${b.latMin.toFixed(3)},${b.latMax.toFixed(3)},${b.lonMin.toFixed(3)},${b.lonMax.toFixed(3)},${z}`;
+    if (!force && key === alprQueryKey) return;
+    alprQueryKey = key;
+    try {
+      const data = await api.get(`/api/map/alpr?bbox=${b.lonMin.toFixed(5)},${b.latMin.toFixed(5)},${b.lonMax.toFixed(5)},${b.latMax.toFixed(5)}&zoom=${z}`);
+      intelAlpr = data || { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };
+      draw();
+      renderIntel();
+    } catch (err) {
+      if (!alprWarned) {
+        alprWarned = true;
+        toast(err.message || "Global ALPR layer unavailable", "warn");
+      }
+    }
+  }
+
+  function scheduleAlprFetch() {
+    if (alprFetchTimer) clearTimeout(alprFetchTimer);
+    alprFetchTimer = setTimeout(() => refreshAlpr(), 450);
+  }
+
+  async function refreshMapIntel({ silent = false } = {}) {
+    try {
+      const intel = await api.get("/api/map/intel");
+      if (!intel) return;
+      intelFeatures = intel.features || [];
+      intelAircraft = intel.aircraft || [];
+      intelSats = intel.satellites || [];
+      intelMaritime = intel.maritime || [];
+      intelCables = intel.cables || [];
+      intelCctv = intel.cctv || [];
+      intelSummaryData = intel.summary || null;
+      lastIntelRefresh = Date.now();
+      renderIntel();
+      updateLiveHud();
+      if (!silent) toast("Map intel refreshed");
+    } catch (err) {
+      if (!silent) toast(err.message || "Could not refresh map intel", "error");
+    }
+  }
+
+  function updateLiveHud() {
+    if (!hudLive) return;
+    const opsec = !!store.settings?.opsec_mode;
+    const offline = store.state.online === false;
+    const age = lastIntelRefresh ? Math.max(0, Math.round((Date.now() - lastIntelRefresh) / 1000)) : null;
+    const ageText = age == null ? "INTEL —" : age < 60 ? `INTEL ${age}s AGO` : `INTEL ${Math.round(age / 60)}m AGO`;
+    const mode = opsec ? "OPSEC" : offline ? "OFFLINE" : liveEnabled ? "LIVE 60s" : "MANUAL";
+    hudLive.textContent = `${ageText} · ${mode}`;
+  }
+
+  function scheduleLive() {
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+    if (hudLiveTimer) { clearInterval(hudLiveTimer); hudLiveTimer = null; }
+    updateLiveHud();
+    hudLiveTimer = setInterval(updateLiveHud, 10_000);
+    if (!liveEnabled) return;
+    liveTimer = setInterval(async () => {
+      if (document.hidden) return;
+      if (store.settings?.opsec_mode) return;
+      if (store.state.online === false) return;
+      await refreshMapIntel({ silent: true });
+    }, 60_000);
   }
 
   function viewportBounds() {
@@ -959,6 +1046,9 @@ export async function render(root, params = {}) {
       ctx.save();
       ctx.translate(s.x, s.y);
       if (Number.isFinite(hdg)) ctx.rotate(hdg * Math.PI / 180);
+      const alt = Number(a.alt_m) || 0;
+      const scale = 0.8 + Math.min(0.8, Math.max(0, alt) / 15000);
+      ctx.scale(scale, scale);
       ctx.strokeStyle = sel ? '#fff' : '#48d7ff';
       ctx.fillStyle = sel ? 'rgba(255,255,255,.95)' : 'rgba(72,215,255,.9)';
       ctx.lineWidth = sel ? 1.6 : 1;
@@ -976,21 +1066,75 @@ export async function render(root, params = {}) {
     }
   }
 
+  async function loadSatTrack(norad) {
+    const key = String(norad || "");
+    if (!key) return;
+    try {
+      const data = await api.get(`/api/intel/satellite-track?norad=${encodeURIComponent(key)}&minutes=90`);
+      satTrackCache.set(key, { data, ts: Date.now() });
+      if (selectedIntel?.kind === 'sat' && String(selectedIntel.data?.norad) === key) {
+        satTrack = data;
+        draw();
+      }
+    } catch { /* track is optional; the marker remains usable */ }
+  }
+
   function drawIntelSats(ctx, w, hh) {
-    const showLabels = view.zoom >= 3;
-    for (const sat of (intelSats || []).slice(0, 80)) {
+    const showLabels = view.zoom >= 6;
+    let labelsLeft = 80;
+    const sats = visible.satsOverheadOnly ? (intelSats || []).filter((s) => s && s.visible !== false) : (intelSats || []);
+    for (const sat of sats.slice(0, 250)) {
       const lat = Number(sat.lat), lon = Number(sat.lon);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
       const sp = latLonToScreen(lat, lon);
       if (sp.x < -24 || sp.y < -24 || sp.x > w + 24 || sp.y > hh + 24) continue;
       const sel = selectedIntel?.kind === 'sat' && selectedIntel.data === sat;
-      ctx.strokeStyle = sel ? '#fff' : '#c78bff';
-      ctx.fillStyle = sel ? 'rgba(255,255,255,.95)' : 'rgba(199,139,255,.9)';
+      const overhead = sat.visible !== false;
+      const altKm = Math.max(80, Number(sat.alt_km) || 500);
+      if (sel && satTrack?.points?.length) {
+        const pts = [];
+        let prevLon = null;
+        for (const p of satTrack.points) {
+          let lon = Number(p.lon);
+          if (prevLon != null) {
+            while (lon - prevLon > 180) lon -= 360;
+            while (lon - prevLon < -180) lon += 360;
+          }
+          prevLon = lon;
+          pts.push(latLonToScreen(Number(p.lat), lon));
+        }
+        if (pts.length > 1) {
+          ctx.save();
+          ctx.setLineDash([3, 3]);
+          ctx.strokeStyle = 'rgba(199,139,255,.55)';
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          pts.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+      const markerR = sel ? 3.2 : 2.0 + Math.min(1.4, altKm / 36000 * 1.4);
+      const haloR = sel ? 8 : 5 + (markerR - 2) * 1.6;
+      if (sel) {
+        const rhoDeg = Math.acos(Math.min(1, 6371 / (6371 + altKm))) * 180 / Math.PI;
+        const radiusPx = rhoDeg * (TILE * (2 ** view.zoom)) / 360;
+        if (Number.isFinite(radiusPx) && radiusPx > 2) {
+          ctx.save();
+          ctx.setLineDash([4, 4]);
+          ctx.strokeStyle = 'rgba(199,139,255,.45)';
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.arc(sp.x, sp.y, radiusPx, 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
+        }
+      }
+      ctx.strokeStyle = sel ? '#fff' : overhead ? '#c78bff' : 'rgba(160,120,190,.55)';
+      ctx.fillStyle = sel ? 'rgba(255,255,255,.95)' : overhead ? 'rgba(199,139,255,.9)' : 'rgba(160,120,190,.42)';
       ctx.lineWidth = sel ? 1.5 : 1;
-      ctx.beginPath(); ctx.arc(sp.x, sp.y, sel ? 3.2 : 2.2, 0, Math.PI * 2); ctx.stroke(); ctx.fill();
-      ctx.strokeStyle = sel ? 'rgba(255,255,255,.35)' : 'rgba(199,139,255,.25)';
-      ctx.beginPath(); ctx.arc(sp.x, sp.y, sel ? 8 : 5, 0, Math.PI * 2); ctx.stroke();
-      if (showLabels && (sat.name || sel)) {
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, markerR, 0, Math.PI * 2); ctx.stroke(); ctx.fill();
+      ctx.strokeStyle = sel ? 'rgba(255,255,255,.35)' : overhead ? 'rgba(199,139,255,.25)' : 'rgba(160,120,190,.14)';
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, haloR, 0, Math.PI * 2); ctx.stroke();
+      if (showLabels && (sat.name || sel) && (sel || labelsLeft-- > 0)) {
         ctx.font = `${sel ? 'bold ' : ''}8px JetBrains Mono, monospace`;
         ctx.fillStyle = sel ? '#fff' : 'rgba(199,139,255,.85)';
         ctx.textBaseline = 'top';
@@ -1104,15 +1248,60 @@ export async function render(root, params = {}) {
   }
   function drawIntelCctv(ctx, w, hh) {
     if (!visible.intelCctv) return;
-    let items = intelCctv || [];
-    if (visible.cctvShowAlpr === false) items = items.filter(it => !it.alpr);
-    drawSimpleIntelPoints(ctx, w, hh, items, {
+    const items = intelCctv || [];
+    const alpr = visible.cctvShowAlpr === false ? [] : items.filter(it => it && it.alpr);
+    const others = items.filter(it => !(it && it.alpr && globalAlprReady()));
+    const localAlpr = globalAlprReady() ? [] : alpr;
+    // The generic CCTV set is dense and clustered; draw all of it so the
+    // layer does not silently truncate older records.
+    drawSimpleIntelPoints(ctx, w, hh, others, {
       color: '#b7ff6a', selKind: 'cctv', labelKey: 'title', labelZoom: 11,
-      getColor: (it) => it.alpr ? '#ff66cc' : '#b7ff6a',
+      limit: Math.max(1500, others.length),
+    });
+    // ALPR gets its own unclustered pass on top so it is never hidden inside
+    // a CCTV cluster or cut off by the generic marker limit.
+    drawSimpleIntelPoints(ctx, w, hh, localAlpr, {
+      color: '#ff66cc', selKind: 'cctv', labelKey: 'title', labelZoom: 10,
+      cluster: false, limit: Math.max(500, localAlpr.length),
+      getColor: () => '#ff66cc',
       getLabel: (it) => {
-        const base = String(it.title || it.camera_id || (it.alpr ? 'ALPR' : 'Camera')).slice(0, 28);
-        return it.alpr && !/ALPR|ANPR/i.test(base) ? `${base} [ALPR]` : base;
+        const base = String(it.title || it.camera_id || 'ALPR').slice(0, 28);
+        return /ALPR|ANPR/i.test(base) ? base : `${base} [ALPR]`;
       },
+    });
+  }
+
+  function drawIntelAlpr(ctx, w, hh) {
+    if (!visible.intelCctv || visible.cctvShowAlpr === false) return;
+    if (intelAlpr.mode === "clusters") {
+      for (const c of (intelAlpr.clusters || [])) {
+        const lat = Number(c.lat), lon = Number(c.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+        const sp = latLonToScreen(lat, lon);
+        if (sp.x < -30 || sp.y < -30 || sp.x > w + 30 || sp.y > hh + 30) continue;
+        const count = Number(c.count) || 0;
+        const r = Math.max(8, Math.min(20, 7 + Math.sqrt(count) * 0.9));
+        _clusterHitRegions.push({ x: sp.x, y: sp.y, r: r + 4, lat, lon,
+          zoomTo: Math.min(18, view.zoom + 2), kind: "alpr_cluster", count });
+        ctx.save();
+        ctx.globalAlpha = 0.78;
+        ctx.fillStyle = "#ff66cc";
+        ctx.strokeStyle = "rgba(40,0,24,.75)";
+        ctx.lineWidth = 1.4;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "#1b0012";
+        ctx.font = `bold ${r >= 16 ? 10 : 9}px JetBrains Mono, monospace`;
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText(String(count > 9999 ? "9999+" : count), sp.x, sp.y + 0.5);
+        ctx.restore();
+      }
+      return;
+    }
+    drawSimpleIntelPoints(ctx, w, hh, intelAlpr.points || [], {
+      color: '#ff66cc', selKind: 'cctv', labelKey: 'title', labelZoom: 10,
+      cluster: false, limit: 4000,
+      getColor: () => '#ff66cc',
+      getLabel: (it) => String(it.title || 'ALPR').slice(0, 28),
     });
   }
 
@@ -1432,7 +1621,11 @@ export async function render(root, params = {}) {
     const s = intelSummaryData || {};
     const newest = s.newest_age_hours;
     intelPanel.querySelector(".sub").textContent = `${rows.length} mapped · newest ${intelAge(newest)}`;
-    intelSummaryEl.textContent = `MAP INTEL: ${s.hazards ?? 0} hazard · ${s.conflict ?? 0} conflict (${s.verified_conflict ?? 0} verified) · maritime ${s.maritime ?? (intelMaritime||[]).length} · cables ${s.cables ?? (intelCables||[]).length} · cctv ${s.cctv ?? (intelCctv||[]).length} · newest ${intelAge(newest)}`;
+    const alprCount = (intelCctv || []).filter((c) => c && c.alpr).length;
+    const alprText = intelAlpr.dataset_count
+      ? `global ${intelAlpr.in_view ?? 0} in view / ${fmt.num(intelAlpr.dataset_count, 0)} total`
+      : `local ${alprCount}`;
+    intelSummaryEl.textContent = `MAP INTEL: ${s.hazards ?? 0} hazard · ${s.conflict ?? 0} conflict (${s.verified_conflict ?? 0} verified) · maritime ${s.maritime ?? (intelMaritime||[]).length} · cables ${s.cables ?? (intelCables||[]).length} · cctv ${s.cctv ?? (intelCctv||[]).length} (ALPR ${alprText}) · newest ${intelAge(newest)}`;
     intelSummaryEl.style.color = newest != null && newest > 6 ? "#ffb02e" : "";
   }
 
@@ -1443,10 +1636,11 @@ export async function render(root, params = {}) {
       if (d < bestD) { bestD = d; best = { kind, data, feature }; }
     };
     if (visible.intelAircraft) for (const a of (intelAircraft||[])) { const sp = latLonToScreen(Number(a.lat),Number(a.lon)); test(sp.x,sp.y,'aircraft',a,null); }
-    if (visible.intelSats) for (const sat of (intelSats||[])) { const sp = latLonToScreen(Number(sat.lat),Number(sat.lon)); test(sp.x,sp.y,'sat',sat,null); }
+    if (visible.intelSats) for (const sat of (visible.satsOverheadOnly ? (intelSats||[]).filter(s=>s.visible!==false) : (intelSats||[]))) { const sp = latLonToScreen(Number(sat.lat),Number(sat.lon)); test(sp.x,sp.y,'sat',sat,null); }
     if (visible.intelMaritime) for (const m of (intelMaritime||[])) { const sp = latLonToScreen(Number(m.lat),Number(m.lon)); test(sp.x,sp.y,'maritime',m,null); }
     if (visible.intelCables) for (const c of (intelCables||[])) { const sp = latLonToScreen(Number(c.lat),Number(c.lon)); test(sp.x,sp.y,'cable',c,null); }
-    if (visible.intelCctv) for (const c of (intelCctv||[])) { if (visible.cctvShowAlpr === false && c && c.alpr) continue; const sp = latLonToScreen(Number(c.lat),Number(c.lon)); test(sp.x,sp.y,'cctv',c,null); }
+    if (visible.intelCctv) for (const c of (intelCctv||[])) { if ((visible.cctvShowAlpr === false && c && c.alpr) || (globalAlprReady() && c && c.alpr)) continue; const sp = latLonToScreen(Number(c.lat),Number(c.lon)); test(sp.x,sp.y,'cctv',c,null); }
+    if (visible.intelCctv && visible.cctvShowAlpr !== false && intelAlpr.mode === 'points') for (const c of (intelAlpr.points||[])) { const sp = latLonToScreen(Number(c.lat),Number(c.lon)); test(sp.x,sp.y,'cctv',c,null); }
     const maxAge = Number(intelMaxAgeHours) || 0;
     for (const f of (intelFeatures||[])) {
       const g=f.geometry; if(!g||g.type!=='Point') continue;
@@ -1466,6 +1660,7 @@ export async function render(root, params = {}) {
     for (const c of (_clusterHitRegions || [])) {
       if (!c) continue;
       if (c.kind === 'cctv' && !visible.intelCctv) continue;
+      if (c.kind === 'alpr_cluster' && (!visible.intelCctv || visible.cctvShowAlpr === false)) continue;
       if (c.kind === 'cable' && !visible.intelCables) continue;
       if (c.kind === 'maritime' && !visible.intelMaritime) continue;
       const d = (c.x - px) * (c.x - px) + (c.y - py) * (c.y - py);
@@ -1602,7 +1797,15 @@ export async function render(root, params = {}) {
     if (livePreviewTimer) { clearInterval(livePreviewTimer); livePreviewTimer = null; }
     let details = side.querySelector('#intel-details');
     if (!details) { details = h('div', { id: 'intel-details', class: 'mt-8' }); intelPanel.querySelector('.panel-body .col')?.appendChild(details); }
-    if (!selectedIntel) { details.replaceChildren(); hideMapPopup(); return; }
+    if (!selectedIntel) { details.replaceChildren(); hideMapPopup(); satTrack = null; return; }
+    if (selectedIntel.kind === 'sat') {
+      const key = String(selectedIntel.data?.norad || "");
+      const cached = satTrackCache.get(key);
+      satTrack = cached?.data || null;
+      if (!cached || Date.now() - cached.ts > 120_000) loadSatTrack(key);
+    } else {
+      satTrack = null;
+    }
     const d = selectedIntel.data || {};
     const rows = [];
     const push = (k,v) => { if(v!=null&&v!=='') rows.push([k,String(v)]); };
@@ -1893,7 +2096,7 @@ export async function render(root, params = {}) {
     // Select nearest intel item, cluster (zoom), then waypoint
     const ipx = e.clientX - rect.left, ipy = e.clientY - rect.top;
     const intelHit = pickIntel(ipx, ipy);
-    const clusterHit = (!intelHit && visible.clusterDense !== false) ? pickCluster(ipx, ipy) : null;
+    const clusterHit = !intelHit ? pickCluster(ipx, ipy) : null;
     let best = null, bestD = 144;
     for (const wp of waypoints) {
       const sp = latLonToScreen(wp.lat, wp.lon);
@@ -1992,6 +2195,7 @@ export async function render(root, params = {}) {
   resizeObs = new ResizeObserver(() => draw());
   resizeObs.observe(shell);
   setTimeout(() => { draw(); updateReadout({ lat: view.lat, lon: view.lon }); }, 40);
+  scheduleLive();
 
   function onKey(e) {
     if (e.key === "Escape" && (measureMode || placeMode)) {
@@ -2005,6 +2209,9 @@ export async function render(root, params = {}) {
   return () => {
     disposed = true;
     if (raf) cancelAnimationFrame(raf);
+    if (liveTimer) clearInterval(liveTimer);
+    if (hudLiveTimer) clearInterval(hudLiveTimer);
+    if (alprFetchTimer) clearTimeout(alprFetchTimer);
     clearTimeout(readoutTimer);
     if (resizeObs) resizeObs.disconnect();
     document.removeEventListener("keydown", onKey);

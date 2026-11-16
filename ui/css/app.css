@@ -247,6 +247,15 @@ body.no-scan .fx-scan { display: none; }
 }
 .pill-label { color: var(--muted-2); font-size: 9px; }
 #gridValue { color: var(--acc); }
+.defcon-pill { cursor: pointer; }
+.defcon-pill #defconValue { color: var(--muted); font-weight: 600; }
+.defcon-code { color: var(--muted-2); font-size: 9px; }
+.defcon-pill.ok { border-color: rgba(var(--acc-rgb), .5); }
+.defcon-pill.ok #defconValue { color: var(--acc); }
+.defcon-pill.warn { border-color: rgba(var(--amber-rgb), .5); }
+.defcon-pill.warn #defconValue { color: var(--amber); }
+.defcon-pill.bad { border-color: rgba(var(--red-rgb), .55); }
+.defcon-pill.bad #defconValue { color: var(--red); }
 .net-pill #netText { color: var(--muted); }
 .net-pill.online #netText { color: var(--acc); }
 .vault-pill.unlocked { border-color: rgba(var(--amber-rgb), .5); }
@@ -974,6 +983,7 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 @media (max-width: 1320px) {
   :root { --side-w: 210px; }
   .top-pill#gridPill { display: none; }
+  .defcon-code { display: none; }
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 1100px) {
@@ -999,6 +1009,7 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
   .brand-copy small { display: none; }
   .classification { display: none; }
   .top-pill.vault-pill { display: none; }
+  .top-pill.defcon-pill { display: none; }
   .sidebar {
     position: fixed; left: 0; top: var(--top-h); bottom: var(--bot-h); width: 238px;
     transform: translateX(-105%); transition: transform .2s ease; background: #07100b;

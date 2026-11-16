@@ -468,19 +468,28 @@ def _parse_opensky(payload: dict) -> list[dict]:
         if not isinstance(st, (list, tuple)) or len(st) < 8:
             continue
         try:
-            lat = float(st[5]); lon = float(st[6]); alt = float(st[7])
+            # OpenSky state vector: [5] longitude, [6] latitude, [7] baro
+            # altitude (m), [9] velocity (m/s), [10] true track (degrees).
+            lon = float(st[5]); lat = float(st[6])
         except (TypeError, ValueError):
             continue
         if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
             continue
+        alt_raw = st[7] if st[7] is not None else (st[13] if len(st) > 13 else None)
+        try:
+            alt = float(alt_raw) if alt_raw is not None else None
+        except (TypeError, ValueError):
+            alt = None
         callsign = str(st[1] or "").strip()
         country = str(st[2] or "").strip()
+        speed_ms = st[9] if isinstance(st[9], (int, float)) else None
+        track_deg = st[10] if isinstance(st[10], (int, float)) else None
         items.append({
             "title": callsign or country or "AIRCRAFT",
             "time": datetime.fromtimestamp(int(st[3] or 0), tz=timezone.utc).isoformat() if st[3] else utcnow(),
             "lat": lat, "lon": lon, "alt_m": alt,
-            "speed_kmh": float(st[10]) if isinstance(st[10], (int, float)) else None,
-            "heading_deg": float(st[9]) if isinstance(st[9], (int, float)) else None,
+            "speed_kmh": float(speed_ms) * 3.6 if speed_ms is not None else None,
+            "heading_deg": float(track_deg) if track_deg is not None else None,
             "source": "OpenSky",
             "severity": "INFO",
             "url": f"https://opensky-network.org/flight/?icao24={str(st[0]).lower()}" if str(st[0]).isalnum() else None,
