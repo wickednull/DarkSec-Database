@@ -171,13 +171,16 @@ export async function render(root, params = {}) {
   else if (activeTab === "events") renderEvents(body);
   else if (activeTab === "sensors") await renderSensors(body);
 
-  root.appendChild(h("div", { class: "tiny dim mt-14", text: "INTEL SOURCES: The Hacker News (cybersecurity RSS), GDELT 2.0 (automated media coding), UCDP Candidate Events (monthly verified), OpenSky Network, CelesTrak (TLE/SGP4), NASA NEO/EONET, USGS, BBC/Al Jazeera/Guardian/France24/DW, International Crisis Group, Open-Meteo, NOAA SWPC, NWS, ReliefWeb, GDACS, WHO, Safecast. Every item shows its age; cached snapshots are never live warnings." }));
+  root.appendChild(h("div", { class: "tiny dim mt-14", text: "INTEL SOURCES: The Hacker News (cybersecurity RSS), GDELT 2.0 (automated media coding), UCDP Candidate Events (monthly verified), OpenSky Network, CelesTrak (TLE/SGP4), NASA NEO/EONET, USGS, BBC/Al Jazeera/Guardian/France24/DW, International Crisis Group, Open-Meteo, NOAA SWPC, NWS, ReliefWeb, GDACS, WHO, Safecast, defconlevel.com (OSINT DEFCON estimate). Every item shows its age; cached snapshots are never live warnings." }));
 
   return () => {};
 
   function renderOverview(host) {
     const stats = h("div", { class: "grid grid-4" });
     stats.appendChild(stat("THREAT INDEX", String(threat.score ?? 0), threatBand, (threatBand === "SEVERE" || threatBand === "ELEVATED") ? "acc" : ""));
+    stats.appendChild(stat("DEFCON", defcon?.level != null ? String(defcon.level) : "—",
+      defcon?.codename ? `${defcon.codename} · OSINT` : "OSINT estimate",
+      defcon?.level != null && defcon.level <= 2 ? "acc" : ""));
     stats.appendChild(stat("CRITICAL CACHED", String(criticalList.length).padStart(3, "0"), "across all feeds"));
     stats.appendChild(stat("CONFLICT EVENTS", String(conflictLive.length + conflictVerified.length).padStart(3, "0"), `${conflictVerified.length} verified · ${conflictLive.length} live media`));
     stats.appendChild(stat("CYBER HEADLINES", String((feedById.thehackernews?.items || []).length).padStart(3, "0"), "The Hacker News cached"));
@@ -204,6 +207,7 @@ export async function render(root, params = {}) {
               ...[
                 ["CRITICAL ITEMS", String(criticalList.length)],
                 ["BAND", threatBand],
+                ["DEFCON", defcon?.level != null ? `${defcon.level}${defcon.codename ? ` · ${defcon.codename}` : ""}` : "—"],
                 ["TOP SOURCE", Object.entries(threat.by_source || {}).sort((a, b) => b[1] - a[1])[0]?.[0] || "—"],
                 ["EVENTS NEAR OPERATOR", String(threat.near_count ?? 0)],
               ].flatMap(([k, v]) => [h("span", { class: "k", text: k }), h("span", { class: "v", text: v })]),
@@ -211,6 +215,9 @@ export async function render(root, params = {}) {
           ),
         ),
         h("div", { class: "tiny muted", text: `${threat.events_scoped ? `Location-weighted from ${observer} (${positionInfo.mapLabel})` : "Global cached view (set a valid position for local weighting)"}: severity, distance, recency and source credibility are applied. ${threat.near_count ?? 0} weighted event(s) within the near-operator window. Cached data only — verify before acting.` }),
+        h("div", { class: "tiny muted", text: defcon?.level != null
+          ? `DEFCON ${defcon.level}${defcon.codename ? ` (${defcon.codename})` : ""} — ${defcon.readiness || "OSINT estimate"}${defcon.driver ? ` · primary driver: ${defcon.driver}` : ""}. Source: defconlevel.com. This is a separate OSINT estimate; it is not folded into the local threat score.`
+          : "DEFCON estimate unavailable." }),
         h("div", { class: "tiny muted", text: sun ? `SOLAR STATE ${Number(sun?.sun?.altitude_deg) > 0 ? "DAY" : "NIGHT"} · SUN ALT ${sun?.sun?.altitude_deg ?? "—"}° · NEXT RISE ${fmt.date(sun?.sun?.next_rise)} · NEXT SET ${fmt.date(sun?.sun?.next_set)}` : "SOLAR STATE UNKNOWN" }),
       ),
     }));

@@ -20,7 +20,7 @@ a = Analysis(
         ('./prepper', 'prepper'),
         ('./water_food', 'water_food')
     ],
-    hiddenimports=['darksec.updater', 'darksec.alpr'],
+    hiddenimports=['darksec.updater', 'darksec.alpr', 'darksec.docbundle'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

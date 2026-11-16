@@ -24,6 +24,8 @@ export async function render(root) {
   const cleanups = [];
   let gpsCandidate = null;
   let phoneSessionId = null;
+  let bundlePoll = null;
+  let lastBundlePhase = "";
   let phonePollTimer = null;
   let autoAcceptedReceivedAt = null;
   let libStats = status.library || {};
@@ -352,9 +354,15 @@ export async function render(root) {
   const deep = checkbox("Deep text extraction (slower, enables full-text search)", true);
   const force = checkbox("Re-index unchanged files", false);
   const libBox = h("div", { class: "col" });
+  const bundleUrl = input({ value: settings.document_bundle_manifest_url || "", placeholder: "https://…/document-library.bundle.json" });
+  const bundleProgress = progressBar(0);
+  const bundleStatus = h("div", { class: "tiny muted", text: "Bundle status unavailable" });
+  const bundleJobText = h("div", { class: "tiny muted", text: "" });
+  const bundleDownloadBtn = btn("DOWNLOAD DOCUMENT LIBRARY", { tone: "primary", icon: "download", onClick: downloadBundle });
+  const bundleCancelBtn = btn("CANCEL", { size: "sm", tone: "ghost", onClick: cancelBundle, disabled: true });
   const libPanel = panel({
     title: "Document library",
-    sub: "5.6 GB local archive",
+    sub: "Local archive + optional downloadable bundle",
     icon: "library",
     tools: [btn("OPEN", { size: "sm", onClick: () => { location.hash = "#/library"; } })],
     body: h("div", { class: "col" },
@@ -363,10 +371,19 @@ export async function render(root) {
       h("div", { class: "row mt-10" },
         btn("START INDEX", { tone: "primary", icon: "database", onClick: startIndex }),
         btn("REFRESH", { icon: "refresh", onClick: refreshLibrary })),
-      h("div", { class: "hint", text: "Deep indexing reads every PDF and can take hours on a large archive. It runs in the background; the console remains usable." })),
+      h("div", { class: "hint", text: "Deep indexing reads every PDF and can take hours on a large archive. It runs in the background; the console remains usable." }),
+      h("div", { class: "sep" }),
+      h("div", { class: "side-label", text: "DOCUMENT LIBRARY BUNDLE" }),
+      field("Manifest URL", bundleUrl, "Direct HTTPS URL to document-library.bundle.json. GitHub Releases, a static host, or Internet Archive work; Proton Drive share pages usually do not."),
+      h("div", { class: "row wrap mt-8" }, bundleDownloadBtn, bundleCancelBtn),
+      bundleProgress,
+      bundleJobText,
+      bundleStatus,
+      h("div", { class: "callout small amber", text: "Only install a bundle you are legally allowed to redistribute. The installer verifies SHA-256, extracts document files into fielddata/library, and starts a metadata index. Existing files are kept." })),
   });
   grid.appendChild(libPanel);
   renderLibrary(libBox, libStats);
+  loadBundleStatus();
 
   /* ------------------------------------------------------------- feeds */
   const feedAuto = checkbox("Automatically fetch public feeds while online", !!settings.feed_auto_refresh);
@@ -1080,6 +1097,118 @@ export async function render(root) {
     } catch {}
   }
 
+  async function loadBundleStatus() {
+    if (disposed) return;
+    try {
+      const st = await api.get("/api/library/bundle/status");
+      const rows = [
+        ["Local bundle files", fmt.num(st.local_files || 0, 0)],
+        ["Local bundle size", fmt.bytes(st.local_bytes || 0)],
+        ["Installed bundle", st.bundle_id || "—"],
+        ["Installed", st.installed_at ? fmt.ago(st.installed_at) : "never"],
+        ["Disk free", st.disk_free != null ? fmt.bytes(st.disk_free) : "—"],
+      ];
+      const box = h("div", { class: "col gap-4" }, kv(rows));
+      if (st.error) box.appendChild(h("div", { class: "callout small amber", text: String(st.error).slice(0, 300) }));
+      bundleStatus.replaceChildren(box);
+      if (!bundleUrl.value && st.manifest_url) bundleUrl.value = st.manifest_url;
+      renderBundleJob(st.job || {});
+      if (st.job && st.job.running) pollBundle();
+    } catch (err) {
+      bundleStatus.textContent = err.message || "Bundle status unavailable";
+    }
+  }
+
+  function renderBundleJob(job) {
+    const running = !!job.running;
+    bundleDownloadBtn.disabled = running;
+    bundleCancelBtn.disabled = !running;
+    const total = Number(job.total_bytes || 0);
+    const done = Number(job.downloaded_bytes || 0);
+    const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    const fill = bundleProgress.querySelector("span");
+    if (fill) fill.style.width = `${pct}%`;
+    let text = "";
+    if (running) {
+      const part = job.part_count ? ` · part ${job.part_index}/${job.part_count}` : "";
+      text = `${job.message || "Working"}${part}${done ? ` · ${fmt.bytes(done)}${total ? ` / ${fmt.bytes(total)}` : ""}` : ""}`;
+    } else if (job.phase === "complete") {
+      text = job.message || "Bundle installed";
+    } else if (job.phase === "error") {
+      text = job.error || job.message || "Bundle download failed";
+    } else if (job.phase === "cancelled") {
+      text = "Bundle download cancelled";
+    }
+    bundleJobText.textContent = text;
+    if (job.phase === "complete" && lastBundlePhase !== "complete") {
+      lastBundlePhase = "complete";
+      toast("Document library bundle installed · metadata index started", "ok");
+      refreshLibrary();
+      loadBundleStatus();
+    } else if (job.phase === "error" && lastBundlePhase !== "error") {
+      lastBundlePhase = "error";
+      toast(text || "Bundle download failed", "error");
+    } else if (job.phase === "cancelled" && lastBundlePhase !== "cancelled") {
+      lastBundlePhase = "cancelled";
+      toast("Bundle download cancelled", "warn");
+    }
+  }
+
+  async function pollBundle() {
+    if (bundlePoll) clearTimeout(bundlePoll);
+    if (disposed) return;
+    try {
+      const job = await api.get("/api/library/bundle/job");
+      renderBundleJob(job);
+      if (job.running) {
+        bundlePoll = setTimeout(pollBundle, 1000);
+      } else {
+        loadBundleStatus();
+      }
+    } catch (err) {
+      bundleJobText.textContent = err.message || "Could not read bundle progress";
+      bundlePoll = setTimeout(pollBundle, 2000);
+    }
+  }
+
+  async function downloadBundle() {
+    const url = bundleUrl.value.trim();
+    if (!url) {
+      toast("Enter a document bundle manifest URL", "warn");
+      bundleUrl.focus();
+      return;
+    }
+    const ok = await confirmDialog({
+      title: "Download document library",
+      message: "Download and extract this document bundle? It can be several gigabytes. Only install a bundle you are allowed to redistribute. Existing files are kept.",
+      confirmText: "DOWNLOAD",
+    });
+    if (!ok) return;
+    try {
+      await store.saveSettings({ document_bundle_manifest_url: url });
+      const result = await api.post("/api/library/bundle/download", { url });
+      if (!result.ok) {
+        toast(result.error || "Could not start bundle download", "error");
+        return;
+      }
+      lastBundlePhase = "";
+      toast("Document library download started", "warn");
+      pollBundle();
+    } catch (err) {
+      toast(err.message || "Could not start bundle download", "error");
+    }
+  }
+
+  async function cancelBundle() {
+    try {
+      await api.post("/api/library/bundle/cancel");
+      toast("Cancelling bundle download…", "warn");
+      pollBundle();
+    } catch (err) {
+      toast(err.message || "Could not cancel bundle download", "error");
+    }
+  }
+
   function renderLibrary(target, stats) {
     target.replaceChildren();
     target.appendChild(kv([
@@ -1416,6 +1545,7 @@ export async function render(root) {
   return () => {
     disposed = true;
     if (pollTimer) clearInterval(pollTimer);
+    if (bundlePoll) clearTimeout(bundlePoll);
     for (const fn of cleanups) try { fn(); } catch {}
   };
 }

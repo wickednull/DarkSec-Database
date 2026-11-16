@@ -30,6 +30,7 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 RECORDING_DIR = DATA_DIR / "recordings"
 LOG_DIR = DATA_DIR / "logs"
 BACKUP_DIR = DATA_DIR / "backups"
+DOC_BUNDLE_DIR = DATA_DIR / "library"
 
 # The document library. Multiple roots are supported so the same install can
 # index the original folders and any additional field library.
@@ -44,6 +45,7 @@ LIBRARY_ROOTS = [
     RESOURCE_ROOT / "water_food",
     RESOURCE_ROOT / "maps",
     RESOURCE_ROOT / "isos",
+    DOC_BUNDLE_DIR,
 ]
 EXTRA_LIBRARY_ROOTS = [
     Path(p).expanduser()
@@ -55,7 +57,7 @@ DOC_EXTENSIONS = {".pdf", ".epub", ".txt", ".md", ".html", ".htm", ".djvu", ".cb
 MAP_TILE_DIR = RESOURCE_ROOT / "maps" / "tiles"
 MAP_VECTOR_DIR = RESOURCE_ROOT / "maps" / "vector"
 
-for _d in (DATA_DIR, UPLOAD_DIR, RECORDING_DIR, LOG_DIR, BACKUP_DIR):
+for _d in (DATA_DIR, UPLOAD_DIR, RECORDING_DIR, LOG_DIR, BACKUP_DIR, DOC_BUNDLE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
@@ -94,6 +96,7 @@ def default_settings() -> dict:
         "dem_enabled": True,
         "map_vector": True,
         "auto_deep_index": True,
+        "document_bundle_manifest_url": "https://github.com/wickednull/DarkSec-Database/releases/download/docs-2026-11-16/document-library.bundle.json",
         "feed_auto_refresh": True,
         "feed_refresh_min": 10,
         "cctv_radius_km": 15,

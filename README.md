@@ -248,6 +248,17 @@ available and falls back to `pypdf`; a large collection can take hours. The
 index runs in the background and can be started or stopped from the Library
 screen. `DARKSEC_NO_INDEX=1` or `--no-index` disables automatic indexing.
 
+### Downloading the document library
+
+**Settings → Document library → Document library bundle** can install a packaged
+library from a manifest URL. Build a split bundle with
+`python3 tools/build_document_bundle.py`, upload the parts plus
+`document-library.bundle.json` to a direct-download host (GitHub Releases is
+recommended; Proton Drive share pages are not direct file URLs), then press
+**DOWNLOAD DOCUMENT LIBRARY**. The project release URL is preconfigured; the
+field can be changed for another host. See
+[docs/DOCUMENT_LIBRARY_BUNDLE.md](docs/DOCUMENT_LIBRARY_BUNDLE.md).
+
 ## SDR notes
 
 The SDR module calls the real tools on `PATH`:

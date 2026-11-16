@@ -4718,6 +4718,39 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     def library_categories(request: Request):
         return {"categories": library.categories(db(request))}
 
+    @app.get("/api/library/bundle/status")
+    def library_bundle_status(request: Request):
+        from . import docbundle
+        return docbundle.status()
+
+    @app.post("/api/library/bundle/download")
+    def library_bundle_download(request: Request, payload: dict = Body(default={})):
+        from . import docbundle
+        d = db(request)
+        url = str(payload.get("url")
+                  or d.get_setting("document_bundle_manifest_url")
+                  or config.default_settings().get("document_bundle_manifest_url")
+                  or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="No document bundle manifest URL configured")
+        result = docbundle.start(url, force=bool(payload.get("force", False)))
+        d.audit("LIBRARY_BUNDLE_DOWNLOAD",
+                f"url={url[:240]} ok={result.get('ok')} error={result.get('error') or ''}"[:600],
+                request.client.host if request.client else "")
+        return result
+
+    @app.get("/api/library/bundle/job")
+    def library_bundle_job(request: Request):
+        from . import docbundle
+        return docbundle.job_state()
+
+    @app.post("/api/library/bundle/cancel")
+    def library_bundle_cancel(request: Request):
+        from . import docbundle
+        result = docbundle.cancel()
+        db(request).audit("LIBRARY_BUNDLE_CANCEL", "cancelled by operator")
+        return result
+
     @app.get("/api/library/doc/{doc_id}")
     def library_doc(request: Request, doc_id: int):
         row = db(request).one("SELECT * FROM library_docs WHERE id=?", (doc_id,))
