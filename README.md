@@ -1,4 +1,5 @@
 # DarkSec NIGHTWATCH
+<img width="1408" height="768" alt="image" src="https://github.com/user-attachments/assets/f85d3ea1-0a1c-4673-ac2e-d6edaa46189d" />
 
 A local-only, offline-first survival field console. It runs a Python FastAPI
 backend on `127.0.0.1`, serves a bundled single-page interface, and keeps all
