@@ -57,7 +57,9 @@ palette.
   quality 15%. Critical cached headlines count as threat context, not as an
   intel-coverage failure.
 - **Document library** — metadata + full-text search (SQLite FTS5) over the
-  existing PDF/EPUB/etc. collection, with a bundled PDF.js reader.
+  existing PDF/EPUB/etc. collection, with a bundled PDF.js reader. Scanned
+  image-only PDFs are OCR'd on demand when `tesseract-ocr` and poppler are
+  installed.
 - **Global search** — the top-bar magnifier (or `/`) searches every operator
   record (logs, tasks, medical, inventory, caches, comms, trips, waypoints),
   the full document-library text, manual guides, reference cards and radio
@@ -104,10 +106,31 @@ palette.
   instance. Detects installed models, can include cached intelligence context,
   and has no cloud dependency. Configure the endpoint and model in Settings.
 
-## Run it
+## Install
 
-Requirements: Python 3.11+ and the packages in `requirements.txt`. A virtual
-environment is recommended.
+Run the installer once. It installs the Python environment plus the document
+tools Delamain needs to read PDFs and scanned pages:
+
+```bash
+./install.sh             # core runtime + PDF/OCR/DjVu tools
+./install.sh --with-sdr  # also install optional radio/GPS tools
+```
+
+The installer supports apt, dnf, pacman, zypper, apk and Homebrew. It installs
+poppler-utils (`pdftotext`, `pdftoppm`), `tesseract-ocr` with English data,
+`djvulibre-bin`, `ffmpeg`, `sox`, `git`, Node.js/npm, a `.venv`, the Python
+requirements and the desktop npm packages. It finishes by running
+`tools/doctor.py --strict` and reports anything that is still missing.
+
+```bash
+python3 tools/doctor.py   # check dependencies at any time
+```
+
+Both launchers prefer `.venv` automatically. **Settings → Document library** shows
+the same text-tool status (pdf text, pypdf, OCR, DjVu).
+
+Prefer a manual setup? Install the packages listed in
+[docs/INSTALL.md](docs/INSTALL.md), then:
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -148,7 +171,7 @@ cloud service. The assistant can include cached intelligence context when asked.
 
 Delamain can also act on the local system when you ask it to: it can save an entry
 to the mission log, save an encrypted vault note (vault must be unlocked), and
-search the indexed document library. These tools are rate-limited server-side
+search or OCR the indexed document library. These tools are rate-limited server-side
 (default 20 log entries/hour and 1000 total; 10 vault notes/hour and 200 total) so
 a misbehaving model cannot fill the disk. Turn the tools off entirely in
 **Settings → Assistant → Allow Delamain to save notes/logs**.

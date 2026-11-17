@@ -447,11 +447,11 @@ def _library_context(db: Database, query: str, limit: int = 4, max_chars: int = 
             # extraction (helps PDFs that exist but aren't deep-indexed yet).
             try:
                 row = db.one("SELECT text, path, rel_path FROM library_docs WHERE id=?", (h.get("id"),))
-                text = str((row or {}).get("text") or "").strip() if row else ""
+                text = str(row["text"] or "").strip() if row else ""
                 if text:
                     snippet = text[:400]
                 elif row:
-                    cand = (row.get("rel_path") or row.get("path") or "").strip()
+                    cand = str(row["rel_path"] or row["path"] or "").strip()
                     resolved = None
                     if cand:
                         try:
@@ -485,9 +485,9 @@ def _library_context(db: Database, query: str, limit: int = 4, max_chars: int = 
     parts = list(chunks)
     if unreadable:
         parts.append(
-            "Found but could NOT be read (likely scanned/image PDFs or not yet indexed) — "
-            "do not invent their contents; direct the operator to the Library viewer: "
-            + ", ".join(unreadable)
+            "Some matching documents have no text layer yet (scanned PDFs). If the "
+            "operator named one, call get_library_document to OCR/read it; do not "
+            "invent their contents: " + ", ".join(unreadable)
         )
     return (
         "\nRetrieved from the indexed document library (PDFs/field manuals; "
@@ -918,7 +918,8 @@ def tool_specs(cfg: dict | None = None) -> list[dict]:
                 "description": (
                     "Find a manual/document by title and return an excerpt with page or "
                     "section citations. Tolerates partial or misspelled titles. Pass query "
-                    "to focus the excerpt, or page/span to read specific pages."
+                    "to focus the excerpt, or page/span to read specific pages. Scanned "
+                    "PDFs are OCR'd on demand when tesseract and pdftoppm are installed."
                 ),
                 "parameters": {
                     "type": "object",
@@ -937,7 +938,9 @@ def tool_specs(cfg: dict | None = None) -> list[dict]:
             "type": "function",
             "function": {
                 "name": "search_library",
-                "description": "Search the indexed offline document library for a topic.",
+                "description": ("Search the indexed offline document library for a topic. "
+                                "If a hit has no snippet, call get_library_document with its "
+                                "title to extract or OCR the text."),
                 "parameters": {
                     "type": "object",
                     "properties": {

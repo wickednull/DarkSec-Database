@@ -1261,6 +1261,19 @@ export async function render(root) {
       ["Text extracted", fmt.bytes(stats.chars || 0)],
       ["Index size", fmt.bytes(stats.db_bytes || 0)],
     ]));
+    const ex = stats.extractors || {};
+    const tools = [
+      ["pdftotext", !!ex.pdftotext],
+      ["pypdf", !!ex.pypdf],
+      ["OCR", !!ex.ocr],
+      ["DjVu", !!ex.djvutxt],
+    ];
+    const missing = tools.filter(([, ok]) => !ok).map(([name]) => name);
+    if (missing.length) {
+      target.appendChild(h("div", { class: "callout small amber mt-10", text: `Missing text tools: ${missing.join(", ")}. Run ./install.sh to install poppler, tesseract OCR and DjVu support.` }));
+    } else {
+      target.appendChild(h("div", { class: "tiny muted mt-10", text: "Text tools: pdftotext · pypdf · OCR · DjVu" }));
+    }
     const job = stats.job || {};
     if (job.running) {
       const pct = job.total ? Math.round((job.done / job.total) * 100) : 0;

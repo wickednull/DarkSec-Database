@@ -1168,6 +1168,33 @@ def _ai_row(row) -> dict:
     return dict(row) if row is not None else {}
 
 
+def ai_search_library(d: Database, query: str, category: str | None = None) -> dict:
+    """Search the document library for the assistant tool."""
+    q = str(query or "").strip()
+    if not q:
+        return {"ok": False, "error": "query is required"}
+    rows = library.search(d, q, category, limit=4)
+    results = []
+    for r in rows[:4]:
+        row = d.one("SELECT text, path, rel_path FROM library_docs WHERE id=?", (r.get("id"),))
+        text = str((row["text"] if row else "") or "").strip()
+        page = library.page_for_query(text, q) if text else None
+        snippet = (r.get("snippet") or "")[:800]
+        if not snippet and text:
+            snippet = text[:800]
+        item = {
+            "id": r.get("id"), "name": r.get("name"),
+            "category": r.get("category"), "path": r.get("rel_path"),
+            "page": page, "snippet": snippet, "indexed": bool(text),
+        }
+        if not snippet:
+            item["note"] = ("No text layer is indexed for this document. "
+                            "Call get_library_document with its title to "
+                            "extract or OCR it before answering.")
+        results.append(item)
+    return {"ok": True, "results": results}
+
+
 def ai_mission_log_search(d: Database, query: str = "", category: str = "",
                           limit: int = 10) -> dict:
     try:
@@ -2501,7 +2528,7 @@ def _confirm_preview(d: Database, name: str, args: dict) -> tuple[str, str]:
                 qty = _ai_num(args.get("qty"))
                 target = qty if qty is not None else current + (delta or 0)
                 return (f"Inventory: {row['name']}",
-                        f"Quantity {current:g} → {max(0, target):g} {row.get('unit') or ''}".strip())
+                        f"Quantity {current:g} → {max(0, target):g} {row['unit'] or ''}".strip())
             return ("Create inventory item", str(args.get("name") or "unnamed item"))
         if name == "complete_task":
             row, _ = _find_task(d, args.get("id"), args.get("title"))
@@ -3106,20 +3133,49 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     if not matches:
                         return {"ok": False, "error": f"No document matched {title!r}",
                                 "matches": []}
-                    doc = matches[0]
-                    excerpt = library.document_excerpt(
-                        d, int(doc["id"]),
-                        query=str(args.get("query") or ""),
-                        max_chars=args.get("max_chars") or 4000,
-                        page=args.get("page"),
-                        span=args.get("span") or 1,
-                    )
+                    excerpt = None
+                    doc = None
+                    tried = []
+                    for candidate in matches[:6]:
+                        try:
+                            attempt = library.document_excerpt(
+                                d, int(candidate["id"]),
+                                query=str(args.get("query") or ""),
+                                max_chars=args.get("max_chars") or 4000,
+                                page=args.get("page"),
+                                span=args.get("span") or 1,
+                            )
+                        except Exception as exc:
+                            tried.append({
+                                "id": candidate.get("id"), "name": candidate.get("name"),
+                                "chars": 0, "ocr": False, "note": str(exc)[:200],
+                            })
+                            continue
+                        tried.append({
+                            "id": candidate.get("id"), "name": candidate.get("name"),
+                            "chars": attempt.get("chars"), "ocr": bool(attempt.get("ocr")),
+                            "note": attempt.get("note"),
+                        })
+                        if (attempt.get("text") or "").strip():
+                            doc, excerpt = candidate, attempt
+                            break
+                    if excerpt is None:
+                        first = tried[0] if tried else {}
+                        return {"ok": False,
+                                "error": (first.get("note")
+                                          or "No readable text in the matching documents."),
+                                "ocr_available": library.ocr_available(),
+                                "matches": [{key: m.get(key) for key in
+                                             ("id", "name", "category", "score")}
+                                            for m in matches[:5]],
+                                "tried": tried}
                     return {"ok": True,
                             "document": {key: doc.get(key) for key in
                                          ("id", "name", "category", "rel_path", "pages")},
                             "matches": [{key: m.get(key) for key in
                                          ("id", "name", "category", "score")}
                                         for m in matches[:5]],
+                            "tried": tried,
                             "excerpt": excerpt.get("text") or "",
                             "chars": excerpt.get("chars"),
                             "truncated": excerpt.get("truncated"),
@@ -3128,6 +3184,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                             "pages": excerpt.get("pages") or [],
                             "page_count": excerpt.get("page_count"),
                             "sections": excerpt.get("sections") or [],
+                            "ocr": bool(excerpt.get("ocr")),
                             "note": excerpt.get("note")}
                 if name == "list_vault_notes":
                     return ai_vault_notes_list(d, v, args.get("limit") or 30)
@@ -3251,22 +3308,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 if name == "save_note":
                     return ai_note_save(d, v, args.get("title"), args.get("body"), args.get("tags") or "")
                 if name == "search_library":
-                    q = str(args.get("query") or "").strip()
-                    if not q:
-                        return {"ok": False, "error": "query is required"}
                     category = str(args.get("category") or "").strip() or None
-                    rows = library.search(d, q, category, limit=4)
-                    results = []
-                    for r in rows[:4]:
-                        text = d.one("SELECT text FROM library_docs WHERE id=?", (r.get("id"),))
-                        page = library.page_for_query(str((text or {}).get("text") or ""), q)
-                        results.append({
-                            "id": r.get("id"), "name": r.get("name"),
-                            "category": r.get("category"), "path": r.get("rel_path"),
-                            "page": page,
-                            "snippet": (r.get("snippet") or "")[:800],
-                        })
-                    return {"ok": True, "results": results}
+                    return ai_search_library(d, args.get("query") or "", category)
             except ValueError as e:
                 return {"ok": False, "error": str(e)}
             except Exception as e:

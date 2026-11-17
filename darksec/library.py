@@ -7,9 +7,11 @@ stays responsive.
 from __future__ import annotations
 
 import html
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 from bisect import bisect_left
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +24,9 @@ from .db import Database, utcnow
 MAX_TEXT_CHARS = 1_200_000
 MAX_PDF_PAGES = 300
 EXTRACT_TIMEOUT = 45
+OCR_MAX_PAGES = 12
+OCR_TIMEOUT = 30
+OCR_DPI = 200
 
 _JOB_LOCK = threading.Lock()
 _JOB: dict = {
@@ -135,6 +140,19 @@ def extract_text(path: Path, ext: str) -> tuple[str, int | None]:
                 return _normalize_page_breaks("\f".join(chunks))[:MAX_TEXT_CHARS], len(reader.pages)
         except Exception:
             return "", None
+    if ext == ".djvu":
+        if shutil.which("djvutxt"):
+            try:
+                proc = subprocess.run(
+                    ["djvutxt", str(path)], capture_output=True,
+                    timeout=EXTRACT_TIMEOUT, check=False,
+                )
+                text = proc.stdout.decode("utf-8", errors="ignore")[:MAX_TEXT_CHARS]
+                if text.strip():
+                    return _normalize_page_breaks(text), None
+            except Exception:
+                pass
+        return "", None
     if ext in (".epub", ".cbz"):
         try:
             import zipfile
@@ -151,6 +169,126 @@ def extract_text(path: Path, ext: str) -> tuple[str, int | None]:
         except Exception:
             return "", None
     return "", None
+
+
+def _pypdf_available() -> bool:
+    try:
+        import importlib.util
+        return importlib.util.find_spec("pypdf") is not None
+    except Exception:
+        return False
+
+
+def extraction_tools() -> dict:
+    """Report which local text-extraction engines are available."""
+    pdftotext = bool(shutil.which("pdftotext"))
+    pdftoppm = bool(shutil.which("pdftoppm"))
+    tesseract = bool(shutil.which("tesseract"))
+    return {
+        "pdftotext": pdftotext,
+        "pypdf": _pypdf_available(),
+        "pdftoppm": pdftoppm,
+        "tesseract": tesseract,
+        "djvutxt": bool(shutil.which("djvutxt")),
+        "ocr": bool(pdftoppm and tesseract),
+    }
+
+
+def ocr_available() -> bool:
+    tools = extraction_tools()
+    return bool(tools["ocr"])
+
+
+def pdf_page_count(path: Path) -> int | None:
+    """Page count for a PDF, using pypdf or pdfinfo when available."""
+    try:
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()):
+            from pypdf import PdfReader
+            return len(PdfReader(str(path)).pages)
+    except Exception:
+        pass
+    if shutil.which("pdfinfo"):
+        try:
+            proc = subprocess.run(["pdfinfo", str(path)], capture_output=True,
+                                  timeout=10, check=False)
+            match = re.search(r"^Pages:\s+(\d+)", proc.stdout.decode("utf-8", errors="ignore"), re.M)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            pass
+    return None
+
+
+def ocr_pdf(path: Path, first_page: int = 1, last_page: int | None = None,
+            max_chars: int = 120_000) -> str:
+    """OCR a bounded page range of a scanned PDF.
+
+    Returns page text joined with form feeds (empty pages stay as empty
+    segments so page numbers remain aligned). Never raises.
+    """
+    if not ocr_available() or not path.is_file():
+        return ""
+    try:
+        first = max(1, int(first_page or 1))
+    except (TypeError, ValueError):
+        first = 1
+    try:
+        last = int(last_page) if last_page else first + OCR_MAX_PAGES - 1
+    except (TypeError, ValueError):
+        last = first + OCR_MAX_PAGES - 1
+    last = max(first, min(last, first + OCR_MAX_PAGES - 1))
+    lang = os.environ.get("DARKSEC_OCR_LANG", "eng")
+    import time as _time
+    deadline = _time.monotonic() + 120
+    text_pages: list[str] = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="darksec-ocr-") as tmp:
+            prefix = Path(tmp) / "page"
+            try:
+                subprocess.run(
+                    ["pdftoppm", "-q", "-r", str(OCR_DPI), "-f", str(first), "-l", str(last),
+                     "-png", str(path), str(prefix)],
+                    capture_output=True, timeout=120, check=False,
+                )
+            except Exception:
+                return ""
+            def page_no(p: Path) -> int:
+                match = re.search(r"-(\d+)\.png$", p.name)
+                return int(match.group(1)) if match else 0
+            images = sorted(Path(tmp).glob("page*.png"), key=page_no)
+            for image in images:
+                if _time.monotonic() > deadline:
+                    break
+                page_text = ""
+                try:
+                    proc = subprocess.run(
+                        ["tesseract", str(image), "stdout", "-l", lang, "--psm", "3"],
+                        capture_output=True, timeout=OCR_TIMEOUT, check=False,
+                    )
+                    page_text = proc.stdout.decode("utf-8", errors="ignore").strip()
+                except Exception:
+                    page_text = ""
+                text_pages.append(page_text)
+                if sum(len(p) for p in text_pages) >= max_chars:
+                    break
+    except Exception:
+        return ""
+    return "\f".join(text_pages)[:max_chars]
+
+
+def _extraction_note(tools: dict, suffix: str = "") -> str:
+    if suffix == ".djvu" and not tools.get("djvutxt"):
+        return ("DjVu text extraction needs djvulibre-bin (djvutxt). Install it "
+                "and re-index the library, or open the document in the Library viewer.")
+    if not tools.get("pdftotext") and not tools.get("pypdf"):
+        return ("No PDF text extractor is installed. Install poppler-utils (pdftotext) "
+                "or the Python pypdf package, then re-index the library.")
+    if not tools.get("ocr"):
+        return ("This PDF is image-only (scanned) and has no searchable text layer. "
+                "Install tesseract-ocr and poppler-utils to enable OCR reads, or open "
+                "the document in the Library viewer.")
+    return "OCR was attempted but returned no readable text."
 
 
 def _normalize_page_breaks(text: str) -> str:
@@ -442,21 +580,84 @@ def document_excerpt(db: Database, doc_id: int, query: str = "",
     if not row:
         raise ValueError("Document not found")
     text = str(row["text"] or "")
-    if not text.strip() and row["rel_path"]:
-        path = resolve_doc(str(row["rel_path"]))
-        if path and path.is_file():
-            text = extract_text(path, path.suffix.lower())[0]
+    candidate = str(row["rel_path"] or row["path"] or "").strip()
+    suffix = Path(candidate).suffix.lower()
+    doc_path: Path | None = None
+    if candidate:
+        try:
+            doc_path = resolve_doc(candidate)
+        except Exception:
+            doc_path = None
+        if doc_path is None:
+            raw = Path(str(row["path"] or ""))
+            if raw.is_file():
+                doc_path = raw
+    ocr_used = False
+    if not text.strip() and doc_path and doc_path.is_file():
+        text = extract_text(doc_path, doc_path.suffix.lower())[0]
+        if not text.strip() and doc_path.suffix.lower() == ".pdf":
+            try:
+                if ocr_available():
+                    if page not in (None, "", 0):
+                        try:
+                            first_page = max(1, int(page))
+                        except (TypeError, ValueError):
+                            first_page = 1
+                        try:
+                            page_span = max(1, min(int(span or 1), 20))
+                        except (TypeError, ValueError):
+                            page_span = 1
+                        last_page = first_page + page_span - 1
+                    else:
+                        first_page, last_page = 1, OCR_MAX_PAGES
+                    ocr_text = ocr_pdf(doc_path, first_page, last_page)
+                    if ocr_text.strip():
+                        # Keep page offsets aligned when OCR starts after page 1.
+                        text = ("\f" * (first_page - 1)) + ocr_text
+                        ocr_used = True
+                        try:
+                            actual = pdf_page_count(doc_path)
+                            update = {"text": text, "chars": len(text), "text_ts": utcnow()}
+                            if actual:
+                                update["pages"] = actual
+                            db.update("library_docs", doc_id, update)
+                            db.fts_upsert(doc_id, row["name"],
+                                          str(row["rel_path"] or row["path"] or ""),
+                                          str(row["category"] or ""), text)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    if not text:
-        return {"text": "", "chars": 0, "truncated": False, "focus": False,
-                "pages": [], "page_count": 0, "sections": [], "unit": "page",
-                "note": "No extractable text (scanned/image PDF or not yet indexed)."}
 
-    suffix = Path(str(row["rel_path"] or row["path"] or "")).suffix.lower()
+    def decorate(result: dict) -> dict:
+        result["ocr"] = ocr_used
+        if ocr_used:
+            result["citation"] = (result.get("citation") or "") + " (OCR)"
+            result["note"] = ("Text extracted by OCR from a scanned PDF; verify numbers, "
+                              "doses and procedures before relying on it.")
+        return result
+
+    if not text:
+        tools = extraction_tools()
+        return decorate({"text": "", "chars": 0, "truncated": False, "focus": False,
+                         "pages": [], "page_count": 0, "sections": [], "unit": "page",
+                         "note": _extraction_note(tools, suffix), "extraction_tools": tools})
+
     unit = "section" if suffix in (".epub", ".cbz") else "page"
     breaks = _page_offsets(text)
     total_pages = page_count(text, row["pages"])
+    try:
+        declared_pages = int(row["pages"] or 0)
+    except (TypeError, ValueError):
+        declared_pages = 0
+    if declared_pages and declared_pages > total_pages:
+        total_pages = declared_pages
+    if ocr_used and doc_path is not None:
+        actual_pages = pdf_page_count(doc_path)
+        if actual_pages and actual_pages > total_pages:
+            total_pages = actual_pages
     available = bool(breaks) or total_pages <= 1
 
     def page_at(offset: int) -> int:
@@ -472,6 +673,23 @@ def document_excerpt(db: Database, doc_id: int, query: str = "",
             count = max(1, min(int(span or 1), 20))
         except (TypeError, ValueError):
             raise ValueError("page and span must be numbers")
+        known_pages = (text.count("\f") + 1) if text else 0
+        if (first > known_pages and doc_path is not None
+                and doc_path.suffix.lower() == ".pdf" and ocr_available()):
+            try:
+                extra = ocr_pdf(doc_path, first, first + count - 1)
+            except Exception:
+                extra = ""
+            if extra.strip():
+                ocr_used = True
+                last = first + count - 1
+                body = clean(extra)[:budget]
+                actual = pdf_page_count(doc_path) or total_pages
+                return decorate({"text": body, "chars": len(body),
+                                 "truncated": len(body) >= budget, "focus": False,
+                                 "pages": [first, last], "page_count": max(actual, last),
+                                 "sections": [], "unit": unit,
+                                 "citation": _citation(row["name"], unit, first, last)})
         if not available:
             raise ValueError(
                 f"This document has no {unit} breaks in its index; re-index it to enable citations."
@@ -483,10 +701,10 @@ def document_excerpt(db: Database, doc_id: int, query: str = "",
         end = len(text) if last >= total_pages else breaks[last - 1]
         body = clean(text[start:end])[:budget]
         heading = section_for_offset(text, start)
-        return {"text": body, "chars": len(body), "truncated": len(body) >= budget,
-                "focus": False, "pages": [first, last], "page_count": total_pages,
-                "sections": [heading] if heading else [], "unit": unit,
-                "citation": _citation(row["name"], unit, first, last)}
+        return decorate({"text": body, "chars": len(body), "truncated": len(body) >= budget,
+                         "focus": False, "pages": [first, last], "page_count": total_pages,
+                         "sections": [heading] if heading else [], "unit": unit,
+                         "citation": _citation(row["name"], unit, first, last)})
 
     q = str(query or "").strip()
     if q:
@@ -538,22 +756,23 @@ def document_excerpt(db: Database, doc_id: int, query: str = "",
                     break
             excerpt = "\n\n".join(parts)
             pages = ([min(page_refs), max(page_refs)] if page_refs and breaks else [])
-            return {"text": excerpt, "chars": len(text),
-                    "truncated": used < len(text), "focus": True,
-                    "pages": pages, "page_numbers": page_refs,
-                    "page_count": total_pages, "sections": sections[:6], "unit": unit,
-                    "citation": _citation(row["name"], unit, pages[0] if pages else None,
-                                          pages[1] if pages and len(pages) > 1 else None)}
+            return decorate({"text": excerpt, "chars": len(text),
+                             "truncated": used < len(text), "focus": True,
+                             "pages": pages, "page_numbers": page_refs,
+                             "page_count": total_pages, "sections": sections[:6], "unit": unit,
+                             "citation": _citation(row["name"], unit, pages[0] if pages else None,
+                                                   pages[1] if pages and len(pages) > 1 else None)})
 
-    excerpt = clean(text[:budget])
-    pages = [1, page_at(budget)] if breaks else []
-    heading = section_for_offset(text, 0)
-    return {"text": excerpt, "chars": len(text),
-            "truncated": len(excerpt) < len(text), "focus": False,
-            "pages": pages, "page_count": total_pages,
-            "sections": [heading] if heading else [], "unit": unit,
-            "citation": _citation(row["name"], unit, pages[0] if pages else None,
-                                  pages[1] if pages and len(pages) > 1 else None)}
+    start_offset = len(text) - len(text.lstrip("\f\n "))
+    excerpt = clean(text[start_offset:start_offset + budget])
+    pages = ([page_at(start_offset), page_at(start_offset + budget)] if breaks else [])
+    heading = section_for_offset(text, start_offset)
+    return decorate({"text": excerpt, "chars": len(text),
+                     "truncated": len(excerpt) < len(text), "focus": False,
+                     "pages": pages, "page_count": total_pages,
+                     "sections": [heading] if heading else [], "unit": unit,
+                     "citation": _citation(row["name"], unit, pages[0] if pages else None,
+                                           pages[1] if pages and len(pages) > 1 else None)})
 
 
 def _citation(name: str, unit: str, first=None, last=None) -> str:
@@ -600,4 +819,5 @@ def stats(db: Database) -> dict:
     row = db.one("SELECT sum(chars) chars FROM library_docs")
     db_size = Path(db.path).stat().st_size if Path(db.path).exists() else 0
     return {"documents": total, "text_indexed": deep, "chars": int(row["chars"] or 0),
-            "db_bytes": db_size, "job": job_state(), "categories": categories(db)}
+            "db_bytes": db_size, "job": job_state(), "categories": categories(db),
+            "extractors": extraction_tools()}

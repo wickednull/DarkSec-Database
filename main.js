@@ -30,6 +30,12 @@ function backendCandidates() {
     if (fs.existsSync(bundled)) out.push({ cmd: bundled, args: [], label: "bundled backend" });
   }
   if (process.env.DARKSEC_PYTHON) out.push({ cmd: process.env.DARKSEC_PYTHON, args: ["-m", "darksec"], label: "DARKSEC_PYTHON" });
+  if (!app.isPackaged) {
+    const venvPython = IS_WIN
+      ? path.join(ROOT, ".venv", "Scripts", "python.exe")
+      : path.join(ROOT, ".venv", "bin", "python");
+    if (fs.existsSync(venvPython)) out.push({ cmd: venvPython, args: ["-m", "darksec"], label: "venv python" });
+  }
   out.push({ cmd: IS_WIN ? "py" : "python3", args: IS_WIN ? ["-3", "-m", "darksec"] : ["-m", "darksec"], label: "python3" });
   if (IS_WIN) out.push({ cmd: "python", args: ["-m", "darksec"], label: "python" });
   if (!IS_WIN) out.push({ cmd: "python", args: ["-m", "darksec"], label: "python" });
@@ -204,7 +210,7 @@ function showFailure(err) {
 </style>
 <h1>DARKSEC // STARTUP FAILURE</h1>
 <pre>${safe}</pre>
-<div class="hint">Check that Python 3.11+ is installed and the required packages are available, or set DARKSEC_PYTHON to a working interpreter. The backend never leaves 127.0.0.1.</div>`));
+<div class="hint">Check that Python 3.11+ is installed and the required packages are available. Run <code>./install.sh</code> from the DarkSec folder (or set DARKSEC_PYTHON to a working interpreter). The backend never leaves 127.0.0.1.</div>`));
 }
 
 function stopBackend() {

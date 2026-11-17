@@ -43,6 +43,10 @@ Downloads resume partial `.download` files when the host supports HTTP Range.
 Existing files are kept, so a newer bundle does not overwrite your edits; to
 refresh, remove the old files under `fielddata/library` and download again.
 
+Scanned/image-only PDFs are OCR'd on demand by Delamain when `tesseract-ocr` and
+poppler are installed. `./install.sh` installs those tools; see
+[docs/INSTALL.md](INSTALL.md).
+
 ## Manifest format
 
 ```json
