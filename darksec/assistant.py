@@ -237,13 +237,12 @@ def _history_is_poisoned(m: dict) -> bool:
     return False
 
 
-def _quick_extract(path_str: str, max_chars: int = 1500, allow_ocr: bool = False) -> str:
+def _quick_extract(path_str: str, max_chars: int = 1500) -> str:
     """Best-effort, short text extraction for a single document.
 
-    Used when a library hit has no indexed text yet. Never raises. OCR is off by
-    default because it can take minutes per page on CPU and this runs on the
-    critical path before an assistant reply; explicit document lookups use the
-    library tool instead.
+    Used when a library hit has no indexed text yet. Never raises. Scanned PDFs
+    are handled by the library tool's OCR path instead of blocking this quick
+    pre-reply extraction.
     """
     if not path_str:
         return ""
@@ -279,23 +278,6 @@ def _quick_extract(path_str: str, max_chars: int = 1500, allow_ocr: bool = False
                     return text.strip()
         except Exception:
             pass
-        if allow_ocr:
-            # OCR fallback for scanned/image PDFs (requires tesseract + pdf2image)
-            try:
-                from pdf2image import convert_from_path
-                import pytesseract
-                images = convert_from_path(str(p), dpi=150, first_page=1, last_page=2)
-                ocr_chunks = []
-                for img in images:
-                    try:
-                        ocr_chunks.append(pytesseract.image_to_string(img))
-                    except Exception:
-                        continue
-                text = "\n".join(ocr_chunks)[:max_chars]
-                if text.strip():
-                    return text.strip()
-            except Exception:
-                pass
     if ext in (".txt", ".md"):
         try:
             return p.read_text(encoding="utf-8", errors="ignore")[:max_chars].strip()

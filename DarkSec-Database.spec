@@ -20,7 +20,9 @@ a = Analysis(
         ('./prepper', 'prepper'),
         ('./water_food', 'water_food')
     ],
-    hiddenimports=['darksec.updater', 'darksec.alpr', 'darksec.docbundle'],
+    hiddenimports=['darksec.updater', 'darksec.alpr', 'darksec.docbundle',
+                   'sgp4', 'sgp4.api', 'sgp4.propagation', 'scipy.signal',
+                   'PIL.Image', 'pypdf'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

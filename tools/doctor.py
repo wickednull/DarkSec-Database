@@ -30,9 +30,13 @@ PYTHON_PACKAGES = [
     ("cryptography", "cryptography"),
     ("ephem", "ephem"),
     ("numpy", "NumPy"),
+    ("scipy", "SciPy (SDR DSP)"),
+    ("PIL", "Pillow (SDR imagery)"),
     ("requests", "requests"),
+    ("charset_normalizer", "charset-normalizer"),
     ("qrcode", "qrcode"),
     ("pypdf", "pypdf (PDF text fallback)"),
+    ("sgp4", "sgp4 (satellite propagation)"),
 ]
 
 REQUIRED_BINS = {

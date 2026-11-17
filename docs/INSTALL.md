@@ -35,6 +35,10 @@ packages, then runs `tools/doctor.py --strict`.
 | git | Program updates from the configured remote |
 | Node.js + npm | Electron desktop shell and optional map tooling |
 
+The Python requirements include FastAPI/Uvicorn, NumPy/SciPy, Pillow, sgp4,
+ephem, pypdf, qrcode, cryptography, psutil and charset-normalizer. Run
+`.venv/bin/python -m pip install -r requirements.txt` after editing them.
+
 Optional radio/GPS packages (`--with-sdr`): `rtl-sdr`, `hackrf`,
 `gpsd-clients`, `multimon-ng`, `direwolf`, and `dump1090` where the distro
 provides it. Radio hardware usually needs a replug or a new login session after
@@ -138,6 +142,11 @@ tools.
 
 **OCR language is wrong.** Install the matching tesseract language package and
 set `DARKSEC_OCR_LANG`, then restart.
+
+**Satellite view is empty or reports an import error.** The satellite
+propagation needs the `sgp4` Python package. Run `./install.sh` or
+`.venv/bin/python -m pip install -r requirements.txt`, then restart. The doctor
+lists `sgp4 (satellite propagation)`.
 
 **Electron opens but the backend does not start.** Run
 `./install.sh` so `.venv` exists, or launch with
