@@ -415,7 +415,7 @@ export async function render(root) {
       h("div", { class: "hint", text: "Deep indexing reads every PDF and can take hours on a large archive. It runs in the background; the console remains usable." }),
       h("div", { class: "sep" }),
       h("div", { class: "side-label", text: "DOCUMENT LIBRARY BUNDLE" }),
-      field("Manifest URL", bundleUrl, "Direct HTTPS URL to document-library.bundle.json. GitHub Releases, a static host, or Internet Archive work; Proton Drive share pages usually do not."),
+      field("Manifest URL", bundleUrl, "Official bundle manifest from the DarkSec GitHub release. Leave this URL unless a newer release provides a different manifest."),
       h("div", { class: "row wrap mt-8" }, bundleDownloadBtn, bundleCancelBtn),
       bundleProgress,
       bundleJobText,

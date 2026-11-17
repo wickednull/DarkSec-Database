@@ -5,10 +5,7 @@ library-relative paths such as ``medical/foo.pdf``. The installer downloads to
 ``fielddata/library/.parts``, verifies SHA-256, extracts only document files
 into ``fielddata/library``, deletes the archive, and starts a metadata index.
 
-Hosting is intentionally provider-neutral: the manifest URL can point at a
-GitHub Release asset, a static host, an Internet Archive item, or any direct
-HTTPS URL. Proton Drive share pages are not direct file URLs and usually need
-to be exported or mirrored to a direct-download host first.
+The manifest and parts are published as assets on the project's GitHub release.
 """
 from __future__ import annotations
 
@@ -185,7 +182,7 @@ def status() -> dict[str, Any]:
         "local_bytes": total,
         "disk_free": free,
         "job": job_state(),
-        "note": "Only install document bundles you are legally allowed to redistribute. Bundle hosting is provider-neutral; a direct manifest URL is required.",
+        "note": "Only install document bundles you are legally allowed to redistribute. The manifest and parts are downloaded from the configured release.",
     }
 
 

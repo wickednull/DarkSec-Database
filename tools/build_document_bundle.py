@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build a split ZIP document-library bundle and manifest.
 
-The resulting files can be uploaded to any direct-download host (GitHub
-Releases, a static server, Internet Archive, etc.). Point DarkSec at the
-manifest URL in Settings -> Document library -> Document library bundle.
+The resulting files are uploaded to the project's GitHub release. Point DarkSec
+at the release manifest URL in Settings -> Document library -> Document
+library bundle.
 
 Usage:
     python3 tools/build_document_bundle.py --out dist/document-library
@@ -139,11 +139,8 @@ def build(docs: list[tuple[Path, Path, int]], out_dir: Path, part_size: int,
         f"Archive bytes: {total_bytes / 1073741824:.2f} GB\n"
         f"Parts: {len(parts)}\n\n"
         "Upload every .zip part and document-library.bundle.json to the same\n"
-        "direct-download location, then set the manifest URL in DarkSec:\n"
+        "GitHub release, then use the preconfigured manifest URL in DarkSec:\n"
         "Settings -> Document library -> Manifest URL -> Download document library.\n\n"
-        "Recommended hosting: GitHub Releases (2 GB per asset limit), a static\n"
-        "web host, or Internet Archive. Proton Drive share pages are not direct\n"
-        "file URLs; export/mirror the parts to a direct-download host first.\n\n"
         f"{LICENSE_NOTE}\n",
         encoding="utf-8",
     )

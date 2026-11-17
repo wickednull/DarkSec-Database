@@ -292,13 +292,11 @@ screen. `DARKSEC_NO_INDEX=1` or `--no-index` disables automatic indexing.
 
 ### Downloading the document library
 
-**Settings → Document library → Document library bundle** can install a packaged
-library from a manifest URL. Build a split bundle with
+**Settings → Document library → Document library bundle** can install the
+packaged library from its GitHub release manifest. Build a split bundle with
 `python3 tools/build_document_bundle.py`, upload the parts plus
-`document-library.bundle.json` to a direct-download host (GitHub Releases is
-recommended; Proton Drive share pages are not direct file URLs), then press
-**DOWNLOAD DOCUMENT LIBRARY**. The project release URL is preconfigured; the
-field can be changed for another host. See
+`document-library.bundle.json` to a GitHub release, then press
+**DOWNLOAD DOCUMENT LIBRARY**. The official release URL is preconfigured. See
 [docs/DOCUMENT_LIBRARY_BUNDLE.md](docs/DOCUMENT_LIBRARY_BUNDLE.md).
 
 ## SDR notes

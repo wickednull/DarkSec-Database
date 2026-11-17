@@ -1,8 +1,7 @@
 # Document library bundles
 
-DarkSec can install a packaged document library from a manifest URL. The
-installer is provider-neutral: the manifest and ZIP parts can live on GitHub
-Releases, a static web host, Internet Archive, or any direct HTTPS endpoint.
+DarkSec installs the packaged document library from its GitHub release
+manifest. The manifest and ZIP parts are release assets.
 
 ## Build the bundle
 
@@ -24,28 +23,16 @@ where the parts will be uploaded.
 
 ## Host the bundle
 
-Recommended: **GitHub Releases**. Create a release and upload every `.zip` part
-and `document-library.bundle.json` as release assets. GitHub gives direct asset
+Create a GitHub release and upload every `.zip` part and
+`document-library.bundle.json` as release assets. GitHub gives direct asset
 URLs and a 2 GB per-asset limit; `--part-size-mb 900` keeps each part well below
 that limit.
-
-Also workable:
-
-- a static HTTPS host you control;
-- Internet Archive items;
-- Cloudflare R2 or another object store with direct links.
-
-**Proton Drive:** a Proton Drive share link is a web-app URL, not a direct file
-URL, and the files are end-to-end encrypted. DarkSec cannot download from a
-normal Proton share page. If you want to use Proton, export/mirror the parts to
-a direct-download host first, or provide direct URLs from a host that supports
-plain HTTP GET. Do not use untrusted third-party "direct link" proxies.
 
 ## Install in DarkSec
 
 1. Open **Settings → Document library**.
-2. The project release URL is preconfigured in **Manifest URL**. Change it only
-   if you host the bundle somewhere else.
+2. The project release URL is preconfigured in **Manifest URL**. Leave it
+   unless a newer release provides a different manifest.
 3. Press **DOWNLOAD DOCUMENT LIBRARY**.
 4. The installer downloads each part, verifies SHA-256, extracts only document
    files into `fielddata/library/`, deletes the archives, and starts a metadata
