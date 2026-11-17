@@ -211,6 +211,199 @@ FLOAT_FIELDS = {"lat", "lon", "ele", "volume_l", "chlorine_ppm", "temp_c", "pres
                 "spo2", "glucose", "freq_hz"}
 
 
+# --------------------------------------------------------------------------
+# Global search metadata for operator records
+# --------------------------------------------------------------------------
+
+def _txt(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _num(value: Any, unit: str = "", digits: int = 1) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return _txt(value)
+    text = f"{number:.{digits}f}".rstrip("0").rstrip(".")
+    return f"{text}{unit}" if unit else text
+
+
+def _when(value: Any) -> str:
+    text = _txt(value)
+    if len(text) >= 16 and text[4] == "-" and text[10] in "T ":
+        return f"{text[:10]} {text[11:16]}"
+    return text[:16]
+
+
+def _join(*parts: Any) -> str:
+    return " · ".join(p for p in (_txt(x) for x in parts if x not in (None, "")) if p)
+
+
+def _bp(row: dict) -> str:
+    sys_v, dia_v = row.get("sys"), row.get("dia")
+    if sys_v in (None, "") and dia_v in (None, ""):
+        return ""
+    return f"{_num(sys_v, '', 0)}/{_num(dia_v, '', 0)} mmHg"
+
+
+RECORD_SEARCH_META: dict[str, dict] = {
+    "log_entries": {
+        "label": "LOG", "icon": "note", "route": "dashboard",
+        "title": lambda r: _txt(r.get("title")) or "Log entry",
+        "sub": lambda r: _join(r.get("category"), _when(r.get("ts"))),
+    },
+    "tasks": {
+        "label": "TASK", "icon": "check", "route": "dashboard",
+        "title": lambda r: _txt(r.get("title")) or "Task",
+        "sub": lambda r: _join(r.get("priority"), "DONE" if r.get("done") else "OPEN",
+                               _when(r.get("due"))),
+    },
+    "patients": {
+        "label": "PATIENT", "icon": "pulse", "route": "medical",
+        "title": lambda r: _txt(r.get("callsign")) or _txt(r.get("name")) or "Patient",
+        "sub": lambda r: _join(r.get("triage"), r.get("status"), _txt(r.get("name"))),
+    },
+    "vitals": {
+        "label": "VITALS", "icon": "pulse", "route": "medical",
+        "title": lambda r: _join("Vitals", f"patient #{_txt(r.get('patient_id'))}"
+                                 if r.get("patient_id") not in (None, "") else ""),
+        "sub": lambda r: _join(_num(r.get("hr"), " bpm", 0), _bp(r),
+                               _num(r.get("spo2"), "% SpO2", 0), _when(r.get("ts"))),
+    },
+    "medication_log": {
+        "label": "MEDS", "icon": "flask", "route": "medical",
+        "title": lambda r: _txt(r.get("medication")) or "Medication",
+        "sub": lambda r: _join(r.get("dose"), r.get("route"), r.get("administered_by"),
+                               _when(r.get("ts"))),
+    },
+    "weather_log": {
+        "label": "WEATHER", "icon": "cloud", "route": "weather",
+        "title": lambda r: _txt(r.get("cloud_type")) or "Weather observation",
+        "sub": lambda r: _join(_num(r.get("temp_c"), " °C"),
+                               _num(r.get("pressure_hpa"), " hPa", 0),
+                               _num(r.get("wind_kmh"), " km/h", 0), _when(r.get("ts"))),
+    },
+    "water_log": {
+        "label": "WATER", "icon": "drop", "route": "supply",
+        "title": lambda r: _txt(r.get("source")) or "Water log",
+        "sub": lambda r: _join(_num(r.get("volume_l"), " L"), r.get("method"),
+                               _num(r.get("chlorine_ppm"), " ppm"), _when(r.get("ts"))),
+    },
+    "power_log": {
+        "label": "POWER", "icon": "bolt", "route": "supply",
+        "title": lambda r: "Power log",
+        "sub": lambda r: _join(_num(r.get("battery_pct"), "% battery", 0),
+                               _num(r.get("fuel_l"), " L fuel"), _num(r.get("load_w"), " W"),
+                               _when(r.get("ts"))),
+    },
+    "rad_log": {
+        "label": "RADIATION", "icon": "radiation", "route": "cbrn",
+        "title": lambda r: _txt(r.get("location")) or "Radiation log",
+        "sub": lambda r: _join(_num(r.get("dose_rate_usv_h"), " µSv/h", 2),
+                               _num(r.get("cumulative_usv"), " µSv", 0), _when(r.get("ts"))),
+    },
+    "waypoints": {
+        "label": "WAYPOINT", "icon": "pin",
+        "route": lambda r: f"#/map?wp={r.get('id')}",
+        "title": lambda r: _txt(r.get("name")) or "Waypoint",
+        "sub": lambda r: _join(f"{_num(r.get('lat'), '', 4)}, {_num(r.get('lon'), '', 4)}",
+                               r.get("type")),
+    },
+    "tracks": {
+        "label": "TRACK", "icon": "route", "route": "map",
+        "title": lambda r: _txt(r.get("name")) or "Track",
+        "sub": lambda r: _join("Track", _when(r.get("created"))),
+    },
+    "radio_log": {
+        "label": "RADIO", "icon": "radio", "route": "comms",
+        "title": lambda r: _txt(r.get("callsign")) or _txt(r.get("summary")) or "Radio log",
+        "sub": lambda r: _join(_num((r.get("freq_hz") or 0) / 1e6 if r.get("freq_hz") else None,
+                                   " MHz", 4), r.get("mode"), _when(r.get("ts"))),
+    },
+    "incidents": {
+        "label": "INCIDENT", "icon": "warning", "route": "#/security?tab=incidents",
+        "title": lambda r: _txt(r.get("title")) or "Incident",
+        "sub": lambda r: _join(r.get("severity"), r.get("category"),
+                               "RESOLVED" if r.get("resolved") else "OPEN", _when(r.get("ts"))),
+    },
+    "inventory": {
+        "label": "INVENTORY", "icon": "box", "route": "logistics",
+        "title": lambda r: _txt(r.get("name")) or "Inventory item",
+        "sub": lambda r: _join(_join(_num(r.get("qty")), r.get("unit")), r.get("category"),
+                               r.get("location")),
+    },
+    "caches": {
+        "label": "CACHE", "icon": "database", "route": "logistics",
+        "title": lambda r: _txt(r.get("name")) or "Cache",
+        "sub": lambda r: _join(r.get("status"), _txt(r.get("contents"))[:70]),
+    },
+    "comms_plans": {
+        "label": "COMMS PLAN", "icon": "radio", "route": "comms",
+        "title": lambda r: _txt(r.get("name")) or "Comms plan",
+        "sub": lambda r: _join("Comms plan", _when(r.get("created"))),
+    },
+    "opords": {
+        "label": "OPORD", "icon": "note", "route": "logistics",
+        "title": lambda r: _txt(r.get("title")) or "Operations order",
+        "sub": lambda r: _join("Operations order", _when(r.get("created"))),
+    },
+    "trip_plans": {
+        "label": "TRIP", "icon": "route", "route": "logistics",
+        "title": lambda r: _txt(r.get("name")) or "Trip plan",
+        "sub": lambda r: _join(r.get("status"), _when(r.get("departure_at")),
+                               r.get("emergency_contact")),
+    },
+}
+
+
+def _title_rank(title: Any, qll: str, exact: int, contains: int, other: int) -> int:
+    text = _txt(title).lower()
+    if text == qll:
+        return exact
+    if qll in text:
+        return contains
+    return other
+
+
+def _clean_snippet(text: Any, limit: int = 110) -> str:
+    """Normalise a full-text excerpt and drop decoration-only runs."""
+    clean = re.sub(r"\[\[\[|\]\]\]", "", _txt(text))
+    clean = re.sub(r"[\x00-\x1f\x7f]", " ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    clean = re.sub(r"[○●•]{2,}", " ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if not clean:
+        return ""
+    letters = sum(ch.isalnum() for ch in clean)
+    if letters < 12 or letters / max(1, len(clean)) < 0.35:
+        return ""
+    return clean[: limit - 1].rstrip() + "…" if len(clean) > limit else clean
+
+
+def _search_snippet(row: dict, fields: list[str], tokens: list[str], width: int = 42) -> str:
+    """Return a short excerpt around the first matching token."""
+    for name in fields:
+        text = _txt(row.get(name)).replace("\n", " ")
+        if not text:
+            continue
+        low = text.lower()
+        for token in tokens:
+            pos = low.find(token)
+            if pos < 0:
+                continue
+            start = max(0, pos - width // 3)
+            end = min(len(text), pos + len(token) + width)
+            excerpt = text[start:end].strip()
+            if start > 0:
+                excerpt = "…" + excerpt
+            if end < len(text):
+                excerpt = excerpt + "…"
+            return excerpt
+    return ""
+
+
 def _clean_value(field: str, value: Any) -> Any:
     if value is None:
         return None
@@ -6128,30 +6321,116 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
 
     # --------------------------------------------------------------- search
     @app.get("/api/search")
-    def global_search(request: Request, q: str = Query(..., min_length=1), limit: int = Query(20, ge=1, le=100)):
+    def global_search(request: Request, q: str = Query(..., min_length=1), limit: int = Query(40, ge=1, le=200)):
         d = db(request)
-        ql = q.strip().lower()
-        results = []
-        for card in REFERENCE_DATA["cards"]:
-            hay = f"{card['title']} {card['category']} {card['body']}".lower()
-            if ql in hay:
-                results.append({"type": "REFERENCE", "id": card["id"], "title": card["title"],
-                                "subtitle": card["category"], "view": "manual", "payload": f"card:{card['id']}"})
-        for doc in MANUAL_INDEX["docs"]:
-            if ql in (doc["title"] + " " + doc["tagline"]).lower():
-                results.append({"type": "MANUAL", "id": doc["id"], "title": doc["title"],
-                                "subtitle": doc["tagline"], "view": "manual", "payload": f"doc:{doc['id']}"})
+        ql = q.strip()
+        qll = ql.lower()
+        opsec = bool(d.all_settings().get("opsec_mode"))
+        tokens = [t for t in re.split(r"\s+", qll) if t][:6] or [qll]
+
+        documents: list[dict] = []
+        records: list[dict] = []
+        references: list[dict] = []
+        manuals: list[dict] = []
+        frequencies: list[dict] = []
+
+        # Full-text document library (bundle PDFs, EPUBs, text).
         try:
-            for item in library.search(d, q, None, min(limit, 10)):
-                results.append({"type": "DOCUMENT", "id": str(item["id"]), "title": item["name"],
-                                "subtitle": item["category"], "view": "library",
-                                "payload": f"doc:{item['id']}", "snippet": item.get("snippet", "")})
+            for item in library.search(d, ql, None, 10):
+                snippet = _clean_snippet(item.get("snippet"))
+                documents.append({
+                    "type": "DOCUMENT", "kind": "document", "icon": "file",
+                    "id": str(item["id"]), "title": item["name"],
+                    "subtitle": snippet or _txt(item.get("category")) or "Document library",
+                    "route": f"#/library?doc={item['id']}",
+                    "score": _title_rank(item["name"], qll, 95, 70, 35),
+                })
         except Exception:
             pass
-        for row in d.query("SELECT * FROM waypoints WHERE name LIKE ? LIMIT 5", (f"%{q}%",)):
-            results.append({"type": "WAYPOINT", "id": str(row["id"]), "title": row["name"],
-                            "subtitle": f"{row['lat']:.4f}, {row['lon']:.4f}",
-                            "view": "map", "payload": f"wp:{row['id']}"})
+
+        # Operator records across every searchable table.
+        for table, spec in RECORD_TABLES.items():
+            meta = RECORD_SEARCH_META.get(table)
+            if not meta:
+                continue
+            fields = [f for f in (spec.get("search") or []) if re.fullmatch(r"[a-z_]+", f)]
+            if not fields:
+                continue
+            clauses, params = [], []
+            for token in tokens:
+                clauses.append("(" + " OR ".join(f"COALESCE({f}, '') LIKE ?" for f in fields) + ")")
+                params.extend([f"%{token}%"] * len(fields))
+            order = spec.get("order") or "id DESC"
+            try:
+                rows = d.query(
+                    f"SELECT * FROM {table} WHERE {' AND '.join(clauses)} ORDER BY {order} LIMIT 3",
+                    params,
+                )
+            except Exception:
+                continue
+            for row in rows:
+                r = dict(row)
+                title = _txt(meta["title"](r)) or f"{meta['label']} #{r.get('id')}"
+                subtitle = _txt(meta["sub"](r)) if meta.get("sub") else ""
+                if opsec and table == "waypoints":
+                    subtitle = _join("POSITION MASKED", r.get("type"))
+                snippet = _search_snippet(r, fields, tokens)
+                if snippet and snippet.lower() not in title.lower():
+                    subtitle = _join(subtitle, snippet) if subtitle else snippet
+                route = meta.get("route", "")
+                route = route(r) if callable(route) else _txt(route)
+                if route and not route.startswith("#"):
+                    route = "#/" + route.lstrip("/")
+                records.append({
+                    "type": meta["label"], "kind": "record", "icon": meta.get("icon", "info"),
+                    "table": table, "id": r.get("id"), "title": title,
+                    "subtitle": subtitle, "route": route,
+                    "score": _title_rank(title, qll, 100, 80, 45),
+                })
+
+        # Manual documents and reference cards.
+        for doc in MANUAL_INDEX["docs"]:
+            hay = f"{doc.get('title', '')} {doc.get('tagline', '')}".lower()
+            if all(token in hay for token in tokens):
+                manuals.append({
+                    "type": "MANUAL", "kind": "manual", "icon": "book",
+                    "id": doc["id"], "title": doc["title"],
+                    "subtitle": doc.get("tagline", "Field manual"),
+                    "route": f"#/manual?doc={doc['id']}",
+                    "score": _title_rank(doc["title"], qll, 90, 70, 50),
+                })
+        for card in REFERENCE_DATA["cards"]:
+            hay = f"{card.get('title', '')} {card.get('category', '')} {card.get('body', '')}".lower()
+            if all(token in hay for token in tokens):
+                references.append({
+                    "type": "REFERENCE", "kind": "reference", "icon": "book",
+                    "id": card["id"], "title": card["title"],
+                    "subtitle": card.get("category", "Reference"),
+                    "route": f"#/manual?card={card['id']}",
+                    "score": _title_rank(card["title"], qll, 90, 65, 30),
+                })
+
+        # Radio frequencies (receive reference).
+        for channel in FREQ_DATA.get("channels", []):
+            hay = " ".join(_txt(channel.get(k)) for k in
+                           ("name", "use", "region", "mode", "priority")).lower()
+            if all(token in hay for token in tokens):
+                frequencies.append({
+                    "type": "FREQUENCY", "kind": "frequency", "icon": "radio",
+                    "id": f"{channel.get('name', '')} {channel.get('mhz', '')}",
+                    "title": channel.get("name") or "Channel",
+                    "subtitle": _join(f"{channel.get('mhz')} MHz", channel.get("mode"),
+                                      channel.get("use"), channel.get("priority")),
+                    "route": (f"#/sdr?freq={channel.get('mhz')}"
+                              f"&mode={_txt(channel.get('mode')).lower()}"),
+                    "score": _title_rank(channel.get("name"), qll, 85, 65, 35),
+                })
+
+        # Best title matches first; body-only matches follow.
+        results = documents + records + references + manuals + frequencies
+        results.sort(key=lambda r: -int(r.get("score", 0)))
+        for r in results:
+            r.pop("score", None)
         return {"query": q, "results": results[:limit]}
 
     # ---------------------------------------------------------------- purge

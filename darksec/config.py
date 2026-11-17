@@ -85,7 +85,7 @@ def default_settings() -> dict:
         "dark_theme": "",
         "light_theme": "daylight",
         "font_scale": 1.0,
-        "sound": True,
+        "sound": False,
         "scanlines": True,
         "sdr_rx_gain": 40,
         "sdr_lna_gain": 32,

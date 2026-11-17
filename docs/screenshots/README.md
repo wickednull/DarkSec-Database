@@ -11,6 +11,7 @@ Included:
 - `defcon-tracker.png` — DEFCON tracker and overview stats.
 - `situation-report.png` — main dashboard / SITREP.
 - `situation-report-light.png` — the same dashboard in the Daylight light theme.
+- `global-search.png` — top-bar global search across records, documents and references.
 - `document-library.png` — document library and full-text search.
 - `security-vault.png` — vault and security page.
 

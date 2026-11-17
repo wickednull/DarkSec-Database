@@ -5,6 +5,7 @@ import {
 } from "./components.js";
 import { openRecordForm } from "./records.js";
 import { positionConfidence, opsecActive } from "./views/shared.js?v=opsec-1";
+import { setSoundEnabled } from "./sound.js";
 
 import * as dashboard from "./views/dashboard.js?v=better-2";
 import * as mapView from "./views/map.js?v=map-upgrade-11";
@@ -217,7 +218,7 @@ function bindChrome() {
   const assistantBtn = document.getElementById("assistantBtn");
   if (assistantBtn) assistantBtn.addEventListener("click", () => { location.hash = "#/assistant"; closeSidebar(); });
   const searchBtn = document.getElementById("searchBtn");
-  if (searchBtn) searchBtn.addEventListener("click", openPalette);
+  if (searchBtn) searchBtn.addEventListener("click", () => openPalette({ search: true }));
 
   const opsecToggle = document.getElementById("opsecToggle");
   if (opsecToggle) opsecToggle.addEventListener("click", () => toggleOpsec(!store.state.opsec));
@@ -254,7 +255,7 @@ function bindChrome() {
       closePalette();
     } else if (e.key === "/" && !isTyping(e.target)) {
       e.preventDefault();
-      openPalette();
+      openPalette({ search: true });
     }
   });
   window.addEventListener("online", () => { pollSync(); toast("Network online — automatic sync resumes"); });
@@ -309,6 +310,7 @@ function applyAppearance() {
   }
   document.body.classList.toggle("no-scan", !s.scanlines);
   document.body.classList.toggle("opsec", !!s.opsec_mode);
+  setSoundEnabled(!!s.sound);
   const opsecToggle = document.getElementById("opsecToggle");
   if (opsecToggle) opsecToggle.setAttribute("aria-checked", s.opsec_mode ? "true" : "false");
   const scan = document.getElementById("scanlines");
@@ -624,6 +626,7 @@ function commandList() {
     commands.push({ type: "VIEW", title: r.title, subtitle: r.group, icon: r.icon, run: () => { location.hash = `#/${id}`; } });
   }
   commands.push(
+    { type: "ACTION", title: "Search database", subtitle: "Records, documents, references, frequencies", icon: "search", run: () => openPalette({ search: true }) },
     { type: "ACTION", title: "Open Delamain", subtitle: "Local AI assistant (Ollama)", icon: "cpu", run: () => { location.hash = "#/assistant"; } },
     { type: "ACTION", title: "New log entry", subtitle: "Record an observation", icon: "note", run: () => openRecordForm({ table: "log_entries" }) },
     { type: "ACTION", title: "New task", subtitle: "Add to mission list", icon: "check", run: () => openRecordForm({ table: "tasks" }) },
@@ -698,23 +701,31 @@ export function printText(text, title = "DARKSEC") {
   setTimeout(() => { try { win.focus(); win.print(); } catch {} }, 250);
 }
 
-function openPalette() {
+function openPalette(opts = {}) {
   if (paletteOpen) return;
+  const searchMode = !!opts.search;
   paletteOpen = true;
   palettePreviousFocus = document.activeElement;
   const root = document.getElementById("paletteRoot");
   const backdrop = h("div", { class: "palette-backdrop" });
-  const palette = h("div", { class: "palette", role: "dialog", "aria-modal": "true", "aria-label": "Command palette" });
+  const palette = h("div", { class: "palette", role: "dialog", "aria-modal": "true", "aria-label": searchMode ? "Search database" : "Command palette" });
   const inputRow = h("div", { class: "palette-input" });
   inputRow.appendChild(icon("search"));
-  const search = h("input", { type: "text", placeholder: "Search commands, documents, references, waypoints…", autocomplete: "off", spellcheck: false });
+  const search = h("input", {
+    type: "text",
+    placeholder: searchMode ? "Search the database: records, documents, references, frequencies…"
+      : "Type a command, or search records, documents, references…",
+    autocomplete: "off", spellcheck: false,
+  });
   inputRow.appendChild(search);
   inputRow.appendChild(h("span", { class: "tiny dim", text: "ESC" }));
   const results = h("div", { class: "palette-results" });
   const hint = h("div", { class: "palette-hint" },
     h("span", {}, h("kbd", { text: "↑↓" }), " navigate"),
-    h("span", {}, h("kbd", { text: "↵" }), " run"),
-    h("span", {}, h("kbd", { text: "ctrl+k" }), " toggle"));
+    h("span", {}, h("kbd", { text: "↵" }), " open"),
+    searchMode
+      ? h("span", {}, h("kbd", { text: "ctrl+k" }), " commands")
+      : h("span", {}, h("kbd", { text: "/" }), " database search"));
   palette.append(inputRow, results, hint);
   backdrop.appendChild(palette);
   root.appendChild(backdrop);
@@ -722,7 +733,10 @@ function openPalette() {
   let items = [];
   let active = 0;
   let seq = 0;
-  const commands = commandList();
+  let pendingSearch = null;
+  let loadedQuery = "";
+  let searching = false;
+  const commands = searchMode ? [] : commandList();
 
   function close() {
     if (!paletteOpen) return;
@@ -740,7 +754,10 @@ function openPalette() {
   function render() {
     results.replaceChildren();
     if (!items.length) {
-      results.appendChild(h("div", { class: "palette-empty", text: "No matches. Try a callsign, document name, frequency or manual topic." }));
+      const text = searching ? "Searching the database…"
+        : (searchMode && !search.value.trim()) ? "Type to search records, documents, references and frequencies."
+        : "No matches. Try a callsign, document name, frequency or manual topic.";
+      results.appendChild(h("div", { class: "palette-empty", text }));
       return;
     }
     items.forEach((item, idx) => {
@@ -757,44 +774,64 @@ function openPalette() {
     });
   }
   function activate(idx) {
+    if (!paletteOpen) return;
     const item = items[idx];
     if (!item) return;
     close();
     setTimeout(() => { try { item.run(); } catch (err) { toast(err.message || "Command failed", "error"); } }, 20);
   }
   function searchLocal(q) {
+    if (searchMode) return [];
     const ql = q.toLowerCase();
     return commands.filter((c) => (c.title + " " + (c.subtitle || "")).toLowerCase().includes(ql)).slice(0, 9);
   }
   async function doSearch(q) {
     const local = searchLocal(q);
     if (!q.trim()) {
+      seq++;
+      pendingSearch = null;
+      loadedQuery = "";
+      searching = false;
       items = local;
       active = 0;
       render();
       return;
     }
     const my = ++seq;
+    loadedQuery = "";
     items = local;
     active = 0;
+    searching = true;
     render();
+    const request = api.get(`/api/search?q=${encodeURIComponent(q)}&limit=40`);
+    pendingSearch = request;
     try {
-      const res = await api.get(`/api/search?q=${encodeURIComponent(q)}&limit=12`);
+      const res = await request;
       if (my !== seq) return;
       const remote = (res.results || []).map((r) => ({
         type: r.type, title: r.title, subtitle: r.subtitle,
-        icon: r.type === "DOCUMENT" ? "file" : r.type === "MANUAL" ? "book" : r.type === "WAYPOINT" ? "pin" : "info",
+        icon: r.icon || (r.type === "DOCUMENT" ? "file" : r.type === "MANUAL" ? "book"
+          : r.type === "WAYPOINT" ? "pin" : r.type === "FREQUENCY" ? "radio"
+          : r.kind === "record" ? "database" : "info"),
         run: () => openSearchResult(r),
       }));
       // De-duplicate command entries already shown.
       const seen = new Set(items.map((i) => i.title + "|" + i.subtitle));
       items = [...items, ...remote.filter((r) => !seen.has(r.title + "|" + r.subtitle))];
-      render();
-    } catch {}
+      loadedQuery = q;
+    } catch {
+    } finally {
+      if (pendingSearch === request) pendingSearch = null;
+      if (my === seq) {
+        searching = false;
+        render();
+      }
+    }
   }
   let debounce;
   search.addEventListener("input", () => {
     clearTimeout(debounce);
+    loadedQuery = "";
     const q = search.value;
     debounce = setTimeout(() => doSearch(q), 180);
   });
@@ -811,7 +848,23 @@ function openPalette() {
     }
     if (e.key === "ArrowDown") { e.preventDefault(); setActive(active + 1); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setActive(active - 1); }
-    else if (e.key === "Enter") { e.preventDefault(); activate(active); }
+    else if (e.key === "Enter") {
+      e.preventDefault();
+      const q = search.value.trim();
+      if (q) {
+        clearTimeout(debounce);
+        if (!pendingSearch && loadedQuery !== q) doSearch(q);
+        const pending = pendingSearch;
+        if (pending) {
+          // Let the database search land before running the selection.
+          pending.finally(() => {
+            if (!pendingSearch || pendingSearch === pending) activate(active);
+          });
+          return;
+        }
+      }
+      activate(active);
+    }
   }
   document.addEventListener("keydown", keyHandler, true);
   backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) close(); });
@@ -829,17 +882,18 @@ function closePalette() {
   }
 }
 
-function openSearchResult(r) {
-  if (r.view === "library") {
-    location.hash = `#/library?doc=${encodeURIComponent(String(r.payload).replace(/^doc:/, ""))}`;
-  } else if (r.view === "manual") {
-    const payload = String(r.payload || "");
-    if (payload.startsWith("card:")) location.hash = `#/manual?card=${encodeURIComponent(payload.slice(5))}`;
-    else location.hash = `#/manual?doc=${encodeURIComponent(payload.replace(/^doc:/, ""))}`;
-  } else if (r.view === "map") {
-    location.hash = `#/map?wp=${encodeURIComponent(String(r.payload).replace(/^wp:/, ""))}`;
-  } else {
-    location.hash = `#/${r.view}`;
+async function openSearchResult(r) {
+  if (r.route) location.hash = r.route;
+  if (r.kind === "record" && r.table && r.id !== undefined && r.id !== null) {
+    // Waypoints already resolve through the map deep link.
+    if (r.table === "waypoints") return;
+    try {
+      const out = await api.get(`/api/records/${encodeURIComponent(r.table)}/${encodeURIComponent(r.id)}`);
+      const item = out.item || out;
+      setTimeout(() => openRecordForm({ table: r.table, item }), r.route ? 280 : 0);
+    } catch (err) {
+      toast(err.message || "Could not open that record", "error");
+    }
   }
 }
 

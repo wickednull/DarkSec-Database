@@ -1,4 +1,5 @@
 import { icon, hydrateIcons } from "./icons.js";
+import { soundCue } from "./sound.js";
 
 export { icon, hydrateIcons } from "./icons.js";
 
@@ -211,6 +212,7 @@ export function toast(message, tone = "", ttl = 4200) {
   const close = iconBtn("close", "Dismiss", () => remove());
   node.appendChild(close);
   stack.appendChild(node);
+  soundCue(tone === "error" ? "error" : tone === "warn" ? "warn" : "ok");
   const timer = setTimeout(remove, ttl);
   function remove() {
     clearTimeout(timer);

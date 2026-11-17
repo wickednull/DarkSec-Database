@@ -279,9 +279,23 @@ code, kbd, pre { font-family: var(--font-mono); }
   mask-image: radial-gradient(circle at 50% 30%, #000 20%, transparent 82%);
 }
 .fx-scan {
-  position: fixed; inset: 0; pointer-events: none; z-index: 3; opacity: .5;
-  background: repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0px, rgba(0,0,0,0) 2px, rgba(0,0,0,.16) 3px);
-  mix-blend-mode: multiply;
+  position: fixed; inset: 0; pointer-events: none; z-index: 3; opacity: .72;
+  overflow: hidden; mix-blend-mode: multiply;
+  background: repeating-linear-gradient(to bottom,
+    rgba(0,0,0,0) 0 1px, rgba(0,0,0,.26) 1px 2px, rgba(0,0,0,0) 2px 3px);
+}
+.fx-scan::after {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 26%;
+  background: linear-gradient(to bottom, transparent, rgba(var(--acc-rgb), .3), transparent);
+  mix-blend-mode: soft-light; opacity: .8;
+  animation: scanSweep 7s linear infinite;
+}
+@keyframes scanSweep {
+  0% { transform: translateY(-120%); }
+  100% { transform: translateY(560%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fx-scan::after { animation: none; opacity: .3; }
 }
 .fx-vignette {
   position: fixed; inset: 0; pointer-events: none; z-index: 1;
@@ -999,7 +1013,7 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 .palette-item .ic { width: 15px; height: 15px; color: var(--muted); }
 .palette-item .p-main { flex: 1; min-width: 0; }
 .palette-item .p-title { font-size: 11.5px; }
-.palette-item .p-sub { font-size: 9px; color: var(--muted); }
+.palette-item .p-sub { font-size: 9px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .palette-item .p-type { font-size: 8px; color: var(--muted-2); letter-spacing: .1em; }
 .palette-item.active, .palette-item:hover { background: rgba(var(--acc-rgb), .09); }
 .palette-item.active .ic { color: var(--acc); }
@@ -1334,8 +1348,12 @@ html[data-scheme="light"] body {
     radial-gradient(900px 700px at 110% 110%, rgba(0, 107, 133, 0.04), transparent 60%),
     var(--bg);
 }
-html[data-scheme="light"] .fx-scan,
 html[data-scheme="light"] .fx-vignette { display: none; }
+html[data-scheme="light"] .fx-scan {
+  opacity: .62;
+  background: repeating-linear-gradient(to bottom,
+    rgba(0,0,0,0) 0 1px, rgba(20,35,26,.16) 1px 2px, rgba(0,0,0,0) 2px 3px);
+}
 html[data-scheme="light"] .fx-grid { opacity: .28; }
 html[data-scheme="light"] ::selection { background: rgba(var(--acc-rgb), .18); color: var(--text-strong); }
 html[data-scheme="light"] .topbar {

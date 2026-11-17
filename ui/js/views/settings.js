@@ -8,6 +8,7 @@ import {
   kv, progressBar, statusTone, positionConfidence, manualPositionMetadata, gpsPositionMetadata,
   geocodedPositionMetadata, opsecActive,
 } from "./shared.js?v=opsec-1";
+import { soundCue, setSoundEnabled } from "../sound.js";
 
 export async function render(root) {
   root.replaceChildren(loading("LOADING CONFIGURATION"));
@@ -110,6 +111,23 @@ export async function render(root) {
   const epoch = input({ value: settings.epoch || "", placeholder: "ISO date/time, optional mission epoch" });
   const scanlines = checkbox("Scanline overlay", !!settings.scanlines);
   const sound = checkbox("Interface sound cues", !!settings.sound);
+  const soundTestBtn = btn("TEST CUE", { size: "sm", tone: "ghost", icon: "signal", onClick: () => {
+    const on = sound.querySelector("input").checked;
+    setSoundEnabled(on);
+    if (on) soundCue("ok");
+    else toast("Enable interface sound cues first", "warn");
+  } });
+  scanlines.querySelector("input").addEventListener("change", () => {
+    const on = scanlines.querySelector("input").checked;
+    document.body.classList.toggle("no-scan", !on);
+    const el = document.getElementById("scanlines");
+    if (el) el.style.display = on ? "" : "none";
+  });
+  sound.querySelector("input").addEventListener("change", () => {
+    const on = sound.querySelector("input").checked;
+    setSoundEnabled(on);
+    if (on) soundCue("ok");
+  });
   const opsec = checkbox("OPSEC blackout on start", !!settings.opsec_mode);
 
   const identity = panel({
@@ -126,7 +144,7 @@ export async function render(root) {
         field("Date format", dateFormat), field("Timezone", timezone, "auto uses the host clock."),
         h("div", { class: "wide" }, field("Mission epoch", epoch, "Shown as H+ / H- in the status bar."))),
       h("div", { class: "hint", text: "The sun/moon button in the top bar switches between the selected dark and light themes." }),
-      h("div", { class: "row wrap" }, scanlines, sound, opsec),
+      h("div", { class: "row wrap" }, scanlines, sound, soundTestBtn, opsec),
       h("div", { class: "row mt-10" }, btn("SAVE IDENTITY", { tone: "primary", icon: "save", onClick: saveIdentity }))),
   });
   grid.appendChild(identity);

@@ -332,6 +332,22 @@ def test_search_and_manual(client):
     assert doc.status_code == 200 and doc.text
 
 
+def test_global_search_covers_operator_records(client):
+    title = _unique("water filter task")
+    created = client.post("/api/records/tasks",
+                          json={"title": title, "detail": "replace the prefilter"}).json()
+    results = client.get("/api/search", params={"q": title, "limit": 40}).json()["results"]
+    hit = next((r for r in results if r.get("table") == "tasks" and r.get("id") == created["item"]["id"]), None)
+    assert hit is not None
+    assert hit["kind"] == "record" and hit["route"] == "#/dashboard"
+    assert hit["title"] == title
+    assert hit["subtitle"]
+
+    # Multiple words match across fields, not only as one contiguous phrase.
+    tokens = client.get("/api/search", params={"q": "replace prefilter"}).json()["results"]
+    assert any(r.get("id") == created["item"]["id"] and r.get("table") == "tasks" for r in tokens)
+
+
 # -------------------------------------------------------------------- defcon
 def test_defcon_parser_extracts_current_level():
     from darksec import defcon

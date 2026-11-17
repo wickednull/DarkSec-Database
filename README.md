@@ -39,6 +39,16 @@ between your saved dark and light themes. **Settings → Identity & display** se
 the background mode (Dark / Light / Follow system), both theme variants, and the
 accent colour.
 
+### Global search
+
+![Global search across records, documents and references](docs/screenshots/global-search.png)
+
+The magnifier in the top bar (or `/`) searches every operator record, the
+full-text document library, field-manual guides, reference cards and radio
+frequencies from one list. Matches open the owning view; a record also opens its
+edit form, and a library result opens the document. `Ctrl+K` remains the command
+palette.
+
 ## What is included
 
 - **SITREP dashboard** — readiness indicator, almanac, feeds, tasks, incidents,
@@ -48,6 +58,10 @@ accent colour.
   intel-coverage failure.
 - **Document library** — metadata + full-text search (SQLite FTS5) over the
   existing PDF/EPUB/etc. collection, with a bundled PDF.js reader.
+- **Global search** — the top-bar magnifier (or `/`) searches every operator
+  record (logs, tasks, medical, inventory, caches, comms, trips, waypoints),
+  the full document-library text, manual guides, reference cards and radio
+  frequencies in one list. `Ctrl+K` remains the command palette.
 - **Field manual** — 16 local Markdown guides, 40 quick-reference cards and 13
   equipment/event checklists.
 - **Navigation** — WGS-84 / UTM / MGRS conversion, celestial almanac, magnetic
