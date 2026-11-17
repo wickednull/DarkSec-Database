@@ -93,6 +93,10 @@ async function boot() {
   } catch {}
   bootEl.classList.add("done");
   setTimeout(() => bootEl.remove(), 600);
+  try {
+    const schemeQuery = window.matchMedia("(prefers-color-scheme: light)");
+    if (schemeQuery.addEventListener) schemeQuery.addEventListener("change", () => applyAppearance());
+  } catch {}
   window.addEventListener("hashchange", route);
   route();
   startClock();
@@ -221,6 +225,13 @@ function bindChrome() {
   const vaultPill = document.getElementById("vaultPill");
   if (vaultPill) vaultPill.addEventListener("click", () => { location.hash = "#/security?tab=vault"; });
 
+  const themeBtn = document.getElementById("themeBtn");
+  if (themeBtn) themeBtn.addEventListener("click", async () => {
+    const next = document.documentElement.dataset.scheme === "light" ? "dark" : "light";
+    try { await store.saveSettings({ theme_mode: next }); }
+    catch (err) { toast(err.message || "Could not change background", "error"); }
+  });
+
   const defconPill = document.getElementById("defconPill");
   if (defconPill) defconPill.addEventListener("click", () => { location.hash = "#/intel"; });
 
@@ -273,9 +284,21 @@ function closeSidebar() {
   menu?.setAttribute("aria-expanded", "false");
 }
 
+const LIGHT_THEMES = new Set(["daylight", "paper", "solarized", "contrast-light",
+  "cloud", "sand", "mint", "blueprint", "lavender"]);
+
 function applyAppearance() {
   const s = store.settings || {};
-  document.documentElement.dataset.theme = s.theme || "nightwatch";
+  const mode = s.theme_mode || "dark";
+  let systemLight = false;
+  try { systemLight = window.matchMedia("(prefers-color-scheme: light)").matches; } catch {}
+  const resolved = mode === "system" ? (systemLight ? "light" : "dark") : (mode === "light" ? "light" : "dark");
+  const theme = resolved === "light"
+    ? (s.light_theme || "daylight")
+    : (s.dark_theme || s.theme || "nightwatch");
+  const scheme = LIGHT_THEMES.has(theme) ? "light" : "dark";
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.scheme = scheme;
   document.documentElement.dataset.accent = s.accent || "green";
   const scale = Math.max(0.8, Math.min(1.5, Number(s.font_scale) || 1));
   if (window.darksecDesktop?.setZoom) {
@@ -290,6 +313,14 @@ function applyAppearance() {
   if (opsecToggle) opsecToggle.setAttribute("aria-checked", s.opsec_mode ? "true" : "false");
   const scan = document.getElementById("scanlines");
   if (scan) scan.style.display = s.scanlines ? "" : "none";
+  const themeIcon = document.getElementById("themeIcon");
+  if (themeIcon) themeIcon.replaceChildren(icon(scheme === "light" ? "moon" : "sun"));
+  const themeBtn = document.getElementById("themeBtn");
+  if (themeBtn) {
+    const label = scheme === "light" ? "Switch to dark background" : "Switch to light background";
+    themeBtn.title = label;
+    themeBtn.setAttribute("aria-label", label);
+  }
 }
 
 async function toggleOpsec(value) {

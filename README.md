@@ -27,6 +27,18 @@ database.
 | --- | --- |
 | ![Document library](docs/screenshots/document-library.png) | ![Security and vault](docs/screenshots/security-vault.png) |
 
+### Theme switching
+
+![Situation report in the Daylight light theme](docs/screenshots/situation-report-light.png)
+
+Dark and light backgrounds are both supported. Light themes include Daylight,
+Paper, Solarized, Cloud, Sand, Mint, Blueprint, Lavender and high-contrast
+light; dark themes include Nightwatch, Midnight, Blackout, Forest, Slate, Ocean,
+Ember, Plum and high contrast. The sun/moon button in the top bar switches
+between your saved dark and light themes. **Settings → Identity & display** sets
+the background mode (Dark / Light / Follow system), both theme variants, and the
+accent colour.
+
 ## What is included
 
 - **SITREP dashboard** — readiness indicator, almanac, feeds, tasks, incidents,
@@ -70,8 +82,10 @@ database.
   weighted threat index, solar/day-night state and live event logging into the
   mission log. Auto-sync pauses offline and in OPSEC mode.
 - **Settings** — identity, position, grid format, radio limits, map tiles,
-  appearance, feed source health/editing, vault custody, diagnostics and data
-  custody.
+  light/dark appearance (Daylight, Paper, Solarized, Cloud, Sand, Mint,
+  Blueprint, Lavender, high-contrast light and multiple dark themes, with a
+  top-bar sun/moon toggle), feed source health/editing, vault custody,
+  diagnostics and data custody.
 - **Local AI assistant (Delamain)** — optional chat backed by a local Ollama
   instance. Detects installed models, can include cached intelligence context,
   and has no cloud dependency. Configure the endpoint and model in Settings.

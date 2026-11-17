@@ -48,12 +48,33 @@ export async function render(root) {
   const callsign = input({ value: settings.callsign || "", maxlength: 40 });
   const team = input({ value: settings.team || "", maxlength: 80 });
   const operator = input({ value: settings.operator || "", maxlength: 80, placeholder: "Optional — avoid real names in the field" });
-  const theme = select([
+  const themeMode = select([
+    { value: "dark", label: "Dark background" },
+    { value: "light", label: "Light background" },
+    { value: "system", label: "Follow system" },
+  ], settings.theme_mode || "dark");
+  const darkTheme = select([
     { value: "nightwatch", label: "Nightwatch (default)" },
     { value: "midnight", label: "Midnight blue" },
     { value: "blackout", label: "Blackout" },
+    { value: "forest", label: "Forest" },
+    { value: "slate", label: "Slate" },
+    { value: "ocean", label: "Ocean" },
+    { value: "ember", label: "Ember" },
+    { value: "plum", label: "Plum" },
     { value: "contrast", label: "High contrast" },
-  ], settings.theme || "nightwatch");
+  ], settings.dark_theme || settings.theme || "nightwatch");
+  const lightTheme = select([
+    { value: "daylight", label: "Daylight (default)" },
+    { value: "paper", label: "Paper" },
+    { value: "solarized", label: "Solarized light" },
+    { value: "cloud", label: "Cloud" },
+    { value: "sand", label: "Sand" },
+    { value: "mint", label: "Mint" },
+    { value: "blueprint", label: "Blueprint" },
+    { value: "lavender", label: "Lavender" },
+    { value: "contrast-light", label: "High contrast light" },
+  ], settings.light_theme || "daylight");
   const accent = select([
     { value: "green", label: "Green phosphor" },
     { value: "amber", label: "Amber CRT" },
@@ -98,11 +119,13 @@ export async function render(root) {
       h("div", { class: "form-grid" },
         field("Callsign", callsign), field("Team", team),
         field("Operator", operator, "Optional. Stored only in the local database."),
-        field("Theme", theme), field("Accent", accent),
+        field("Background", themeMode), field("Accent", accent),
+        field("Dark theme", darkTheme), field("Light theme", lightTheme),
         field("Font size", fontScale, "Scales the whole interface."),
         field("Default grid", gridFormat), field("Units", units),
         field("Date format", dateFormat), field("Timezone", timezone, "auto uses the host clock."),
         h("div", { class: "wide" }, field("Mission epoch", epoch, "Shown as H+ / H- in the status bar."))),
+      h("div", { class: "hint", text: "The sun/moon button in the top bar switches between the selected dark and light themes." }),
       h("div", { class: "row wrap" }, scanlines, sound, opsec),
       h("div", { class: "row mt-10" }, btn("SAVE IDENTITY", { tone: "primary", icon: "save", onClick: saveIdentity }))),
   });
@@ -597,7 +620,10 @@ export async function render(root) {
       callsign: callsign.value.trim() || "NIGHTWATCH",
       team: team.value.trim(),
       operator: operator.value.trim(),
-      theme: theme.value,
+      theme_mode: themeMode.value,
+      dark_theme: darkTheme.value,
+      light_theme: lightTheme.value,
+      theme: themeMode.value === "light" ? lightTheme.value : darkTheme.value,
       accent: accent.value,
       font_scale: Number(fontScale.value),
       grid_format: gridFormat.value,
