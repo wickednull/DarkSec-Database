@@ -66,13 +66,18 @@ class LanManager:
             return False
 
     def stop(self) -> None:
-        if self._server is not None:
-            self._server.should_exit = True
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=5)
+        server = self._server
+        if server is not None:
+            server.should_exit = True
+        thread = self._thread
+        # Clear state before joining: the request that disables LAN access can
+        # itself be served by the LAN listener, so joining must not target the
+        # current thread. uvicorn will finish the response and exit on its own.
         self._server = None
         self._thread = None
         self.enabled = False
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5)
 
     def status(self, app=None) -> dict:
         ip = self.ip
