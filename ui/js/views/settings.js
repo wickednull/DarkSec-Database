@@ -2,7 +2,7 @@ import { api, download } from "../api.js";
 import { store } from "../store.js";
 import {
   h, panel, pageHead, btn, field, input, select, checkbox, badge, toast,
-  modal, fmt, loading, emptyState, confirmDialog,
+  modal, fmt, loading, emptyState, confirmDialog, icon,
 } from "../components.js";
 import {
   kv, progressBar, statusTone, positionConfidence, manualPositionMetadata, gpsPositionMetadata,
@@ -42,8 +42,83 @@ export async function render(root) {
     ],
   }));
 
-  const grid = h("div", { class: "panel-grid grid-2 mt-14" });
+  const SETTINGS_SECTIONS = [
+    { id: "identity", num: "01", label: "Identity", icon: "settings", title: "Identity & display",
+      desc: "Callsign, operator profile, theme, units and interface behavior." },
+    { id: "position", num: "02", label: "Position", icon: "compass", title: "Position & GPS",
+      desc: "Manual coordinates, verified fixes and browser-assisted phone GPS." },
+    { id: "radio", num: "03", label: "Radio & network", icon: "radio", title: "Radio & network",
+      desc: "LAN/mobile listeners, SDR gain defaults and the transmit interlock." },
+    { id: "maps", num: "04", label: "Maps & library", icon: "map", title: "Maps & library",
+      desc: "Offline tile sources, vector layers and the document archive." },
+    { id: "intel", num: "05", label: "Feeds & overlays", icon: "globe", title: "Feeds & overlays",
+      desc: "Public intelligence sources, CCTV catalogs and ALPR overlays." },
+    { id: "assistant", num: "06", label: "Assistant", icon: "cpu", title: "Delamain / local AI",
+      desc: "Local model connection, tool access, generation limits and privacy boundaries." },
+    { id: "system", num: "07", label: "System", icon: "database", title: "System & maintenance",
+      desc: "Host status, vault custody, audit trail, program updates and local backups." },
+  ];
+  const sectionsById = Object.fromEntries(SETTINGS_SECTIONS.map((s) => [s.id, s]));
+  const nav = h("nav", { class: "settings-nav", "aria-label": "Settings sections" });
+  const navButtons = {};
+  const scrollHost = document.querySelector(".main");
+
+  function settingsDetails(summary, ...children) {
+    return h("details", { class: "settings-details" },
+      h("summary", {}, typeof summary === "string" ? h("span", { text: summary }) : summary),
+      h("div", { class: "sd-body" }, ...children));
+  }
+
+  function setActiveSection(id) {
+    for (const [key, button] of Object.entries(navButtons)) {
+      button.classList.toggle("active", key === id);
+    }
+  }
+
+  function jumpToSection(id) {
+    const target = document.getElementById(`set-${id}`);
+    if (!target) return;
+    setActiveSection(id);
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  for (const section of SETTINGS_SECTIONS) {
+    const button = h("button", {
+      type: "button", class: "settings-nav-btn", title: section.title,
+      onClick: () => jumpToSection(section.id),
+    }, icon(section.icon), h("span", { text: section.label }));
+    navButtons[section.id] = button;
+    nav.appendChild(button);
+  }
+  root.appendChild(nav);
+  setActiveSection(SETTINGS_SECTIONS[0].id);
+
+  if (scrollHost) {
+    const onScroll = () => {
+      const threshold = scrollHost.getBoundingClientRect().top + 130;
+      let active = SETTINGS_SECTIONS[0].id;
+      for (const section of SETTINGS_SECTIONS) {
+        const head = document.getElementById(`set-${section.id}`);
+        if (head && head.getBoundingClientRect().top <= threshold) active = section.id;
+      }
+      setActiveSection(active);
+    };
+    scrollHost.addEventListener("scroll", onScroll, { passive: true });
+    cleanups.push(() => scrollHost.removeEventListener("scroll", onScroll));
+  }
+
+  const grid = h("div", { class: "panel-grid grid-2 settings-grid mt-14" });
   root.appendChild(grid);
+
+  function addSectionHead(id) {
+    const section = sectionsById[id];
+    if (!section) return;
+    grid.appendChild(h("div", { class: "settings-section-head", id: `set-${id}` },
+      h("div", { class: "ss-index", text: section.num }),
+      h("div", { class: "ss-copy" },
+        h("h2", { text: section.title }),
+        h("p", { text: section.desc }))));
+  }
 
   /* ------------------------------------------------------------ identity */
   const callsign = input({ value: settings.callsign || "", maxlength: 40 });
@@ -133,20 +208,33 @@ export async function render(root) {
   const identity = panel({
     title: "Identity & display",
     icon: "settings",
+    cls: "span-2",
     body: h("div", { class: "col" },
-      h("div", { class: "form-grid" },
-        field("Callsign", callsign), field("Team", team),
-        field("Operator", operator, "Optional. Stored only in the local database."),
-        field("Background", themeMode), field("Accent", accent),
-        field("Dark theme", darkTheme), field("Light theme", lightTheme),
-        field("Font size", fontScale, "Scales the whole interface."),
-        field("Default grid", gridFormat), field("Units", units),
-        field("Date format", dateFormat), field("Timezone", timezone, "auto uses the host clock."),
-        h("div", { class: "wide" }, field("Mission epoch", epoch, "Shown as H+ / H- in the status bar."))),
-      h("div", { class: "hint", text: "The sun/moon button in the top bar switches between the selected dark and light themes." }),
-      h("div", { class: "row wrap" }, scanlines, sound, soundTestBtn, opsec),
-      h("div", { class: "row mt-10" }, btn("SAVE IDENTITY", { tone: "primary", icon: "save", onClick: saveIdentity }))),
+      h("div", { class: "settings-identity-layout" },
+        h("div", { class: "col" },
+          h("div", { class: "settings-subhead", text: "Operator" }),
+          h("div", { class: "form-grid" },
+            field("Callsign", callsign), field("Team", team),
+            h("div", { class: "wide" }, field("Operator", operator, "Optional. Stored only in the local database."))),
+          h("div", { class: "col gap-6" },
+            scanlines, h("div", { class: "row gap-8" }, sound, soundTestBtn), opsec)),
+        h("div", { class: "col" },
+          h("div", { class: "settings-subhead", text: "Appearance" }),
+          h("div", { class: "form-grid" },
+            field("Background", themeMode), field("Accent", accent),
+            field("Dark theme", darkTheme), field("Light theme", lightTheme),
+            h("div", { class: "wide" }, field("Font size", fontScale, "Scales the whole interface."))),
+          h("div", { class: "hint", text: "The sun/moon button in the top bar switches between the selected dark and light themes." })),
+        h("div", { class: "col" },
+          h("div", { class: "settings-subhead", text: "Display & region" }),
+          h("div", { class: "form-grid" },
+            field("Default grid", gridFormat), field("Units", units),
+            field("Date format", dateFormat), field("Timezone", timezone, "auto uses the host clock."),
+            h("div", { class: "wide" }, field("Mission epoch", epoch, "Shown as H+ / H- in the status bar."))))),
+      h("div", { class: "settings-actions" },
+        btn("SAVE IDENTITY", { tone: "primary", icon: "save", onClick: saveIdentity }))),
   });
+  addSectionHead("identity");
   grid.appendChild(identity);
 
   /* ------------------------------------------------------------ position */
@@ -169,24 +257,26 @@ export async function render(root) {
     sub: "Used by navigation, almanac and map",
     icon: "compass",
     body: h("div", { class: "col" },
+      h("div", { class: "settings-subhead", text: "Coordinates" }),
       h("div", { class: "form-grid" },
         field("Latitude", lat), field("Longitude", lon),
         field("Elevation (m)", elevation), field("Magnetic declination (°)", declination, "Positive east. Verify against a current model or map.")),
       positionStatus,
-      h("div", { class: "sep" }),
-      h("div", { class: "side-label", text: "SET HOME LOCATION FROM ADDRESS" }),
+      h("div", { class: "settings-subhead", text: "Set home location from address" }),
       field("Address", addressQuery, "One-shot lookup; not saved after selecting a result."),
-      h("div", { class: "callout warn small", text: "Clicking LOOK UP sends the full address to OpenStreetMap Nominatim. Do not use it for a sensitive location. Lookup is disabled in OPSEC mode; the address is not saved to disk but may remain in memory cache for up to 24 hours. Only selected coordinates are saved. Verify the result on the map; elevation is not supplied." }),
+      settingsDetails("Address lookup privacy and behavior",
+        h("p", { class: "settings-note-text", text: "Clicking LOOK UP sends the full address to OpenStreetMap Nominatim. Do not use it for a sensitive location. Lookup is disabled in OPSEC mode; the address is not saved to disk but may remain in memory cache for up to 24 hours. Only selected coordinates are saved. Verify the result on the map; elevation is not supplied." })),
       h("div", { class: "row wrap" }, geocodeButton),
       geocodeResults,
       coordPreview,
-      h("div", { class: "row wrap mt-10" },
+      h("div", { class: "settings-actions" },
         btn("SAVE POSITION", { tone: "primary", icon: "save", onClick: savePosition }),
         btn("GPS FIX", { icon: "satellite", onClick: gpsFix }),
         btn("PHONE GPS (BROWSER)", { icon: "smartphone", onClick: browserGpsFix }),
         btn("OPEN MAP", { icon: "map", onClick: () => { location.hash = "#/map"; } }),
         btn("NAV TOOLS", { icon: "route", onClick: () => { location.hash = "#/nav"; } }))),
   });
+  addSectionHead("position");
   grid.appendChild(posPanel);
 
   const phoneQrWrap = h("div", { class: "phone-gps-qr-wrap" });
@@ -202,9 +292,11 @@ export async function render(root) {
     title: "Phone GPS · Browser", icon: "satellite",
     sub: "Temporary HTTPS on one selected local interface · no cloud relay",
     body: h("div", { class: "col gap-8" },
+      h("div", { class: "settings-subhead", text: "Link" }),
       field("Computer interface", phoneInterface, "Connect the phone and computer to the same trusted Wi-Fi or phone hotspot."),
-      h("div", { class: "callout warn small", text: "The phone uses its normal browser—no external app. This creates a separate HTTPS listener bound only to the selected local IP; the main API remains loopback-only. Keep the phone page open — the session stays connected while active (not a fixed 5-minute cutoff), and you can switch DarkSec tabs without stopping it. Use a trusted AP that allows device-to-device traffic; some phone hotspots isolate clients. iOS/Android may show a self-signed-certificate warning: continue only if you started this session, the URL IP matches this interface, and you are on your private network. The phone must grant location permission. OPSEC mode or STOP ends the listener. Accepting a fresh fix updates the map, navigation, almanac, weather/intel references and the status-bar GPS source/age; accepting saves the fix but keeps the listener open for newer fixes until you stop it." }),
-      h("div", { class: "row wrap gap-6" }, phoneStartButton, phoneStopButton, phoneAcceptButton),
+      settingsDetails("How phone GPS works · privacy and limits",
+        h("p", { class: "settings-note-text", text: "The phone uses its normal browser—no external app. This creates a separate HTTPS listener bound only to the selected local IP; the main API remains loopback-only. Keep the phone page open — the session stays connected while active (not a fixed 5-minute cutoff), and you can switch DarkSec tabs without stopping it. Use a trusted AP that allows device-to-device traffic; some phone hotspots isolate clients. iOS/Android may show a self-signed-certificate warning: continue only if you started this session, the URL IP matches this interface, and you are on your private network. The phone must grant location permission. OPSEC mode or STOP ends the listener. Accepting a fresh fix updates the map, navigation, almanac, weather/intel references and the status-bar GPS source/age; accepting saves the fix but keeps the listener open for newer fixes until you stop it." })),
+      h("div", { class: "settings-actions" }, phoneStartButton, phoneStopButton, phoneAcceptButton),
       phoneQrWrap, phoneUrl, phoneState, phoneFix),
   });
   phoneStartButton.disabled = true;
@@ -242,15 +334,18 @@ export async function render(root) {
     title: "LAN / mobile access", icon: "wifi",
     sub: "Optional second HTTPS listener for phones/tablets on the trusted local network",
     body: h("div", { class: "col gap-8" },
-      h("div", { class: "callout warn small", text: "Binds a separate HTTPS listener to all interfaces using a self-signed certificate. The main API stays loopback-only. OPSEC mode disables LAN access. Do not expose to the public internet." }),
+      h("div", { class: "settings-subhead", text: "Listener" }),
+      settingsDetails("Privacy and exposure",
+        h("p", { class: "settings-note-text", text: "Binds a separate HTTPS listener to all interfaces using a self-signed certificate. The main API stays loopback-only. OPSEC mode disables LAN access. Do not expose to the public internet." })),
       lanToggle,
       h("div", { class: "row gap-6" }, h("span", { class: "small muted", text: "Status:" }), lanStatus),
       lanUrl,
       lanQr,
-      h("div", { class: "row gap-6" }, lanCopy),
+      h("div", { class: "settings-actions" }, lanCopy),
       h("div", { class: "tiny muted", text: "Scan the QR (or open the URL) on the phone, accept the certificate warning, and the session cookie is set." }),
     ),
   });
+  addSectionHead("radio");
   grid.appendChild(lanPanel);
   lanInput.disabled = !!settings.opsec_mode;
 
@@ -318,11 +413,12 @@ export async function render(root) {
     sub: "HackRF gain defaults",
     icon: "antenna",
     body: h("div", { class: "col" },
+      h("div", { class: "settings-subhead", text: "Gain defaults" }),
       h("div", { class: "form-grid" },
         field("LNA gain (dB)", lna), field("VGA gain (dB)", vga)),
       amp,
       h("div", { class: "hint", text: "Start with LNA 24–32 and VGA 30–40. Strong local signals may require less gain. Never connect a transmit antenna to the receive input while transmitting with another radio." }),
-      h("div", { class: "row mt-10" },
+      h("div", { class: "settings-actions" },
         btn("SAVE RADIO", { tone: "primary", icon: "save", onClick: saveRadio }),
         btn("OPEN SDR", { icon: "antenna", onClick: () => { location.hash = "#/sdr"; } }))),
   });
@@ -336,7 +432,7 @@ export async function render(root) {
     title: "Transmit gate",
     sub: "Hard interlock · audited",
     icon: "warning",
-    cls: "tx-gate",
+    cls: "tx-gate span-2",
     body: h("div", { class: "col" },
       h("div", { class: "tx-warning" },
         h("strong", { text: "TRANSMITTING IS A LEGAL ACT. " }),
@@ -345,7 +441,7 @@ export async function render(root) {
         badge(txState ? "TX ENABLED" : "TX DISABLED", txState ? "red" : "green"),
         badge(settings.sdr_tx_attested ? "ATTESTED" : "NOT ATTESTED", settings.sdr_tx_attested ? "amber" : "muted")),
       txEnabled, txAttested,
-      h("div", { class: "row mt-10" },
+      h("div", { class: "settings-actions" },
         btn("APPLY TX SETTINGS", { tone: "danger", icon: "lock", onClick: () => saveTx(txEnabled, txAttested) })),
       h("div", { class: "tiny muted", text: "Every individual transmission still requires the exact word TRANSMIT plus a fresh attestation in the SDR module." })),
   });
@@ -378,15 +474,18 @@ export async function render(root) {
     title: "Offline maps",
     icon: "layers",
     body: h("div", { class: "col" },
+      h("div", { class: "settings-subhead", text: "Tile source" }),
       h("div", { class: "form-grid" },
         field("Tile source", tileSource, "Used for live view and for new offline downloads. Bundled and cached tiles are always preferred."),
         field("MBTiles path", mbtiles, "Must exist on this machine; read-only.")),
       mapVector,
+      h("div", { class: "settings-subhead", text: "Layers" }),
       layersBox,
-      h("div", { class: "row mt-10" },
+      h("div", { class: "settings-actions" },
         btn("SAVE MAP", { tone: "primary", icon: "save", onClick: saveMap }),
         btn("OPEN MAP", { icon: "map", onClick: () => { location.hash = "#/map"; } }))),
   });
+  addSectionHead("maps");
   grid.appendChild(mapPanel);
   loadLayers(layersBox);
 
@@ -407,20 +506,22 @@ export async function render(root) {
     icon: "library",
     tools: [btn("OPEN", { size: "sm", onClick: () => { location.hash = "#/library"; } })],
     body: h("div", { class: "col" },
-      libBox, autoDeep,
-      h("div", { class: "row wrap" }, deep, force),
-      h("div", { class: "row mt-10" },
+      libBox,
+      h("div", { class: "settings-subhead", text: "Index" }),
+      autoDeep,
+      h("div", { class: "settings-check-grid" }, deep, force),
+      h("div", { class: "settings-actions" },
         btn("START INDEX", { tone: "primary", icon: "database", onClick: startIndex }),
         btn("REFRESH", { icon: "refresh", onClick: refreshLibrary })),
       h("div", { class: "hint", text: "Deep indexing reads every PDF and can take hours on a large archive. It runs in the background; the console remains usable." }),
-      h("div", { class: "sep" }),
-      h("div", { class: "side-label", text: "DOCUMENT LIBRARY BUNDLE" }),
+      h("div", { class: "settings-subhead", text: "Bundle" }),
       field("Manifest URL", bundleUrl, "Official bundle manifest from the DarkSec GitHub release. Leave this URL unless a newer release provides a different manifest."),
-      h("div", { class: "row wrap mt-8" }, bundleDownloadBtn, bundleCancelBtn),
+      h("div", { class: "settings-actions" }, bundleDownloadBtn, bundleCancelBtn),
       bundleProgress,
       bundleJobText,
       bundleStatus,
-      h("div", { class: "callout small amber", text: "Only install a bundle you are legally allowed to redistribute. The installer verifies SHA-256, extracts document files into fielddata/library, and starts a metadata index. Existing files are kept." })),
+      settingsDetails("Redistribution and installer behavior",
+        h("p", { class: "settings-note-text", text: "Only install a bundle you are legally allowed to redistribute. The installer verifies SHA-256, extracts document files into fielddata/library, and starts a metadata index. Existing files are kept." }))),
   });
   grid.appendChild(libPanel);
   renderLibrary(libBox, libStats);
@@ -435,24 +536,31 @@ export async function render(root) {
     { value: 30, label: "Every 30 minutes" },
     { value: 60, label: "Every 60 minutes" },
   ], settings.feed_refresh_min ?? 10);
-  const feedHealthBox = h("div", { class: "col gap-6 mt-10" });
+  const feedHealthBox = h("div", { class: "col gap-6" });
+  const feedHealthSummary = h("span", { text: "Source health & editing" });
+  const feedHealthDetails = settingsDetails(feedHealthSummary,
+    h("div", { class: "tiny muted mb-10", text: "Refresh tests the live source. Editing a URL or parser clears that feed's cached payload so old items are not shown under the new source." }),
+    feedHealthBox);
   const feedPanel = panel({
     title: "Intelligence feeds",
     sub: "Automatic while online · cached offline",
     icon: "globe",
     body: h("div", { class: "col" },
+      h("div", { class: "settings-subhead", text: "Automatic refresh" }),
       feedAuto,
       field("Check cadence", feedInterval, "Fast-moving safety sources still use their own conservative minimum intervals to respect upstream rate limits."),
-      h("div", { class: "callout small", text: "When online and OPSEC is off, the console refreshes public feeds in the background: space weather, earthquakes, NWS alerts, GDACS/EONET hazards, Safecast radiation reports, volcanic activity, weather, aircraft, satellites and world news. OPSEC blackout pauses all automatic fetching. Offline, the last successful cache remains readable with its age shown. Treat all feed content as unverified until confirmed with an official source." }),
-      h("div", { class: "row mt-10" },
+      settingsDetails("What is fetched and when",
+        h("p", { class: "settings-note-text", text: "When online and OPSEC is off, the console refreshes public feeds in the background: space weather, earthquakes, NWS alerts, GDACS/EONET hazards, Safecast radiation reports, volcanic activity, weather, aircraft, satellites and world news. OPSEC blackout pauses all automatic fetching. Offline, the last successful cache remains readable with its age shown. Treat all feed content as unverified until confirmed with an official source." })),
+      h("div", { class: "settings-actions" },
         btn("SAVE SYNC SETTINGS", { icon: "save", onClick: saveFeed }),
         btn("SYNC NOW", { icon: "refresh", onClick: refreshFeeds })),
-      h("div", { class: "side-label mt-14", text: "SOURCE HEALTH & EDITING" }),
-      h("div", { class: "tiny muted", text: "Refresh tests the live source. Editing a URL or parser clears that feed's cached payload so old items are not shown under the new source." }),
-      feedHealthBox),
+      feedHealthDetails),
   });
+  addSectionHead("intel");
   grid.appendChild(feedPanel);
-  loadFeedHealth(feedHealthBox);
+  loadFeedHealth(feedHealthBox).then((count) => {
+    if (count) feedHealthSummary.textContent = `Source health & editing · ${count} feeds`;
+  });
 
   /* ------------------------------------------------------- cctv catalog */
   const cctvCatalogBox = h("div", { class: "col gap-6 mt-10" });
@@ -461,8 +569,10 @@ export async function render(root) {
     sub: "Local/imported packs · cached global layer",
     icon: "camera",
     body: h("div", { class: "col" },
-      h("div", { class: "callout small", text: "Merges cached CCTV layers on the map: OSM surveillance locations (Overpass, operator-triggered) and local/imported camera catalogs. Imported items preserve provider credit/license metadata when available. Verify source terms before redistributing data or fetching snapshots. See docs/DATA_SOURCES.md." }),
-      h("div", { class: "row wrap mt-10 gap-6" },
+      h("div", { class: "settings-subhead", text: "Catalog" }),
+      settingsDetails("Sources and attribution",
+        h("p", { class: "settings-note-text", text: "Merges cached CCTV layers on the map: OSM surveillance locations (Overpass, operator-triggered) and local/imported camera catalogs. Imported items preserve provider credit/license metadata when available. Verify source terms before redistributing data or fetching snapshots. See docs/DATA_SOURCES.md." })),
+      h("div", { class: "settings-actions" },
         btn("IMPORT/REFRESH CATALOG", { icon: "download", tone: "primary", onClick: () => importCctvCatalog(cctvCatalogBox) }),
         btn("REFRESH OSM CCTV", { icon: "refresh", onClick: () => refreshOsmCctv(cctvCatalogBox) }),
         btn("STATUS", { icon: "info", onClick: () => loadCctvCatalog(cctvCatalogBox) })),
@@ -476,9 +586,12 @@ export async function render(root) {
     title: "Global ALPR cameras",
     sub: "DeFlock / OpenStreetMap · ODbL",
     icon: "camera",
+    cls: "span-2",
     body: h("div", { class: "col" },
-      h("div", { class: "callout small", text: "Downloads the US and Canada DeFlock ALPR GeoJSON (~39 MB) into fielddata/maps/alpr. The map shows individual cameras when zoomed in and clusters at low zoom. Manual refresh only; locations are community-mapped — verify on OpenStreetMap." }),
-      h("div", { class: "row wrap mt-10 gap-6" },
+      h("div", { class: "settings-subhead", text: "Overlay" }),
+      settingsDetails("Coverage and license",
+        h("p", { class: "settings-note-text", text: "Downloads the US and Canada DeFlock ALPR GeoJSON (~39 MB) into fielddata/maps/alpr. The map shows individual cameras when zoomed in and clusters at low zoom. Manual refresh only; locations are community-mapped — verify on OpenStreetMap." })),
+      h("div", { class: "settings-actions" },
         btn("REFRESH GLOBAL ALPR", { icon: "download", tone: "primary", onClick: () => refreshGlobalAlpr(alprGlobalBox) }),
         btn("STATUS", { icon: "info", onClick: () => loadAlprStatus(alprGlobalBox) })),
       alprGlobalBox),
@@ -491,15 +604,15 @@ export async function render(root) {
     title: "Data custody",
     icon: "shield",
     body: h("div", { class: "col" },
-      h("div", { class: "callout small", text: "The vault remains unlocked until you manually lock it or the app exits. Lock it when you finish handling sensitive notes." }),
-      h("div", { class: "row wrap mt-10" },
+      h("div", { class: "settings-subhead", text: "Vault & exports" }),
+      h("p", { class: "settings-note-text", text: "The vault remains unlocked until you manually lock it or the app exits. Lock it when you finish handling sensitive notes." }),
+      h("div", { class: "settings-actions" },
         btn("VAULT & NOTES", { icon: "lock", onClick: () => { location.hash = "#/security?tab=vault"; } }),
         btn("EXPORT JSON", { icon: "download", onClick: () => download("/api/logistics/export?fmt=json", "darksec-export.json") }),
         btn("EXPORT CSV", { icon: "download", onClick: () => download("/api/logistics/export?fmt=csv", "darksec-export.csv") })),
-      h("div", { class: "callout small", text: "Encrypted notes are never included in exports or backups in plaintext. Losing the vault passphrase means losing the notes; there is no recovery key." })),
+      settingsDetails("Custody and recovery",
+        h("p", { class: "settings-note-text", text: "Encrypted notes are never included in exports or backups in plaintext. Losing the vault passphrase means losing the notes; there is no recovery key." }))),
   });
-  grid.appendChild(secPanel);
-
   /* ---------------------------------------------------------- assistant */
   const assistantEnabled = checkbox("Enable Delamain (local AI / Ollama)", !!settings.assistant_enabled);
   const assistantThink = checkbox("Enable model thinking/reasoning", !!settings.assistant_think);
@@ -519,30 +632,44 @@ export async function render(root) {
   const assistantMaxTokens = input({ type: "number", step: "512", min: "128", max: "8192", value: settings.assistant_max_tokens ?? 2048 });
   const assistantPrompt = h("textarea", { class: "input mono", rows: "5", style: { width: "100%", resize: "vertical" } });
   assistantPrompt.value = settings.assistant_system_prompt || "";
-  const assistantPanel = panel({
-    title: "Delamain / Ollama",
-    sub: "Local AI model integration for assistant chat and field support",
-    icon: "cpu",
-    body: h("div", { class: "col gap-8" },
-      h("div", { class: "row wrap gap-16" }, assistantEnabled, assistantThink, assistantTools, assistantToolsAuto, assistantSystemTools, assistantMedicalTools, assistantHistoryEncrypted, assistantLibrary, assistantHistoryFilter),
-      h("div", { class: "form-grid" },
-        field("Ollama base URL", ollamaBase, "Local endpoint. Default: http://127.0.0.1:11434"),
-        field("Model", ollamaModel, "Must be pulled in Ollama (e.g. `ollama pull llama3.2`)."),
-        field("System tools root", assistantSystemRoot, "Paths are restricted to this root. Sensitive credential paths are blocked. Runs as your user; never sudo.")),
-      h("div", { class: "form-grid cols-3" },
-        field("Temperature", assistantTemp), field("Timeout (sec)", assistantTimeout, "Per-request Ollama read timeout. The chat waits this long for activity before reporting a stall."), field("Context tokens", assistantCtx),
-        field("Max reply tokens", assistantMaxTokens, "Raise for long guides. 2048 is the default; higher is slower on CPU. If answers stop mid-sentence, increase this.")),
-      field("System prompt", assistantPrompt, "Guides behavior/safety. Keep it practical; avoid secrets."),
-      h("div", { class: "row wrap gap-8" },
-        btn("SAVE ASSISTANT", { tone: "primary", icon: "save", onClick: saveAssistant }),
-        btn("TEST CONNECTION", { icon: "refresh", onClick: testAssistant }),
-        btn("OPEN ASSISTANT", { icon: "cpu", tone: "ghost", onClick: () => { location.hash = "#/assistant"; } })),
+  const assistantSafety = settingsDetails("Safety, privacy and tool boundaries",
+    h("div", { class: "col gap-6" },
       h("div", { class: "callout small", text: "Thinking/reasoning can improve complex answers but is much slower on CPU-only systems (especially Qwen 3.5). If responses stall, disable thinking or increase timeout." }),
       h("div", { class: "callout small amber", text: "The app calls Ollama through the local backend. AI output can be wrong or incomplete—verify critical medical, navigation, legal, and hazard decisions." }),
       h("div", { class: "callout small amber", text: "System file tools run as your user with no sudo. Writes are restricted to the configured root, existing files are backed up, and credential/key paths are blocked. Leave this off unless you need it." }),
       h("div", { class: "callout small amber", text: "Medical record tools are read-only and expose patient identities, vitals and medication history to the local model. Verify patient identity and do not treat AI output as diagnosis or prescription." }),
-      h("div", { class: "callout small amber", text: "Encrypted chat history stores conversation titles and messages with the vault key. The vault must be configured and unlocked; when it is locked, chats are not saved and history cannot be read. Toggling the setting migrates existing history while the vault is unlocked." })),
+      h("div", { class: "callout small amber", text: "Encrypted chat history stores conversation titles and messages with the vault key. The vault must be configured and unlocked; when it is locked, chats are not saved and history cannot be read. Toggling the setting migrates existing history while the vault is unlocked." })));
+  assistantSafety.classList.add("warn");
+  const assistantPanel = panel({
+    title: "Delamain / Ollama",
+    sub: "Local AI model integration for assistant chat and field support",
+    icon: "cpu",
+    cls: "span-2",
+    body: h("div", { class: "settings-assistant-layout" },
+      h("div", { class: "col gap-10" },
+        assistantEnabled,
+        h("div", { class: "settings-subhead", text: "Tools & behavior" }),
+        h("div", { class: "settings-check-grid" },
+          assistantTools, assistantToolsAuto, assistantLibrary, assistantThink,
+          assistantSystemTools, assistantMedicalTools, assistantHistoryEncrypted, assistantHistoryFilter),
+        h("div", { class: "settings-subhead", text: "Model connection" }),
+        h("div", { class: "form-grid" },
+          field("Ollama base URL", ollamaBase, "Local endpoint. Default: http://127.0.0.1:11434"),
+          field("Model", ollamaModel, "Must be pulled in Ollama (e.g. `ollama pull llama3.2`)."),
+          h("div", { class: "wide" }, field("System tools root", assistantSystemRoot, "Paths are restricted to this root. Sensitive credential paths are blocked. Runs as your user; never sudo.")))),
+      h("div", { class: "col gap-10" },
+        h("div", { class: "settings-subhead", text: "Generation limits" }),
+        h("div", { class: "form-grid" },
+          field("Temperature", assistantTemp), field("Timeout (sec)", assistantTimeout, "Per-request Ollama read timeout. The chat waits this long for activity before reporting a stall."),
+          field("Context tokens", assistantCtx), field("Max reply tokens", assistantMaxTokens, "Raise for long guides. 2048 is the default; higher is slower on CPU. If answers stop mid-sentence, increase this.")),
+        field("System prompt", assistantPrompt, "Guides behavior/safety. Keep it practical; avoid secrets."),
+        h("div", { class: "settings-actions" },
+          btn("SAVE ASSISTANT", { tone: "primary", icon: "save", onClick: saveAssistant }),
+          btn("TEST CONNECTION", { icon: "refresh", onClick: testAssistant }),
+          btn("OPEN ASSISTANT", { icon: "cpu", tone: "ghost", onClick: () => { location.hash = "#/assistant"; } })),
+        assistantSafety)),
   });
+  addSectionHead("assistant");
   grid.appendChild(assistantPanel);
 
   async function saveAssistant() {
@@ -590,15 +717,23 @@ export async function render(root) {
     ["Version", `${status.app || "DarkSec"} ${status.version || ""} · ${status.codename || ""}`],
   ]));
   const auditBox = h("div", { class: "list" });
+  const auditSummary = h("span", { text: "Recent audit events" });
+  const auditDetails = settingsDetails(auditSummary, auditBox);
   const sysPanel = panel({
     title: "Platform & audit",
     icon: "cpu",
     cls: "span-2",
-    tools: [btn("REFRESH", { size: "sm", icon: "refresh", onClick: () => loadAudit(auditBox) })],
-    body: h("div", { class: "col" }, sysBox, h("div", { class: "sep" }), auditBox),
+    tools: [btn("REFRESH", { size: "sm", icon: "refresh", onClick: () => loadAudit(auditBox).then((n) => { auditSummary.textContent = `Recent audit events · ${n}`; }) })],
+    body: h("div", { class: "col" },
+      h("div", { class: "settings-subhead", text: "Host" }),
+      sysBox,
+      h("div", { class: "settings-subhead", text: "Audit trail" }),
+      auditDetails),
   });
+  addSectionHead("system");
   grid.appendChild(sysPanel);
-  loadAudit(auditBox);
+  grid.appendChild(secPanel);
+  loadAudit(auditBox).then((n) => { auditSummary.textContent = `Recent audit events · ${n}`; });
 
   /* ------------------------------------------------------ program updates */
   const updateBox = h("div", { class: "col" });
@@ -608,13 +743,14 @@ export async function render(root) {
   const updatePanel = panel({
     title: "Program updates",
     icon: "download",
-    cls: "span-2",
     sub: "Fast-forward only · from the configured git remote",
     body: h("div", { class: "col gap-8" },
+      h("div", { class: "settings-subhead", text: "Git remote" }),
       updateBox,
       updateMsg,
-      h("div", { class: "row wrap gap-6" }, updateCheckBtn, updateApplyBtn),
-      h("div", { class: "callout small", text: "Updating fetches and fast-forwards program files from origin. Operator data in fielddata/ is ignored by git and is never changed. Uncommitted changes to tracked files block the update; untracked files are kept. Restart DarkSec after a successful update to run the new code. Checking for updates contacts the configured remote." })),
+      h("div", { class: "settings-actions" }, updateCheckBtn, updateApplyBtn),
+      settingsDetails("What an update changes",
+        h("p", { class: "settings-note-text", text: "Updating fetches and fast-forwards program files from origin. Operator data in fielddata/ is ignored by git and is never changed. Uncommitted changes to tracked files block the update; untracked files are kept. Restart DarkSec after a successful update to run the new code. Checking for updates contacts the configured remote." }))),
   });
   grid.appendChild(updatePanel);
   loadUpdateStatus();
@@ -624,9 +760,11 @@ export async function render(root) {
   const backupPanel = panel({
     title: "Local backups",
     icon: "save",
+    cls: "span-2",
     body: h("div", { class: "col" },
-      h("div", { class: "callout small", text: "Backups contain operator data and settings, not document files or plaintext notes. Copy them to removable media and protect them." }),
-      h("div", { class: "row wrap mt-10" }, btn("CREATE BACKUP", { tone: "primary", icon: "save", onClick: backupNow })),
+      h("div", { class: "settings-subhead", text: "Archives" }),
+      h("p", { class: "settings-note-text", text: "Backups contain operator data and settings, not document files or plaintext notes. Copy them to removable media and protect them." }),
+      h("div", { class: "settings-actions" }, btn("CREATE BACKUP", { tone: "primary", icon: "save", onClick: backupNow })),
       backupsBox),
   });
   grid.appendChild(backupPanel);
@@ -1302,8 +1440,8 @@ export async function render(root) {
     try {
       const out = await api.get("/api/audit?limit=30");
       const list = out.items || [];
-      target.replaceChildren(h("div", { class: "side-label", text: "RECENT AUDIT EVENTS" }));
-      if (!list.length) { target.appendChild(h("div", { class: "small muted", text: "No audit events." })); return; }
+      target.replaceChildren();
+      if (!list.length) { target.appendChild(h("div", { class: "small muted", text: "No audit events." })); return 0; }
       const wrap = h("div", { class: "list" });
       for (const row of list) {
         const item = h("div", { class: "list-item" });
@@ -1315,15 +1453,17 @@ export async function render(root) {
         wrap.appendChild(item);
       }
       target.appendChild(wrap);
+      return list.length;
     } catch (err) {
       target.replaceChildren(h("div", { class: "small danger-text", text: err.message }));
+      return 0;
     }
   }
 
   async function loadBackups(target) {
     try {
       const out = await api.get("/api/logistics/backups");
-      target.replaceChildren(h("div", { class: "side-label", text: "ARCHIVES" }));
+      target.replaceChildren();
       if (!(out.items || []).length) { target.appendChild(h("div", { class: "small muted", text: "No local backups yet." })); return; }
       const list = h("div", { class: "list" });
       for (const b of out.items) {
@@ -1356,12 +1496,12 @@ export async function render(root) {
       out = await api.get("/api/feeds");
     } catch (err) {
       box.replaceChildren(h("div", { class: "callout danger small", text: err.message || "Could not read feed status" }));
-      return;
+      return 0;
     }
     const feeds = (out.feeds || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
     if (!feeds.length) {
       box.replaceChildren(emptyState("No feeds registered", "The built-in feed registry could not be read.", "globe"));
-      return;
+      return 0;
     }
     const list = h("div", { class: "list" });
     for (const f of feeds) {
@@ -1384,6 +1524,7 @@ export async function render(root) {
       list.appendChild(row);
     }
     box.replaceChildren(list);
+    return feeds.length;
   }
 
   async function testFeed(feed, box) {
