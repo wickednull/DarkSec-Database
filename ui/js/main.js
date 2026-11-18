@@ -121,10 +121,22 @@ async function boot() {
       if (err.status === 401) authLost();
     }
   }, 30_000);
+  let lastOpsec = !!store.settings?.opsec_mode;
   store.subscribe((state, type) => {
     if (type === "settings") {
       applyAppearance();
       refreshGrid();
+      const nowOpsec = !!state.settings?.opsec_mode;
+      if (nowOpsec !== lastOpsec) {
+        lastOpsec = nowOpsec;
+        if (nowOpsec) {
+          // Sensitive content may be open in a modal or the command palette.
+          try { document.getElementById("modalRoot")?.replaceChildren(); } catch {}
+          closePalette();
+        }
+        // Re-render the current view so OPSEC masking applies immediately.
+        setTimeout(() => { route().catch(() => {}); }, 0);
+      }
     }
     if (type === "status" && state.status) {
       lastStatus = state.status;
