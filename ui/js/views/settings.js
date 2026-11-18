@@ -148,7 +148,7 @@ export async function render(root) {
     { value: "sand", label: "Sand · parchment" },
     { value: "mint", label: "Mint · sage" },
     { value: "blueprint", label: "Blueprint · cool blue" },
-    { value: "lavender", label: "Lavender · iris" },
+    { value: "lavender", label: "Lavender · orchid" },
     { value: "contrast-light", label: "High contrast light" },
   ], settings.light_theme || "daylight");
   const accent = select([

@@ -36,7 +36,7 @@ Dark and light backgrounds are both supported. Light themes use soft, low-glare
 palettes inspired by Catppuccin Latte, Rosé Pine Dawn, Solarized Light, GitHub
 Light, Everforest Light and Tokyo Night Day: Daylight (soft cool), Paper (warm
 rose), Solarized (cream), Cloud (neutral), Sand (parchment), Mint (sage),
-Blueprint (cool blue), Lavender (iris) and high-contrast light. Dark themes
+Blueprint (cool blue), Lavender (orchid) and high-contrast light. Dark themes
 include Nightwatch, Midnight, Blackout, Forest, Slate, Ocean, Ember, Plum and
 high contrast. The sun/moon button in the top bar switches between your saved
 dark and light themes. **Settings → Identity & display** sets the background

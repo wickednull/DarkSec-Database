@@ -194,10 +194,10 @@ html[data-theme="blueprint"] {
 }
 html[data-theme="lavender"] {
   color-scheme: light;
-  --bg: #e1d9eb; --bg-2: #d8cee5; --panel: #ece6f4; --panel-2: #e2daed; --panel-3: #d8cee5;
-  --text: #443b58; --text-strong: #342d47; --muted: #5f5676; --muted-2: #7e748d;
-  --line: rgba(68,59,88,.14); --line-strong: rgba(68,59,88,.24); --line-hot: rgba(var(--acc-rgb), .55);
-  --shadow: 0 14px 40px rgba(68,58,88,.13);
+  --bg: #dbc7e4; --bg-2: #d1bbdc; --panel: #e7d6ee; --panel-2: #ddcae7; --panel-3: #d3bedf;
+  --text: #452f50; --text-strong: #32203a; --muted: #5e4669; --muted-2: #7c6484;
+  --line: rgba(69,47,80,.15); --line-strong: rgba(69,47,80,.26); --line-hot: rgba(var(--acc-rgb), .55);
+  --shadow: 0 14px 40px rgba(70,50,85,.14);
 }
 
 * { box-sizing: border-box; }
