@@ -171,6 +171,28 @@ export async function render(root) {
   }
 
   const transcript = h("div", { class: "col gap-10 assistant-transcript" });
+  let followBottom = true;
+  function pinBottom(force = false) {
+    if (!force && !followBottom) return;
+    const apply = () => {
+      try {
+        if (transcript.scrollHeight > transcript.clientHeight + 1) {
+          transcript.scrollTop = transcript.scrollHeight;
+        } else if (force || state.sending) {
+          // Short-window layout lets the transcript expand with the page.
+          const host = document.querySelector(".main");
+          if (host) host.scrollTop = host.scrollHeight;
+        }
+      } catch {}
+    };
+    apply();
+    // Re-apply after Markdown/render layout settles so the newest text stays visible.
+    requestAnimationFrame(() => requestAnimationFrame(apply));
+  }
+  transcript.addEventListener("scroll", () => {
+    const gap = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+    followBottom = gap < 80;
+  }, { passive: true });
   const intro = h("div", { class: "callout" },
     h("div", { class: "small", style: { whiteSpace: "pre-wrap" }, text: "Ask for field planning help, SITREP drafting, checklists, triage prompts, comms/logistics planning, map/intel interpretation, or gear/water/food/power reasoning. Attach images for vision models, use the mic for voice input, and review past chats below. I can include a cached app-context snapshot if enabled. I won’t invent live readings." })
   );
@@ -179,20 +201,28 @@ export async function render(root) {
   if (state.sending) {
     const note = h("div", { class: "callout small amber" }, h("div", { class: "small", style: { whiteSpace: "pre-wrap" }, text: "Delamain is responding… switching tabs won't cancel it; the reply will appear here when it finishes." }));
     transcript.appendChild(note);
-    transcript.scrollTop = transcript.scrollHeight;
+    pinBottom(true);
   }
 
-  // Live-refresh transcript when an in-flight request finishes elsewhere.
+  // Refresh a re-mounted view when an in-flight reply finishes elsewhere. The
+  // sending instance ignores its own event so the visible stream is not rebuilt.
+  const instanceId = Math.random().toString(36).slice(2);
   const refreshTranscript = () => {
+    const prevTop = transcript.scrollTop;
+    const wasFollowing = followBottom;
     transcript.replaceChildren(intro);
     for (const m of (state.messages || [])) addMsg(m.role, m.content, m.meta || "", m.images || [], { record: false });
     if (state.sending) {
       const note = h("div", { class: "callout small amber" }, h("div", { class: "small", style: { whiteSpace: "pre-wrap" }, text: "Delamain is responding… switching tabs won't cancel it; the reply will appear here when it finishes." }));
       transcript.appendChild(note);
     }
-    transcript.scrollTop = transcript.scrollHeight;
+    if (wasFollowing) pinBottom(true);
+    else requestAnimationFrame(() => { try { transcript.scrollTop = prevTop; } catch {} });
   };
-  const onUpdate = () => { try { refreshTranscript(); } catch {} };
+  const onUpdate = (event) => {
+    if (event?.detail?.source === instanceId) return;
+    try { refreshTranscript(); } catch {}
+  };
   window.addEventListener("darksec:assistant-update", onUpdate);
 
   const promptInput = textarea({ rows: 4, placeholder: "Ask the local survival AI… (Ctrl/Cmd+Enter to send)" });
@@ -236,7 +266,7 @@ export async function render(root) {
   const sendBtn = btn("SEND", { icon: "arrow-right", tone: "primary", onClick: send });
   const cancelBtn = btn("CANCEL", { icon: "close", tone: "danger", onClick: cancelSend });
   cancelBtn.style.display = "none";
-  const clearBtn = btn("CLEAR", { icon: "trash", tone: "ghost", onClick: () => { state.messages = []; transcript.replaceChildren(intro); } });
+  const clearBtn = btn("CLEAR", { icon: "trash", tone: "ghost", onClick: () => { state.messages = []; followBottom = true; transcript.replaceChildren(intro); pinBottom(true); } });
 
   // Voice
   const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -388,7 +418,7 @@ export async function render(root) {
     }
     const imgs = renderImages(images);
     if (imgs) box.appendChild(imgs);
-    try { transcript.appendChild(box); transcript.scrollTop = transcript.scrollHeight; } catch {}
+    try { transcript.appendChild(box); pinBottom(); } catch {}
   }
 
   function createAssistantBox(metaText = "") {
@@ -467,6 +497,7 @@ export async function render(root) {
   function beginChatSwitch() {
     // Invalidate any in-flight reply so it cannot write into a different
     // conversation or leave the composer in the sending state.
+    followBottom = true;
     state.epoch += 1;
     try { state.abortController?.abort(); } catch {}
     state.abortController = null;
@@ -700,7 +731,7 @@ export async function render(root) {
       };
       pending = h("div", { class: "callout small amber" });
       paintWait();
-      transcript.appendChild(pending); transcript.scrollTop = transcript.scrollHeight;
+      transcript.appendChild(pending); pinBottom(true);
       pendingTicker = setInterval(paintWait, 1000);
       const payload = { prompt: text || "Describe the attached image.", history: priorHistory, model, think: !!state.think, conversation_id: state.conversationId, images: sentImages };
       if (state.includeContext) {
@@ -728,7 +759,7 @@ export async function render(root) {
           try { pending?.remove(); } catch {}
           pending = null;
           const ui = createAssistantBox("streaming…");
-          transcript.appendChild(ui.box); transcript.scrollTop = transcript.scrollHeight;
+          transcript.appendChild(ui.box); pinBottom(true);
           const reader = resp.body.getReader();
           const decoder = new TextDecoder();
           let buf = "", content = "", thinking = "", hadError = null, doneData = null, toolEvents = [];
@@ -750,12 +781,12 @@ export async function render(root) {
                   thinking += evt.delta || "";
                   const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
                   ui.meta.textContent = `reasoning · ${thinking.length} chars · ${secs}s`;
-                  transcript.scrollTop = transcript.scrollHeight;
+                  pinBottom();
                 } else {
                   content += evt.delta || ""; ui.body.textContent = content;
                   const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
                   ui.meta.textContent = `streaming · ${content.length} chars · ${secs}s`;
-                  transcript.scrollTop = transcript.scrollHeight;
+                  pinBottom();
                 }
               } else if (evt.type === "error") {
                 hadError = evt.error || "Streaming error";
@@ -818,7 +849,7 @@ export async function render(root) {
             recoverVaultSave(toolEvents);
           }
           if (hadError) toast(`Stream warning: ${hadError}`, "warn");
-          transcript.scrollTop = transcript.scrollHeight;
+          pinBottom();
         } else if (resp.status !== 404 && resp.status !== 405) {
           let detail = "";
           try { const j = await resp.json(); detail = j?.detail || j?.error || ""; } catch {}
@@ -848,7 +879,7 @@ export async function render(root) {
             h("summary", { style: { cursor: "pointer", color: "var(--muted)" }, text: "Model thinking/reasoning" }),
             h("pre", { style: { whiteSpace: "pre-wrap", marginTop: "6px", color: "var(--muted)", fontSize: "11px", maxHeight: "240px", overflow: "auto" }, text: String(res.thinking).slice(0, 12000) })
           );
-          try { transcript.lastChild?.appendChild(details); transcript.scrollTop = transcript.scrollHeight; } catch {}
+          try { transcript.lastChild?.appendChild(details); pinBottom(); } catch {}
         }
         const toolNode = renderToolEvents(res?.tools);
         if (toolNode) { try { transcript.lastChild?.appendChild(toolNode); } catch {} }
@@ -880,7 +911,10 @@ export async function render(root) {
       if (state.abortController === controller) state.abortController = null;
       if (state.epoch === epoch) {
         setSending(false);
-        try { window.dispatchEvent(new CustomEvent("darksec:assistant-update")); } catch {}
+        pinBottom(followBottom);
+        try {
+          window.dispatchEvent(new CustomEvent("darksec:assistant-update", { detail: { source: instanceId } }));
+        } catch {}
       }
     }
   }
