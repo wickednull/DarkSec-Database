@@ -102,6 +102,7 @@ def default_settings() -> dict:
         "document_bundle_manifest_url": "https://github.com/wickednull/DarkSec-Database/releases/download/docs-2026-11-16/document-library.bundle.json",
         "feed_auto_refresh": True,
         "feed_refresh_min": 10,
+        "critical_radius_km": 2000,
         "cctv_radius_km": 15,
         "cctv_catalog_refresh_hours": 0,
         "cctv_stream_host_allowlist": "[]",

@@ -586,8 +586,8 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 .search-box .ic { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: var(--muted-2); pointer-events: none; }
 .search-box .input { padding-left: 27px; }
 .range-row { display: flex; align-items: center; gap: 8px; }
-.range-row input[type=range] { flex: 1; accent-color: var(--acc); height: 2px; }
-.range-row output { min-width: 44px; text-align: right; color: var(--acc); font-size: 11px; }
+.range-row input[type=range] { flex: 1; min-width: 0; accent-color: var(--acc); height: 4px; }
+.range-row output { min-width: 58px; text-align: right; color: var(--acc); font-family: var(--font-mono); font-size: 11px; }
 .hint { color: var(--muted-2); font-size: 10px; line-height: 1.45; }
 .warn-text { color: var(--amber); }
 .danger-text { color: var(--red); }

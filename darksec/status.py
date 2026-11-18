@@ -141,8 +141,13 @@ def readiness(db: Database, include_defcon: bool = True) -> dict:
         except Exception:
             defcon_data = {}
 
-    # Count critical cached events within 2000 km of the operator so distant
-    # global headlines do not inflate the dashboard alert strip.
+    # Count critical cached events within the operator-configured radius so
+    # distant global headlines do not inflate the dashboard alert strip.
+    try:
+        critical_radius_km = float(s.get("critical_radius_km") or 2000)
+    except (TypeError, ValueError):
+        critical_radius_km = 2000.0
+    critical_radius_km = max(100.0, min(10000.0, critical_radius_km))
     nearby_critical = 0
     try:
         if have_position:
@@ -159,7 +164,7 @@ def readiness(db: Database, include_defcon: bool = True) -> dict:
                 dlat = rlat2 - rlat1; dlon = rlon2 - rlon1
                 a = math.sin(dlat/2)**2 + math.cos(rlat1)*math.cos(rlat2)*math.sin(dlon/2)**2
                 dist = 6371*2*math.asin(math.sqrt(a))
-                if dist <= 2000:
+                if dist <= critical_radius_km:
                     nearby_critical += 1
     except Exception:
         nearby_critical = 0
@@ -318,5 +323,6 @@ def readiness(db: Database, include_defcon: bool = True) -> dict:
             "error": defcon_data.get("error"),
         },
         "nearby_critical_count": nearby_critical,
+        "critical_radius_km": int(round(critical_radius_km)),
         "updated": utcnow(),
     }

@@ -117,6 +117,19 @@ def test_settings_round_trip_and_validation(client):
     client.put("/api/settings", json={"callsign": original["callsign"]})
 
 
+def test_critical_radius_setting(client):
+    updated = client.put("/api/settings", json={"critical_radius_km": 750})
+    assert updated.status_code == 200
+    assert updated.json()["critical_radius_km"] == 750
+    status = client.get("/api/status").json()
+    assert status["readiness"]["critical_radius_km"] == 750
+
+    bad = client.put("/api/settings", json={"critical_radius_km": 50})
+    assert bad.status_code == 400
+
+    client.put("/api/settings", json={"critical_radius_km": 2000})
+
+
 # ------------------------------------------------------------------ records
 def test_record_crud(client):
     title = _unique("task")

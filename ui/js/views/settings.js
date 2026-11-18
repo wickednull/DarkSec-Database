@@ -536,6 +536,14 @@ export async function render(root) {
     { value: 30, label: "Every 30 minutes" },
     { value: 60, label: "Every 60 minutes" },
   ], settings.feed_refresh_min ?? 10);
+  const criticalRadius = h("input", {
+    type: "range", min: "100", max: "10000", step: "100",
+    value: String(settings.critical_radius_km ?? 2000), class: "settings-range",
+  });
+  const criticalRadiusValue = h("output", { text: `${criticalRadius.value} km` });
+  criticalRadius.addEventListener("input", () => {
+    criticalRadiusValue.textContent = `${criticalRadius.value} km`;
+  });
   const feedHealthBox = h("div", { class: "col gap-6" });
   const feedHealthSummary = h("span", { text: "Source health & editing" });
   const feedHealthDetails = settingsDetails(feedHealthSummary,
@@ -549,10 +557,13 @@ export async function render(root) {
       h("div", { class: "settings-subhead", text: "Automatic refresh" }),
       feedAuto,
       field("Check cadence", feedInterval, "Fast-moving safety sources still use their own conservative minimum intervals to respect upstream rate limits."),
+      h("div", { class: "settings-subhead", text: "Alert radius" }),
+      field("Critical feed distance", h("div", { class: "range-row" }, criticalRadius, criticalRadiusValue),
+        "Cached CRITICAL/SEVERE events within this distance drive the SITREP alert strip and brief."),
       settingsDetails("What is fetched and when",
         h("p", { class: "settings-note-text", text: "When online and OPSEC is off, the console refreshes public feeds in the background: space weather, earthquakes, NWS alerts, GDACS/EONET hazards, Safecast radiation reports, volcanic activity, weather, aircraft, satellites and world news. OPSEC blackout pauses all automatic fetching. Offline, the last successful cache remains readable with its age shown. Treat all feed content as unverified until confirmed with an official source." })),
       h("div", { class: "settings-actions" },
-        btn("SAVE SYNC SETTINGS", { icon: "save", onClick: saveFeed }),
+        btn("SAVE SYNC & ALERT", { icon: "save", onClick: saveFeed }),
         btn("SYNC NOW", { icon: "refresh", onClick: refreshFeeds })),
       feedHealthDetails),
   });
@@ -822,6 +833,7 @@ export async function render(root) {
     await saveSimple({
       feed_auto_refresh: feedAuto.querySelector("input").checked,
       feed_refresh_min: Number(feedInterval.value) || 10,
+      critical_radius_km: Number(criticalRadius.value) || 2000,
     }, "Sync settings saved");
   }
 

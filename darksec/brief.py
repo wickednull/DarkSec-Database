@@ -15,6 +15,11 @@ from .trips import trip_items
 def build_brief(db: Database, vault: Optional[dict] = None) -> str:
     s = db.all_settings()
     opsec = bool(s.get("opsec_mode"))
+    try:
+        critical_radius_km = float(s.get("critical_radius_km") or 2000)
+    except (TypeError, ValueError):
+        critical_radius_km = 2000.0
+    critical_radius_km = max(100.0, min(10000.0, critical_radius_km))
     r = readiness(db)
     now = datetime.now(timezone.utc)
     try:
@@ -57,7 +62,7 @@ def build_brief(db: Database, vault: Optional[dict] = None) -> str:
                 dlat = rlat2 - rlat1; dlon = rlon2 - rlon1
                 a = math.sin(dlat/2)**2 + math.cos(rlat1)*math.cos(rlat2)*math.sin(dlon/2)**2
                 dist = 6371*2*math.asin(math.sqrt(a))
-            if dist <= 2000:
+            if dist <= critical_radius_km:
                 nearby_critical += 1
     except Exception:
         nearby_critical = int(feed_summary.get("critical_count") or 0)
@@ -146,7 +151,7 @@ def build_brief(db: Database, vault: Optional[dict] = None) -> str:
         lines.append(f"   - [INCIDENT/{inc['severity']}] {inc['title']}"
                      + (f" ({inc['category']})" if inc.get("category") else ""))
     if nearby_critical:
-        lines.append(f"   - [INTEL] {nearby_critical} critical cached feed item(s) within 2000 km; "
+        lines.append(f"   - [INTEL] {nearby_critical} critical cached feed item(s) within {int(round(critical_radius_km))} km; "
                      "verify with official sources before acting.")
     lines += ["", "3. DECISIONS / ACTIONS"]
     if actions:

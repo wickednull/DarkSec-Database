@@ -100,7 +100,8 @@ palette.
   CelesTrak TLE/SGP4 satellites, USGS earthquakes, NOAA SWPC, GDACS/EONET,
   Safecast, Smithsonian volcano reports, world news and Open-Meteo), a local
   weighted threat index, solar/day-night state and live event logging into the
-  mission log. Auto-sync pauses offline and in OPSEC mode.
+  mission log. The nearby critical-event radius is configurable in Settings
+  (default 2000 km). Auto-sync pauses offline and in OPSEC mode.
 - **Settings** — identity, position, grid format, radio limits, map tiles,
   light/dark appearance (Daylight, Paper, Solarized, Cloud, Sand, Mint,
   Blueprint, Lavender, high-contrast light and multiple dark themes, with a
