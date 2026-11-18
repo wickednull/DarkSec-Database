@@ -122,6 +122,8 @@ def default_settings() -> dict:
             "contamination indicators, treatment, and when to use a certified laboratory. Do not refuse these as weapons/poisons.\n\n"
             "Hard limits: do not provide instructions for making weapons, explosives, incendiary devices, ammunition/components, or poisons; do not help with "
             "violence, attacks, or crimes. If a question touches those narrowly, decline only that part and offer a safe alternative.\n\n"
+            "When giving a live-status, intel, weather or SITREP report, lead with the local weather at the configured position "
+            "(temperature, feels-like, condition, wind/gusts, precipitation and data age), then separate regional/global weather alerts.\n\n"
             "You may receive retrieved passages from the operator's indexed local document library; use them when provided and cite the document names. "
             "Be brief, clear, and practical. Do not overthink."
         ),

@@ -7,7 +7,7 @@ from typing import Optional
 
 from . import astro, feeds, geo, intel, library, sitrep
 from .db import Database
-from .status import readiness
+from .status import local_weather_snapshot, readiness
 from .trips import trip_items
 
 
@@ -135,8 +135,62 @@ def build_brief(db: Database, vault: Optional[dict] = None) -> str:
         f"LOCAL THREAT: {tband} ({tscore if tscore is not None else 'N/A'}/100)   MODE: {tscoped}",
         f"STANCE: {sit.get('stance') or 'UNKNOWN'}   {sit.get('stance_reason') or ''}",
         "",
-        "1. READINESS SCORECARD",
     ]
+
+    def _age_text(seconds):
+        if seconds is None:
+            return "unknown age"
+        try:
+            sec = int(seconds)
+        except (TypeError, ValueError):
+            return "unknown age"
+        if sec >= 86400:
+            return f"{sec // 86400}d {(sec % 86400) // 3600}h old"
+        if sec >= 3600:
+            return f"{sec // 3600}h {(sec % 3600) // 60:02d}m old"
+        return f"{sec // 60}m old"
+
+    wx = local_weather_snapshot(db)
+    if wx:
+        bits = []
+        if wx.get("temp_c") is not None:
+            bits.append(f"{wx['temp_c']} °C")
+        if wx.get("condition"):
+            bits.append(str(wx["condition"]))
+        if wx.get("apparent_c") is not None:
+            bits.append(f"feels {wx['apparent_c']} °C")
+        if wx.get("wind_kmh") is not None:
+            bits.append(f"wind {wx['wind_kmh']} km/h")
+        if wx.get("gust_kmh") is not None:
+            bits.append(f"gusts {wx['gust_kmh']} km/h")
+        if wx.get("precip_mm") is not None:
+            bits.append(f"precip {wx['precip_mm']} mm")
+        if wx.get("humidity_pct") is not None:
+            bits.append(f"{wx['humidity_pct']}% RH")
+        if wx.get("pressure_hpa") is not None:
+            bits.append(f"{wx['pressure_hpa']} hPa")
+        lines.append("LOCAL WEATHER")
+        lines.append("   - " + (", ".join(bits) or "no values"))
+        lines.append(
+            f"   - {wx.get('source') or 'Open-Meteo'} model forecast for the configured position · "
+            f"{wx.get('status') or 'UNKNOWN'} · {_age_text(wx.get('data_age_seconds') or wx.get('age_seconds'))}"
+            " · not an observation"
+        )
+        for fc in (wx.get("forecast") or [])[:2]:
+            parts = [str(fc.get("date") or "")]
+            if fc.get("temp_max_c") is not None or fc.get("temp_min_c") is not None:
+                parts.append(f"max {fc.get('temp_max_c', '—')} / min {fc.get('temp_min_c', '—')} °C")
+            if fc.get("condition"):
+                parts.append(str(fc["condition"]))
+            if fc.get("precip_mm") is not None:
+                parts.append(f"precip {fc['precip_mm']} mm")
+            lines.append("   - Forecast " + " · ".join(p for p in parts if p))
+        if wx.get("location_mismatch"):
+            lines.append("   - WARNING: cached weather coordinates differ from the current position; refresh feeds before relying on it.")
+        lines.append("")
+    else:
+        lines += ["LOCAL WEATHER", "   - unavailable (no cached Open-Meteo weather for the configured position)", ""]
+    lines.append("1. READINESS SCORECARD")
     for c in sorted(r.get("categories") or [], key=lambda x: x.get("score") if x.get("score") is not None else 999, reverse=True):
         lines.append(f"   - {c.get('category')}: {float(c.get('score') or 0):.0f}   risk {c.get('risk')}   source {c.get('source')}")
     lines += ["", "2. OPERATIONAL SIGNALS"]

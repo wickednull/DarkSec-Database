@@ -978,6 +978,8 @@ def overview(db: Database, lat: float | None, lon: float | None, elevation_m: fl
     
     feeds = feedstore.list_feeds(db)
     feeds_full = feedstore.list_feeds(db, item_limit=None)
+    weather_feed = next((f for f in feeds_full if f.get("id") == "open_meteo_weather"), None) or {}
+    weather_items = weather_feed.get("items") or []
     # The intel RSOE panel filters all categories, but the default feed listing
     # caps items at 30. Attach the full cached RSOE list for that one source.
     try:
@@ -1026,6 +1028,13 @@ def overview(db: Database, lat: float | None, lon: float | None, elevation_m: fl
         "disaster_news": disaster_news[:10],  # Top 10 disaster stories
         "covid_stats": covid_stats,
         "disease_summary": disease_summary,
+        "weather": ({
+            **dict(weather_items[0]),
+            "status": weather_feed.get("status"),
+            "age_seconds": weather_feed.get("age_seconds"),
+            "data_age_seconds": weather_feed.get("data_age_seconds"),
+            "source": "Open-Meteo",
+        } if weather_items else None),
         "online": online,
         "updated": utcnow(),
     }
@@ -1126,6 +1135,8 @@ def cbrn_status(db: Database, lat: float, lon: float) -> dict:
     local = db.one("SELECT * FROM rad_log ORDER BY ts DESC LIMIT 1")
     air = by_id.get("open_meteo_air") or {}
     air_item = (items("open_meteo_air") or [None])[0]
+    weather_feed = by_id.get("open_meteo_weather") or {}
+    weather_item = (items("open_meteo_weather") or [None])[0]
 
     hazards = [
         i for i in items("eonet")
@@ -1161,4 +1172,11 @@ def cbrn_status(db: Database, lat: float, lon: float) -> dict:
             "fetched_at": air.get("fetched_at"),
             "status": air.get("status"),
         },
+        "weather": ({
+            **dict(weather_item),
+            "status": weather_feed.get("status"),
+            "age_seconds": weather_feed.get("age_seconds"),
+            "data_age_seconds": weather_feed.get("data_age_seconds"),
+            "source": "Open-Meteo",
+        } if weather_item else None),
     }

@@ -670,7 +670,10 @@ def assistant_live_status(d: Database, vault_obj=None) -> dict:
             "apparent_c": weather.get("apparent_c"), "condition": weather.get("condition"),
             "wind_kmh": weather.get("wind_kmh"), "gust_kmh": weather.get("gust_kmh"),
             "precip_mm": weather.get("precip_mm"),
+            "humidity_pct": weather.get("humidity_pct"),
+            "pressure_hpa": weather.get("pressure_hpa"),
             "forecast": (weather.get("forecast") or [])[:3],
+            "source": "Open-Meteo",
         } if weather else None),
         "air_quality": ({
             "feed_age_seconds": (by_id.get("open_meteo_air") or {}).get("age_seconds"),
@@ -743,13 +746,15 @@ def assistant_live_status_compact(d: Database, vault_obj=None) -> dict:
              "source": a.get("source"), "time": a.get("time")}
             for a in (out.get("alerts") or [])[:6]
         ],
-        "weather": ({
+        "local_weather": ({
             "age_seconds": weather.get("feed_age_seconds"),
             "time": weather.get("time"), "temp_c": weather.get("temp_c"),
             "apparent_c": weather.get("apparent_c"), "condition": weather.get("condition"),
             "wind_kmh": weather.get("wind_kmh"), "gust_kmh": weather.get("gust_kmh"),
-            "precip_mm": weather.get("precip_mm"),
+            "precip_mm": weather.get("precip_mm"), "humidity_pct": weather.get("humidity_pct"),
+            "pressure_hpa": weather.get("pressure_hpa"),
             "forecast": (weather.get("forecast") or [])[:2],
+            "source": "Open-Meteo",
         } if weather else None),
         "air_quality": ({
             "age_seconds": air.get("feed_age_seconds"),
@@ -771,7 +776,9 @@ def assistant_live_status_compact(d: Database, vault_obj=None) -> dict:
             "critical_near": sit.get("critical_near"),
             "actions": [a.get("text") for a in (sit.get("actions") or [])[:4]],
         } if sit else None),
-        "note": "Cached local data only; report ages and never claim STALE data is current.",
+        "note": ("Cached local data only; report ages and never claim STALE data is current. "
+                 "local_weather is the Open-Meteo forecast for the operator's configured position; "
+                 "alerts may be regional or global."),
     }
 
 

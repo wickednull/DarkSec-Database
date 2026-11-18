@@ -483,7 +483,8 @@ _TOOL_HINTS = re.compile(
     r"weather|forecast|temperature|wind|windy|rain|raining|snow|snowing|storm|hurricane|"
     r"wildfire|flood|earthquake|smoke|fog|humidity|uv index|"
     r"alert|alerts|warning|air quality|aqi|radiation|space weather|readiness|"
-    r"feeds?|sensors?|conditions|outage|sync|online|offline|trip)\b",
+    r"feeds?|sensors?|conditions|outage|sync|online|offline|trip|"
+    r"intel|intelligence|threat report)\b",
     re.IGNORECASE,
 )
 _TOOL_ACTIONS = re.compile(
@@ -590,7 +591,8 @@ _LOG_HINTS = re.compile(r"\b(mission log|journal|log entr(?:y|ies)|what did i (?
 _LIBRARY_HINTS = re.compile(r"\b(manuals?|documents?|pdfs?|books?|guides?|handbooks?|library|field manual)\b", re.I)
 _SITREP_HINTS = re.compile(
     r"\b(sitrep|situation report|field brief|operational brief|status report|"
-    r"brief me|give me (?:the |a )?brief)\b", re.I)
+    r"brief me|give me (?:the |a )?brief|intel report|intelligence report|"
+    r"threat report|intel brief)\b", re.I)
 _VAULT_HINTS = re.compile(r"\b(note|notes|vault)\b", re.I)
 _CALC_HINTS = re.compile(
     r"\b(calc|calculator|calculate|wind chill|heat index|dew point|wet bulb|"
@@ -735,6 +737,13 @@ def build_messages(db: Database, user_text: str, history: list[dict] | None = No
     # prompt re-evaluation every request (tens of seconds on CPU).
     sys = cfg["system_prompt"] or "Your name is Delamain, a local survival assistant."
     sys += (
+        "\nWhen giving a live-status, intel, weather or SITREP report, always state the local "
+        "weather at the operator's configured position first: temperature, feels-like, condition, "
+        "wind/gusts, precipitation and data age. Keep regional/global weather alerts separate, and "
+        "never describe stale or global weather as current local conditions. Use get_live_status "
+        "or get_sitrep for the values."
+    )
+    sys += (
         f"\nYou are Delamain; always identify as Delamain, never as NIGHTWATCH. "
         f"Units: {cfg['units']}. Operator callsign: {cfg['callsign'] or 'unknown'} "
         f"(the person using the console, not you). OPSEC mode: {'on' if cfg['opsec_mode'] else 'off'}."
@@ -851,7 +860,7 @@ def tool_specs(cfg: dict | None = None) -> list[dict]:
             "function": {
                 "name": "get_live_status",
                 "description": (
-                    "Cached operational picture: feeds, weather, air quality, space "
+                    "Cached operational picture: local weather, feeds, air quality, space "
                     "weather, alerts, readiness, sync. Use before current-condition "
                     "questions and report how old the data is."
                 ),

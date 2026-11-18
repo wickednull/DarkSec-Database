@@ -6,6 +6,7 @@ they can be tested and reused without starting the server.
 """
 from __future__ import annotations
 
+import math
 import os
 import socket
 import sys
@@ -20,6 +21,60 @@ from . import config, defcon, feeds, intel, sdr, sitrep
 from .db import Database, utcnow
 
 
+
+
+def local_weather_snapshot(db: Database) -> dict | None:
+    """Cached Open-Meteo conditions for the operator's configured position."""
+    try:
+        rows = feeds.list_feeds(db, item_limit=8)
+        row = next((f for f in rows if f.get("id") == "open_meteo_weather"), None)
+    except Exception:
+        return None
+    if not row:
+        return None
+    items = row.get("items") or []
+    if not items:
+        return None
+    w = items[0]
+    s = db.all_settings()
+    try:
+        lat = float(s.get("lat"))
+        lon = float(s.get("lon"))
+    except (TypeError, ValueError):
+        lat = lon = None
+    wlat, wlon = w.get("lat"), w.get("lon")
+    location_mismatch = False
+    distance_km = None
+    try:
+        if lat is not None and lon is not None and wlat is not None and wlon is not None:
+            rlat1, rlon1 = math.radians(lat), math.radians(lon)
+            rlat2, rlon2 = math.radians(float(wlat)), math.radians(float(wlon))
+            a = (math.sin((rlat2 - rlat1) / 2) ** 2
+                 + math.cos(rlat1) * math.cos(rlat2) * math.sin((rlon2 - rlon1) / 2) ** 2)
+            distance_km = 6371 * 2 * math.asin(math.sqrt(a))
+            location_mismatch = distance_km > 25
+    except (TypeError, ValueError):
+        pass
+    return {
+        "status": row.get("status"),
+        "age_seconds": row.get("age_seconds"),
+        "data_age_seconds": row.get("data_age_seconds"),
+        "time": w.get("time"),
+        "temp_c": w.get("temperature_c"),
+        "apparent_c": w.get("apparent_c"),
+        "condition": w.get("condition"),
+        "wind_kmh": w.get("wind_kmh"),
+        "gust_kmh": w.get("gust_kmh"),
+        "precip_mm": w.get("precip_mm"),
+        "humidity_pct": w.get("humidity_pct"),
+        "pressure_hpa": w.get("pressure_hpa"),
+        "forecast": (w.get("forecast") or [])[:3],
+        "lat": wlat,
+        "lon": wlon,
+        "location_mismatch": location_mismatch,
+        "distance_km": distance_km,
+        "source": "Open-Meteo",
+    }
 
 
 # --------------------------------------------------------------------------
