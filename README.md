@@ -261,6 +261,25 @@ validated before they are stored under `maps/tiles/cache/<source>/z/x/y.ext`,
 so a provider error page can never end up in the cache. **Clear offline tiles**
 in the same dialog removes downloaded tiles.
 
+#### MBTiles from a USB drive
+
+Operator-supplied MBTiles archives are read **in place and read-only**, so a
+multi-gigabyte regional map does not have to be copied into the app folder:
+
+1. Plug in the drive and wait for it to mount.
+2. Open **Settings → Offline maps → MBTiles path**.
+3. Press **FIND ON USB**. The scanner looks in the data folder, `maps/`, your
+   home folder and common mount points (`/media`, `/run/media`, `/mnt`,
+   `/Volumes`, and `D:`–`Z:` on Windows).
+4. Pick an archive, or point the path at a folder containing several
+   `.mbtiles` files. Press **CHECK** to verify it.
+
+Raster PNG/JPEG/WebP archives are supported, including gzip-compressed tile
+blobs and both the standard MBTiles TMS row order and non-standard `scheme=xyz`
+archives. Vector PBF/MVT archives are reported as unsupported because the
+basemap renderer draws raster tiles. Keep the drive mounted while the map is in
+use; if it is removed the map falls back to bundled and cached tiles.
+
 To rebuild the bundled overview from a working provider (online, once):
 
 ```bash

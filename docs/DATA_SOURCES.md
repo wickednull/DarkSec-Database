@@ -24,8 +24,21 @@ redistributing any data.
 | Layer | Source | Storage | Notes |
 |---|---|---|---|
 | Vector basemap | Bundled Natural Earth-derived data (`maps/vector`) | Local files | No tile server contacted by default. |
-| Raster tiles | Operator-supplied MBTiles/local tiles or configured local sources | Local files/cache | No external tile server unless operator configures one. |
+| Raster tiles | Operator-supplied MBTiles/local tiles or configured local sources | Local files/cache | Read in place from local disks or USB. Raster PNG/JPEG/WebP only; no external tile server unless operator configures one. |
 | Subsea/data cables | Cached/public dataset import when available, or local GeoJSON (`fielddata/maps/submarine-cables.geojson` etc.) | Feed cache | Preserve dataset attribution in feed `source_note`. Verify license before redistribution. |
+
+## Offline MBTiles
+
+`Settings → Offline maps` accepts either one `.mbtiles` archive or a folder of
+archives, including a mounted USB drive. Archives are opened read-only and are
+never modified. Supported: raster PNG/JPEG/WebP tiles, gzip-compressed tile
+blobs, standard MBTiles TMS row order and non-standard `scheme=xyz` archives.
+Vector PBF/MVT archives are detected and reported as unusable by the raster
+basemap rather than failing silently. The **Find on USB** scanner searches the
+data folder, `maps/`, the home folder and common removable-media mount points.
+
+Operators are responsible for the license and attribution of imported map
+imagery.
 
 ## Intelligence Feeds (cached)
 

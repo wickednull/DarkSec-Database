@@ -42,7 +42,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTe
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, assistant, astro, autosync, config, feeds, geo, geocoding, intel, library, phonegps, sdr, sitrep, tilecache
+from . import __version__, assistant, astro, autosync, config, feeds, geo, geocoding, intel, library, mbtiles, phonegps, sdr, sitrep, tilecache
 from .config import APP_NAME
 from .brief import build_brief, to_markdown
 from .calc_catalog import CALC_CATALOG, CALC_FUNCS
@@ -3801,10 +3801,20 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 if not v.startswith(("http://", "https://")):
                     raise HTTPException(status_code=400, detail="ollama_base_url must start with http:// or https://")
                 value = v.rstrip("/")
-            if key in ("mbtiles_path", "dem_mbtiles_path") and value:
+            if key == "mbtiles_path" and value:
+                # Operators point this at a single archive or at a USB folder
+                # holding several archives; both must be accepted.
+                if not mbtiles.valid_source_path(str(value)):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="mbtiles_path must be an .mbtiles file or a folder containing .mbtiles archives",
+                    )
+                value = str(Path(str(value)).expanduser())
+            if key == "dem_mbtiles_path" and value:
                 p = Path(str(value)).expanduser()
                 if not p.exists() or not p.is_file():
                     raise HTTPException(status_code=400, detail=f"{key} file does not exist")
+                value = str(p)
             if key == "dem_encoding" and value and str(value) not in ("terrarium", "mapbox", "custom"):
                 raise HTTPException(status_code=400, detail="dem_encoding must be terrarium, mapbox, or custom")
             if key == "assistant_history_encrypted":
@@ -3814,6 +3824,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     except ValueError as exc:
                         raise HTTPException(status_code=400, detail=str(exc))
             d.set_setting(key, value)
+            if key == "mbtiles_path":
+                mbtiles.invalidate(str(value or ""))
         if "lan_access_enabled" in payload:
             lm = getattr(request.app.state, "lan_manager", None)
             if payload.get("lan_access_enabled"):
@@ -5056,6 +5068,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     "attribution": attr,
                 })
         stats = {s["source"]: s for s in tilecache.cache_stats()["sources"]}
+        mb = mbtiles.describe_source()
         for src in tilecache.sources_info():
             s = stats.get(src["id"], {})
             if not s.get("tile_count"):
@@ -5072,35 +5085,46 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             "raster": layers,
             "vector": vectors,
             "activeSource": active_source,
+            "mbtiles": {
+                "configured": mb["configured"],
+                "usable": mb["usable"],
+                "count": mb["count"],
+                "error": mb["error"],
+                "revision": mbtiles.revision(),
+                "archives": mb["archives"][:8],
+            },
             "cache": {
                 "tile_count": sum(s.get("tile_count", 0) for s in stats.values()),
                 "total_mb": round(sum(s.get("total_bytes", 0) for s in stats.values()) / (1024 * 1024), 2),
             },
         }
 
+    @app.get("/api/map/mbtiles/scan")
+    def map_mbtiles_scan(refresh: bool = False):
+        """Find .mbtiles archives in the data folders and mounted media."""
+        items = mbtiles.scan() if refresh else mbtiles.cached_scan()
+        return {
+            "items": items,
+            "roots": [str(p) for p in mbtiles.search_roots()],
+            "note": ("Archives are read in place; keep the USB drive mounted while using them. "
+                     "A folder containing several .mbtiles files can be selected as the path."),
+        }
+
+    @app.get("/api/map/mbtiles/info")
+    def map_mbtiles_info(path: str = ""):
+        """Validate one archive/folder, or describe the configured source."""
+        if str(path or "").strip():
+            return mbtiles.describe_path(path)
+        return mbtiles.describe_source()
+
     def _mbtiles_tile(z: int, x: int, y: int) -> bytes | None:
-        path = config.DB_PATH.parent / "does-not-exist"
-        try:
-            # Settings lookups are cheap and the path can change at runtime.
-            d = Database()
-            raw = d.get_setting("mbtiles_path", "")
-            d.close()
-            if not raw:
-                return None
-            path = Path(raw).expanduser()
-            if not path.exists():
-                return None
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
-            try:
-                row = conn.execute(
-                    "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                    (z, x, (1 << z) - 1 - y),
-                ).fetchone()
-                return bytes(row[0]) if row else None
-            finally:
-                conn.close()
-        except Exception:
-            return None
+        """Read from the configured archive or USB folder of archives.
+
+        The archive path, connection and metadata are cached in ``mbtiles`` so a
+        map viewport does not reopen SQLite (or the main database) per tile.
+        """
+        hit = mbtiles.lookup_tile(z, x, y)
+        return hit[0] if hit else None
 
     def _tile_response(data: bytes, source: str = ""):
         ctype = "image/png"
@@ -5287,18 +5311,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         path = Path(str(raw)).expanduser()
         if not raw or not path.is_file():
             return None
-        try:
-            import sqlite3 as _sqlite3
-            uri = f"file:{path}?mode=ro"
-            with _sqlite3.connect(uri, uri=True, timeout=2) as conn:
-                tile_row = (1 << z) - 1 - y
-                row = conn.execute(
-                    "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                    (z, x, tile_row),
-                ).fetchone()
-            return bytes(row[0]) if row else None
-        except Exception:
-            return None
+        hit = mbtiles.lookup_tile(z, x, y, raw=raw)
+        return hit[0] if hit else None
 
     @app.get("/api/map/dem/status")
     def dem_status(request: Request):

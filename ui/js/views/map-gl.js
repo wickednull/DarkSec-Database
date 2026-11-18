@@ -30,8 +30,9 @@ function loadMapLibre() {
   return maplibrePromise;
 }
 
-function rasterStyle() {
-  const tile = `${location.origin}/api/map/tiles/{z}/{x}/{y}.png`;
+function rasterStyle(revision = "") {
+  const suffix = revision ? `?r=${encodeURIComponent(revision)}` : "";
+  const tile = `${location.origin}/api/map/tiles/{z}/{x}/{y}.png${suffix}`;
   return {
     version: 8,
     name: "DarkSec Raster",
@@ -94,7 +95,7 @@ export async function render(root) {
   const homeLon = Number.isFinite(Number(settings.lon)) ? Number(settings.lon) : -98.5795;
   const hidePosition = opsecActive(settings);
   const positionInfo = positionConfidence(settings);
-  let intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud;
+  let intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud, mapLayers;
   let statusBox = null, coordBox = null;
   try {
     [intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud] = await Promise.all([
@@ -106,6 +107,7 @@ export async function render(root) {
       api.get("/api/map/overlays/wind").catch(() => null),
       api.get("/api/map/overlays/rain").catch(() => null),
       api.get("/api/map/overlays/cloud").catch(() => null),
+      api.get("/api/map/layers").catch(() => null),
     ]);
   } catch (err) { root.replaceChildren(h("div", { class: "callout danger", text: err.message })); return; }
 
@@ -209,7 +211,7 @@ export async function render(root) {
   side.appendChild(panel({ title:"Legend", icon:"info", body: glLegend }));
   side.appendChild(panel({ title:"Inspector", icon:"info", body: inspector }));
 
-  map = new maplibregl.Map({ container, style: rasterStyle(), center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 3.5, pitch:0, bearing:0, attributionControl:true, maxPitch:85 });
+  map = new maplibregl.Map({ container, style: rasterStyle(mapLayers?.mbtiles?.revision || ""), center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 3.5, pitch:0, bearing:0, attributionControl:true, maxPitch:85 });
   map.addControl(new maplibregl.NavigationControl({ visualizePitch:true, showCompass:true, showZoom:true }), "top-right");
   map.addControl(new maplibregl.ScaleControl({ maxWidth:120, unit: U.isImperial() ? "imperial" : "metric" }), "bottom-left");
   try { if (typeof map.setProjection === 'function') map.setProjection({ type:'globe' }); } catch (e) { console.warn('Initial globe projection failed', e); }

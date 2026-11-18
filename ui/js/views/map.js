@@ -135,7 +135,9 @@ export async function render(root, params = {}) {
     clusterDense: true, cctvShowAlpr: true, satsOverheadOnly: false,
   };
   const raster = (layers.raster || []);
-  let tileAvailable = !!(raster.length || settings.mbtiles_path);
+  let mbtilesInfo = layers.mbtiles || {};
+  let tileRevision = mbtilesInfo.revision || "";
+  let tileAvailable = !!(raster.length || mbtilesInfo.usable);
   let disposed = false;
   let world = null;
   let selected = null;
@@ -176,6 +178,14 @@ export async function render(root, params = {}) {
     root.appendChild(alertStrip("No offline basemap is installed. Waypoints and tracks still work, but no terrain will render. Add maps/vector/world.geojson or point Settings at an MBTiles archive.", "red"));
   } else if (!tileAvailable) {
     root.appendChild(alertStrip("Vector basemap only. Detail is limited at close range; use a paper map or add an MBTiles archive for tactical-scale imagery.", ""));
+  }
+  if (mbtilesInfo.configured && !mbtilesInfo.usable) {
+    const why = mbtilesInfo.error
+      || (mbtilesInfo.archives || [])
+        .map((a) => a.vector ? `${a.file}: vector (PBF) archives are not renderable` : a.error)
+        .filter(Boolean).join("; ")
+      || "archive cannot be opened";
+    root.appendChild(alertStrip(`Configured MBTiles source is not usable — ${why}. Check Settings → Offline maps.`, "red"));
   }
 
   const layout = h("div", { class: "map-layout mt-14" });
@@ -303,7 +313,7 @@ export async function render(root, params = {}) {
       layerRows,
       h("div", { class: "mt-8" }, field("INTEL AGE FILTER", ageFilter)),
       intelSummaryEl,
-      h("div", { class: "tiny dim mt-10", text: `${raster.length} raster source(s) · MBTiles ${settings.mbtiles_path ? "configured" : "not configured"}` }),
+      h("div", { class: "tiny dim mt-10", text: `${raster.length} raster source(s) · MBTiles ${mbtilesInfo.configured ? (mbtilesInfo.usable ? `${mbtilesInfo.count || 1} archive(s)` : "configured · unusable") : "not configured"}` }),
       cacheStatusEl,
       h("div", { class: "row gap-6 mt-8" },
         btn("MANAGE OFFLINE MAP", { size: "sm", icon: "download", tone: "primary", onClick: openDownloadDialog }),
@@ -446,7 +456,9 @@ export async function render(root, params = {}) {
   const sourceMeta = {};
   function updateAttribution() {
     const layer = (layers.raster || []).find((l) => l.id === activeSource);
-    const attr = layer?.attribution || sourceMeta[activeSource]?.attribution || "";
+    const mbNames = (mbtilesInfo.archives || []).map((a) => a.name).filter(Boolean).slice(0, 3).join(", ");
+    const attr = layer?.attribution || sourceMeta[activeSource]?.attribution
+      || (mbtilesInfo.usable ? `MBTiles · ${mbNames || "operator archive"}` : "");
     attribution.textContent = attr ? `Tiles: ${attr}` : "Vector basemap · no tile attribution";
   }
   api.get("/api/map/cache/sources").then((r) => {
@@ -469,7 +481,9 @@ export async function render(root, params = {}) {
       if (l) {
         layers = l;
         if (l.activeSource) activeSource = l.activeSource;
-        tileAvailable = !!((l.raster || []).length || settings.mbtiles_path);
+        mbtilesInfo = l.mbtiles || {};
+        tileRevision = mbtilesInfo.revision || "";
+        tileAvailable = !!((l.raster || []).length || mbtilesInfo.usable);
         updateAttribution();
       }
     } catch { /* offline: keep last known values */ }
@@ -772,7 +786,7 @@ export async function render(root, params = {}) {
     img.decoding = "async";
     img.onload = () => draw();
     img.onerror = () => { img.dataset.failed = "1"; };
-    img.src = `/api/map/tiles/${z}/${x}/${y}.png?v=4`;
+    img.src = `/api/map/tiles/${z}/${x}/${y}.png?v=4${tileRevision ? `&r=${encodeURIComponent(tileRevision)}` : ""}`;
     tileCache.set(key, img);
     if (tileCache.size > 320) {
       const first = tileCache.keys().next().value;

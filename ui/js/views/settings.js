@@ -467,7 +467,11 @@ export async function render(root) {
     for (const o of opts) tileSource.appendChild(h("option", { value: o.value, text: o.label }));
     tileSource.value = opts.some((o) => o.value === current) ? current : opts[0].value;
   }).catch(() => {});
-  const mbtiles = input({ value: settings.mbtiles_path || "", placeholder: "/path/to/region.mbtiles" });
+  const mbtiles = input({ value: settings.mbtiles_path || "", placeholder: "/path/to/region.mbtiles or /media/USB/maps" });
+  const mbStatus = h("div", { class: "tiny muted", text: settings.mbtiles_path ? "Checking archive…" : "No local archive configured." });
+  const mbScan = btn("FIND ON USB", { size: "sm", icon: "search", onClick: () => scanMbtiles() });
+  const mbCheck = btn("CHECK", { size: "sm", icon: "check", onClick: () => checkMbtiles() });
+  const mbRow = h("div", { class: "row gap-6 wrap" }, h("div", { class: "grow" }, mbtiles), mbScan, mbCheck);
   const mapVector = checkbox("Render offline vector basemap", settings.map_vector !== false);
   const layersBox = h("div", { class: "col gap-4" }, h("div", { class: "tiny muted", text: "Loading layers…" }));
   const mapPanel = panel({
@@ -477,7 +481,8 @@ export async function render(root) {
       h("div", { class: "settings-subhead", text: "Tile source" }),
       h("div", { class: "form-grid" },
         field("Tile source", tileSource, "Used for live view and for new offline downloads. Bundled and cached tiles are always preferred."),
-        field("MBTiles path", mbtiles, "Must exist on this machine; read-only.")),
+        field("MBTiles path", mbRow, "A single .mbtiles file or a folder of archives, including a mounted USB drive. Read in place, read-only — keep the drive mounted while using it.")),
+      mbStatus,
       mapVector,
       h("div", { class: "settings-subhead", text: "Layers" }),
       layersBox,
@@ -488,6 +493,7 @@ export async function render(root) {
   addSectionHead("maps");
   grid.appendChild(mapPanel);
   loadLayers(layersBox);
+  if (settings.mbtiles_path) checkMbtiles(settings.mbtiles_path);
 
   /* ------------------------------------------------------------ library */
   const autoDeep = checkbox("Extract full text automatically when indexing", settings.auto_deep_index !== false);
@@ -1446,6 +1452,109 @@ export async function render(root) {
     } catch (err) {
       target.replaceChildren(h("div", { class: "tiny danger-text", text: err.message }));
     }
+  }
+
+  function mbZoom(info) {
+    if (info.minzoom == null && info.maxzoom == null) return "zoom unknown";
+    return `z${info.minzoom ?? "?"}–${info.maxzoom ?? "?"}`;
+  }
+
+  function mbSummary(info) {
+    if (info.directory) {
+      const archives = info.archives || [];
+      const usable = archives.filter((a) => a.usable);
+      if (!usable.length) return { text: info.error || "No usable .mbtiles archives in this folder", ok: false };
+      const names = usable.slice(0, 4).map((a) => `${a.file} (${(a.format || "?").toUpperCase()} ${mbZoom(a)})`).join(", ");
+      const more = usable.length > 4 ? ` +${usable.length - 4} more` : "";
+      return { text: `READY · ${usable.length}/${archives.length} archive(s): ${names}${more}`, ok: true };
+    }
+    if (info.vector) {
+      return { text: `Vector archive (${String(info.format || "pbf").toUpperCase()}) — the raster basemap cannot render it`, ok: false };
+    }
+    if (!info.usable) {
+      return { text: info.error || "Archive could not be opened", ok: false };
+    }
+    return {
+      text: `READY · ${info.name || info.file} · ${fmt.bytes(info.size_bytes)} · ${String(info.format || "?").toUpperCase()} · ${mbZoom(info)} · ${String(info.scheme || "tms").toUpperCase()} rows`,
+      ok: true,
+    };
+  }
+
+  function showMbStatus(info) {
+    const summary = mbSummary(info || {});
+    mbStatus.className = `tiny ${summary.ok ? "muted" : "danger-text"}`;
+    mbStatus.textContent = summary.text;
+  }
+
+  async function checkMbtiles(pathText) {
+    const path = String(pathText ?? mbtiles.value ?? "").trim();
+    if (!path) {
+      mbStatus.className = "tiny muted";
+      mbStatus.textContent = "No local archive configured.";
+      return;
+    }
+    mbStatus.className = "tiny muted";
+    mbStatus.textContent = "Checking archive…";
+    try {
+      const info = await api.get(`/api/map/mbtiles/info?path=${encodeURIComponent(path)}`);
+      showMbStatus(info);
+    } catch (err) {
+      mbStatus.className = "tiny danger-text";
+      mbStatus.textContent = err.message || "Could not check archive";
+    }
+  }
+
+  async function scanMbtiles() {
+    const body = h("div", { class: "col gap-8" }, loading("SCANNING FOR MBTILES"));
+    const m = modal({
+      title: "MBTiles archives",
+      sub: "Read-only · local folders, USB and mounted drives",
+      wide: true,
+      body,
+      actions: [btn("CLOSE", { tone: "ghost", onClick: () => m.close() })],
+    });
+    let out;
+    try {
+      out = await api.get("/api/map/mbtiles/scan?refresh=true");
+    } catch (err) {
+      body.replaceChildren(h("div", { class: "callout danger", text: err.message || "Scan failed" }));
+      return;
+    }
+    const items = out.items || [];
+    body.replaceChildren();
+    if (!items.length) {
+      body.appendChild(emptyState(
+        "No MBTiles archives found",
+        `Plug in the drive and scan again. Searched: ${(out.roots || []).slice(0, 6).join(", ")}`,
+      ));
+      return;
+    }
+    body.appendChild(h("div", { class: "tiny muted", text: `${items.length} archive(s) found. Files are used in place — keep the drive mounted.` }));
+    const list = h("div", { class: "list mt-8" });
+    for (const it of items) {
+      const use = btn("USE", {
+        size: "sm", tone: it.usable ? "primary" : "", icon: it.usable ? "check" : "warning",
+        disabled: !it.usable,
+        onClick: async () => {
+          mbtiles.value = it.path;
+          await saveSimple({ mbtiles_path: it.path }, "MBTiles archive selected");
+          showMbStatus(it);
+          m.close();
+        },
+      });
+      const tone = it.usable ? "green" : it.vector ? "amber" : "red";
+      const detail = it.vector
+        ? "vector tiles are not supported by the raster basemap"
+        : (it.error || `${(it.format || "?").toUpperCase()} · ${mbZoom(it)} · ${String(it.scheme || "tms").toUpperCase()} rows`);
+      list.appendChild(h("div", { class: "list-item" },
+        h("div", { class: "li-main" },
+          h("div", { class: "li-title truncate", text: `${it.name || it.file} · ${fmt.bytes(it.size_bytes)}` }),
+          h("div", { class: "li-sub mono truncate", text: it.path, title: it.path }),
+          h("div", { class: "li-sub", text: detail })),
+        badge(it.usable ? "READY" : it.vector ? "VECTOR" : "UNUSABLE", tone),
+        use));
+    }
+    body.appendChild(list);
   }
 
   async function loadAudit(target) {
