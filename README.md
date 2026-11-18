@@ -42,6 +42,7 @@ high contrast. The sun/moon button in the top bar switches between your saved
 dark and light themes. **Settings → Identity & display** sets the background
 mode (Dark / Light / Follow system), both theme variants, and the accent colour.
 
+
 ### Global search
 
 ![Global search across records, documents and references](docs/screenshots/global-search.png)
