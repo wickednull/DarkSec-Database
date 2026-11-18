@@ -505,6 +505,7 @@ the running process loads the new code.
   and related security headers.
 - No telemetry is included.
 
+
 ## Legal and safety
 
 Radio transmission, medical care, water treatment, electrical work, firearms,
