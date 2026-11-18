@@ -275,6 +275,14 @@ zoom stack for the current viewport while online. Cached tiles are skipped.
 files and corrupt images (and is also checked whenever a tile is read).
 **Clear offline tiles** removes downloaded tiles.
 
+**Tile cache location** in Settings → Offline maps can point at a USB folder,
+for example `/media/<user>/<drive>/DarkSec-Tiles`. Press **FIND USB** to list
+mounted writable folders, **CHECK** to verify free space and permissions, then
+**SAVE MAP**. Switching folders asks whether to **copy existing tiles**; the
+copy runs in the background and the old cache is left in place until you
+delete it. If the drive is unplugged the map falls back to other sources
+instead of failing, and downloads report the write error.
+
 #### MBTiles from a USB drive
 
 Operator-supplied MBTiles archives are read **in place and read-only**, so a

@@ -675,6 +675,8 @@ export async function render(root, params = {}) {
     const centerLat = input({ type: "number", step: "0.0001", value: view.lat.toFixed(4) });
     const centerLon = input({ type: "number", step: "0.0001", value: view.lon.toFixed(4) });
     const estimateEl = h("div", { class: "callout", text: "Calculating…" });
+    const targetEl = h("div", { class: "tiny muted", text: "Checking cache destination…" });
+    let cacheTarget = null;
     const progressWrap = h("div", { class: "col gap-6" });
     const progressBar = h("div", { class: "bar", style: { width: "0%" } });
     const progressTrack = h("div", { class: "progress-track" }, progressBar);
@@ -694,6 +696,7 @@ export async function render(root, params = {}) {
         field("Centre latitude", centerLat),
         field("Centre longitude", centerLon)),
       estimateEl,
+      targetEl,
       progressWrap);
 
     const dl = modal({
@@ -760,9 +763,12 @@ export async function render(root, params = {}) {
         if (seq !== estimateSeq) return;
         lastEstimate = e;
         const mb = (e.missing * 18 / 1024).toFixed(1);
+        const neededGb = (e.missing * 18) / (1024 * 1024);
+        const noRoom = cacheTarget?.free_gb != null && neededGb > cacheTarget.free_gb;
         estimateEl.textContent = `Zoom ${zMin}–${zMax} · ${e.total.toLocaleString()} tiles · ` +
-          `${e.missing.toLocaleString()} to fetch · ≈${mb} MB`;
-        estimateEl.className = e.missing > 8000 ? "callout warn" : "callout";
+          `${e.missing.toLocaleString()} to fetch · ≈${mb} MB` +
+          (noRoom ? ` · NOT ENOUGH FREE SPACE (${cacheTarget.free_gb} GB free)` : "");
+        estimateEl.className = (e.missing > 8000 || noRoom) ? "callout warn" : "callout";
       }).catch((err) => {
         if (seq !== estimateSeq) return;
         estimateEl.textContent = `Estimate unavailable: ${err.message}`;
@@ -770,6 +776,14 @@ export async function render(root, params = {}) {
       });
     }
     let lastEstimate = null;
+    api.get("/api/map/cache/status").then((st) => {
+      cacheTarget = st;
+      const free = st.free_gb != null ? `${st.free_gb} GB free` : "free space unknown";
+      targetEl.textContent = `Destination: ${st.path} · ${free}`;
+      updateEstimate();
+    }).catch(() => {
+      targetEl.textContent = "Destination: current tile cache (status unavailable)";
+    });
     updateEstimate();
     [sourceSel, radiusSel, zoomSel, centerLat, centerLon, fullStack].forEach((el) =>
       el.addEventListener("change", updateEstimate));

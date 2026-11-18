@@ -157,3 +157,46 @@ def test_fetched_tile_is_stored_under_lookup_extension(tmp_path, monkeypatch):
     # cache lookup must still find it.
     assert tilecache.get_cached(11, 5, 6, "esri_imagery") == payload
     assert tilecache.tile_path(11, 5, 6, "esri_imagery").exists()
+
+
+def test_cache_path_setting_and_check(client, tmp_path, monkeypatch):
+    from darksec import tilecache
+
+    usb = tmp_path / "USB" / "DarkSec-Tiles"
+    try:
+        r = client.put("/api/settings", json={"map_cache_path": str(usb)})
+        assert r.status_code == 200
+        assert r.json()["map_cache_path"] == str(usb.resolve())
+        assert usb.is_dir()
+        tilecache.invalidate_cache_path(str(usb.resolve()))
+        assert tilecache.cache_root() == usb.resolve()
+
+        check = client.get("/api/map/cache/check", params={"path": str(usb)}).json()
+        assert check["ok"] is True and check["writable"] is True
+    finally:
+        client.put("/api/settings", json={"map_cache_path": ""})
+        tilecache.invalidate_cache_path("")
+
+
+def test_relocate_copies_existing_tiles(tmp_path, monkeypatch):
+    from darksec import tilecache
+
+    src = tmp_path / "old-cache"
+    old = src / "esri_imagery" / "9" / "1" / "2.jpg"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(JPEG)
+    (src / "esri_imagery" / "9" / "1" / "2.jpg.part").write_bytes(b"partial")
+    dest = tmp_path / "usb" / "DarkSec-Tiles"
+
+    monkeypatch.setattr(tilecache, "cache_root", lambda: src)
+    monkeypatch.setattr(tilecache, "_downloads_running", lambda: False)
+    job = tilecache.start_relocate(str(dest))
+    for _ in range(100):
+        state = tilecache.relocate_status(job["id"])
+        if state["state"] != "running":
+            break
+        import time
+        time.sleep(0.02)
+    assert state["state"] == "done"
+    assert (dest / "esri_imagery" / "9" / "1" / "2.jpg").read_bytes() == JPEG
+    assert not (dest / "esri_imagery" / "9" / "1" / "2.jpg.part").exists()

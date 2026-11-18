@@ -472,6 +472,11 @@ export async function render(root) {
   const mbScan = btn("FIND ON USB", { size: "sm", icon: "search", onClick: () => scanMbtiles() });
   const mbCheck = btn("CHECK", { size: "sm", icon: "check", onClick: () => checkMbtiles() });
   const mbRow = h("div", { class: "row gap-6 wrap" }, h("div", { class: "grow" }, mbtiles), mbScan, mbCheck);
+  const mapCache = input({ value: settings.map_cache_path || "", placeholder: "/media/USB/DarkSec-Tiles (empty = app folder)" });
+  const cacheStatus = h("div", { class: "tiny muted", text: "Checking tile cache…" });
+  const cacheScan = btn("FIND USB", { size: "sm", icon: "search", onClick: () => scanCacheLocations() });
+  const cacheCheck = btn("CHECK", { size: "sm", icon: "check", onClick: () => refreshCacheStatus(true) });
+  const cacheRow = h("div", { class: "row gap-6 wrap" }, h("div", { class: "grow" }, mapCache), cacheScan, cacheCheck);
   const mapVector = checkbox("Render offline vector basemap", settings.map_vector !== false);
   const mapAutoPack = checkbox("Cache viewed map areas automatically while online", settings.map_auto_pack !== false);
   const layersBox = h("div", { class: "col gap-4" }, h("div", { class: "tiny muted", text: "Loading layers…" }));
@@ -484,6 +489,8 @@ export async function render(root) {
         field("Tile source", tileSource, "Used for live view and for new offline downloads. Bundled and cached tiles are always preferred."),
         field("MBTiles path", mbRow, "A single .mbtiles file or a folder of archives, including a mounted USB drive. Raster archives draw on both maps; vector PBF archives draw in the 3D GL map. Read in place, read-only — keep the drive mounted while using it.")),
       mbStatus,
+      field("Tile cache location", cacheRow, "Where downloaded raster tiles are stored. Point this at a USB folder for large offline packs. Empty uses the app's maps/tiles/cache. Existing tiles can be copied when you switch."),
+      cacheStatus,
       mapVector,
       mapAutoPack,
       h("div", { class: "settings-subhead", text: "Layers" }),
@@ -496,6 +503,7 @@ export async function render(root) {
   grid.appendChild(mapPanel);
   loadLayers(layersBox);
   if (settings.mbtiles_path) checkMbtiles(settings.mbtiles_path);
+  refreshCacheStatus(true);
 
   /* ------------------------------------------------------------ library */
   const autoDeep = checkbox("Extract full text automatically when indexing", settings.auto_deep_index !== false);
@@ -833,12 +841,44 @@ export async function render(root) {
   }
 
   async function saveMap() {
+    const nextCache = mapCache.value.trim();
+    const oldCache = String(settings.map_cache_path || "");
     const patch = {
       tile_source: tileSource.value, mbtiles_path: mbtiles.value.trim(),
       map_vector: mapVector.querySelector("input").checked,
       map_auto_pack: mapAutoPack.querySelector("input").checked,
+      map_cache_path: nextCache,
     };
+    if (nextCache !== oldCache) {
+      let stats = null;
+      try { stats = await api.get("/api/map/cache/status"); } catch { stats = null; }
+      if (stats && Number(stats.tile_count) > 0) {
+        let destination = nextCache;
+        if (!destination) {
+          const locations = await api.get("/api/map/cache/locations").catch(() => null);
+          destination = (locations?.items || []).find((item) => item.default)?.path || "";
+        }
+        const choice = await cacheSwitchChoice(stats.path || oldCache || "the current folder",
+          destination, stats.tile_count, stats.total_mb);
+        if (choice === "cancel") return;
+        if (choice === "copy") {
+          if (!destination) {
+            toast("Could not determine the default cache folder", "error");
+            return;
+          }
+          try {
+            await copyCacheTo(destination);
+            toast(`Copied ${Number(stats.tile_count).toLocaleString()} tiles`, "success");
+          } catch (err) {
+            toast(`Copy failed: ${err.message || err}`, "error");
+            return;
+          }
+        }
+      }
+    }
     await saveSimple(patch, "Map settings saved");
+    settings.map_cache_path = nextCache;
+    refreshCacheStatus(true);
   }
 
   async function saveFeed() {
@@ -1591,6 +1631,138 @@ export async function render(root) {
         use));
     }
     body.appendChild(list);
+  }
+
+  async function refreshCacheStatus(fetchCount = false) {
+    const typed = String(mapCache.value || "").trim();
+    try {
+      const info = await api.get(`/api/map/cache/check?path=${encodeURIComponent(typed)}`);
+      if (!info.ok) {
+        cacheStatus.className = "tiny danger-text";
+        cacheStatus.textContent = info.error || "Tile cache folder is not usable";
+        return;
+      }
+      const free = info.free_gb != null ? `${info.free_gb} GB free` : "free space unknown";
+      const where = info.default ? "App folder" : info.path;
+      let extra = "";
+      if (fetchCount) {
+        try {
+          const st = await api.get("/api/map/cache/status");
+          extra = ` · current cache ${Number(st.tile_count || 0).toLocaleString()} tiles (${st.total_mb || 0} MB)`;
+        } catch { /* leave count out */ }
+      }
+      cacheStatus.className = "tiny muted";
+      cacheStatus.textContent = `${where} · ${free}${extra}${info.writable ? "" : " · NOT WRITABLE"}`;
+    } catch (err) {
+      cacheStatus.className = "tiny danger-text";
+      cacheStatus.textContent = err.message || "Could not check tile cache folder";
+    }
+  }
+
+  async function scanCacheLocations() {
+    const body = h("div", { class: "col gap-8" }, loading("SCANNING FOR CACHE LOCATIONS"));
+    const m = modal({
+      title: "Tile cache locations",
+      sub: "USB drives and local folders · writable only",
+      wide: true,
+      body,
+      actions: [btn("CLOSE", { tone: "ghost", onClick: () => m.close() })],
+    });
+    let out;
+    try {
+      out = await api.get("/api/map/cache/locations");
+    } catch (err) {
+      body.replaceChildren(h("div", { class: "callout danger", text: err.message || "Scan failed" }));
+      return;
+    }
+    const items = (out.items || []).filter((i) => i.writable);
+    body.replaceChildren();
+    body.appendChild(h("div", { class: "tiny muted", text: "Select a folder. SAVE MAP will offer to copy existing tiles before switching." }));
+    if (!items.length) {
+      body.appendChild(emptyState("No writable USB or local folder found", "Plug in the drive, wait for it to mount, then scan again."));
+      return;
+    }
+    const list = h("div", { class: "list mt-8" });
+    for (const it of items) {
+      const use = btn("USE", {
+        size: "sm", tone: it.default ? "" : "primary", icon: "check",
+        onClick: () => {
+          mapCache.value = it.path;
+          refreshCacheStatus(true);
+          m.close();
+        },
+      });
+      list.appendChild(h("div", { class: "list-item" },
+        h("div", { class: "li-main" },
+          h("div", { class: "li-title truncate", text: it.default ? "App folder (default)" : it.path }),
+          h("div", { class: "li-sub mono truncate", text: it.path, title: it.path }),
+          h("div", { class: "li-sub", text: `${it.free_gb != null ? `${it.free_gb} GB free` : "free space unknown"}${it.exists ? " · existing folder" : " · will be created"}` })),
+        badge(it.default ? "DEFAULT" : "USB", it.default ? "muted" : "cyan"),
+        use));
+    }
+    body.appendChild(list);
+  }
+
+  function copyCacheTo(destination) {
+    return new Promise(async (resolve, reject) => {
+      const bar = h("div", { class: "bar", style: { width: "0%" } });
+      const text = h("div", { class: "tiny muted", text: "Starting copy…" });
+      let done = false;
+      const m = modal({
+        title: "Copying offline tiles",
+        sub: destination,
+        body: h("div", { class: "col gap-8" },
+          h("div", { class: "progress-track" }, bar),
+          text,
+          h("div", { class: "tiny muted", text: "Keep the USB drive connected. The current cache stays active until the copy finishes." })),
+        actions: [],
+        onClose: () => {
+          if (!done) reject(new Error("Copy dialog closed; the server copy may still be running"));
+        },
+      });
+      try {
+        const job = await api.post("/api/map/cache/relocate", { destination, remove_source: false });
+        const tick = async () => {
+          let state;
+          try { state = await api.get(`/api/map/cache/relocate/${job.id}`); }
+          catch (err) { m.close(); reject(err); return; }
+          const pct = state.total ? Math.round(state.completed / state.total * 100) : 100;
+          bar.style.width = `${pct}%`;
+          text.textContent = `${pct}% · ${state.completed}/${state.total} files · ${state.copied} copied · ${state.skipped} already there · ${state.failed} failed`;
+          if (state.state === "done") { done = true; m.close(); resolve(state); return; }
+          if (state.state === "partial" || state.state === "error") {
+            done = true;
+            m.close();
+            reject(new Error(state.error || `${state.failed} file(s) could not be copied`));
+            return;
+          }
+          setTimeout(tick, 800);
+        };
+        tick();
+      } catch (err) {
+        m.close();
+        reject(err);
+      }
+    });
+  }
+
+  function cacheSwitchChoice(oldPath, newPath, tiles, mb) {
+    return new Promise((resolve) => {
+      const m = modal({
+        title: "Change tile cache location",
+        sub: "Existing offline tiles",
+        wide: true,
+        body: h("div", { class: "col gap-8" },
+          h("div", { class: "small", text: `The current cache contains ${Number(tiles).toLocaleString()} tiles (${mb || 0} MB) at ${oldPath}.` }),
+          h("div", { class: "small", text: `Copy them to ${newPath || "the app folder"} before switching? Copying is safer; switching without copying leaves the old tiles unused.` })),
+        actions: [
+          btn("CANCEL", { tone: "ghost", onClick: () => { m.close(); resolve("cancel"); } }),
+          btn("SWITCH ONLY", { onClick: () => { m.close(); resolve("switch"); } }),
+          btn("COPY & SWITCH", { tone: "primary", onClick: () => { m.close(); resolve("copy"); } }),
+        ],
+        onClose: () => resolve("cancel"),
+      });
+    });
   }
 
   async function loadAudit(target) {

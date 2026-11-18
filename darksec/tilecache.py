@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
+import shutil
 import threading
 import time
 import uuid
@@ -115,17 +117,92 @@ _jobs_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 # Paths & cache
 # ---------------------------------------------------------------------------
+_CACHE_ROOT_TTL = 5.0
+_cache_root_lock = threading.RLock()
+_cache_root_cache: dict = {"at": 0.0, "raw": None}
+
+
+def configured_cache_path() -> str:
+    """Operator-selected tile folder; empty means the bundled cache folder."""
+    now = time.monotonic()
+    with _cache_root_lock:
+        if _cache_root_cache["raw"] is not None and now - _cache_root_cache["at"] < _CACHE_ROOT_TTL:
+            return str(_cache_root_cache["raw"])
+    raw = ""
+    try:
+        from .db import Database
+
+        d = Database()
+        try:
+            raw = str(d.get_setting("map_cache_path", "") or "")
+        finally:
+            d.close()
+    except Exception:
+        raw = ""
+    with _cache_root_lock:
+        _cache_root_cache.update({"at": now, "raw": raw})
+    return raw
+
+
+def invalidate_cache_path(raw: str | None = None) -> None:
+    with _cache_root_lock:
+        _cache_root_cache.update({"at": time.monotonic(), "raw": raw})
+
+
 def cache_root() -> Path:
-    p = config.MAP_TILE_DIR / "cache"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    """Current cache root. May be on removable media, so never create it here."""
+    raw = configured_cache_path()
+    return Path(raw).expanduser() if raw else (config.MAP_TILE_DIR / "cache")
 
 
 def tile_cache_dir(source: str = DEFAULT_SOURCE) -> Path:
-    """Return (and create if needed) the on-disk cache directory for source."""
+    """Return the on-disk cache directory for source, creating it if possible."""
     base = cache_root() / _safe(source)
-    base.mkdir(parents=True, exist_ok=True)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # The USB drive may be unplugged or read-only. Reads will miss and
+        # writes will fail cleanly; the map falls back to other sources.
+        pass
     return base
+
+
+def validate_cache_path(raw: str | None, create: bool = True) -> Path:
+    """Validate/create an operator tile folder and prove it is writable."""
+    text = str(raw or "").strip()
+    path = Path(text).expanduser() if text else (config.MAP_TILE_DIR / "cache")
+    if path.exists() and not path.is_dir():
+        raise ValueError("Tile cache path is not a folder")
+    # Find the nearest existing ancestor so a fresh USB subfolder such as
+    # /media/user/DRIVE/DarkSec-Tiles can be created safely.
+    ancestor = path
+    while not ancestor.exists() and ancestor.parent != ancestor:
+        ancestor = ancestor.parent
+    if not ancestor.exists() or not ancestor.is_dir():
+        raise ValueError(f"Parent folder does not exist: {ancestor}")
+    if not os.access(ancestor, os.W_OK | os.X_OK):
+        raise ValueError(f"Folder is not writable: {ancestor}")
+    if not create and not path.exists():
+        return path.resolve()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".darksec-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        raise ValueError(f"Tile cache folder is not writable: {exc.strerror or exc}")
+    return path.resolve()
+
+
+def disk_info(path: str | Path | None = None) -> dict:
+    """Free/total space for the active cache (or a candidate) folder."""
+    target = Path(path).expanduser() if path else cache_root()
+    try:
+        usage = shutil.disk_usage(str(target))
+        return {"total_bytes": usage.total, "free_bytes": usage.free,
+                "free_gb": round(usage.free / (1024 ** 3), 2)}
+    except OSError:
+        return {"total_bytes": None, "free_bytes": None, "free_gb": None}
 
 
 def _safe(name: str) -> str:
@@ -309,10 +386,19 @@ def fetch_tile(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Optional
     # Always use the source's configured extension so lookups find the file
     # even when a provider returns a different image format for one tile.
     p = tile_path(z, x, y, source)
-    p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".part")
-    tmp.write_bytes(data)
-    tmp.replace(p)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(data)
+        tmp.replace(p)
+    except OSError:
+        # Removable media unplugged/full/read-only: keep the downloaded bytes
+        # for this request but do not claim they were cached.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return None
     return data
 
 
@@ -477,6 +563,169 @@ def host_reachable(source: str = DEFAULT_SOURCE) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Cache relocation (copy existing tiles to a USB folder)
+# ---------------------------------------------------------------------------
+_relocations: dict[str, dict] = {}
+_reloc_lock = threading.Lock()
+
+
+def _downloads_running() -> bool:
+    with _jobs_lock:
+        return any(job.get("state") == "running" for job in _jobs.values())
+
+
+def start_relocate(destination: str, remove_source: bool = False) -> dict:
+    """Copy current cache files to destination, optionally deleting source."""
+    if _downloads_running():
+        raise RuntimeError("Wait for the running tile download to finish first")
+    dest = validate_cache_path(destination)
+    src = cache_root().resolve()
+    if dest == src:
+        raise ValueError("Destination is already the active cache folder")
+    if src in dest.parents or dest in src.parents:
+        raise ValueError("Source and destination must not be nested")
+    files = [f for f in src.rglob("*") if f.is_file() and f.suffix != ".part"] if src.exists() else []
+    total_bytes = 0
+    for f in files:
+        try:
+            total_bytes += f.stat().st_size
+        except OSError:
+            pass
+    free = disk_info(dest)["free_bytes"]
+    if free is not None and total_bytes > free:
+        raise RuntimeError(
+            f"Not enough free space at {dest}: need {total_bytes / (1024**3):.2f} GB, "
+            f"{free / (1024**3):.2f} GB available"
+        )
+    job = {
+        "id": uuid.uuid4().hex[:12],
+        "state": "running" if files else "done",
+        "source": str(src), "destination": str(dest),
+        "total": len(files), "completed": 0,
+        "copied": 0, "skipped": 0, "failed": 0,
+        "total_bytes": total_bytes, "done_bytes": 0,
+        "remove_source": bool(remove_source),
+        "error": None, "started": time.time(), "finished": None if files else time.time(),
+    }
+    with _reloc_lock:
+        _relocations[job["id"]] = job
+    if files:
+        threading.Thread(target=_run_relocate, args=(job, files), daemon=True).start()
+    return dict(job)
+
+
+def _run_relocate(job: dict, files: list[Path]) -> None:
+    src = Path(job["source"])
+    dest = Path(job["destination"])
+    try:
+        for i, f in enumerate(files):
+            try:
+                rel = f.relative_to(src)
+                target = dest / rel
+                if target.exists() and target.stat().st_size == f.stat().st_size:
+                    job["skipped"] += 1
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = target.with_suffix(target.suffix + ".part")
+                    shutil.copy2(f, tmp)
+                    tmp.replace(target)
+                    job["copied"] += 1
+                    try:
+                        job["done_bytes"] += f.stat().st_size
+                    except OSError:
+                        pass
+            except OSError:
+                job["failed"] += 1
+            job["completed"] = i + 1
+        if job["remove_source"] and job["failed"] == 0:
+            for f in files:
+                try:
+                    f.unlink()
+                except OSError:
+                    job["failed"] += 1
+            for d in sorted((p for p in src.rglob("*") if p.is_dir()),
+                            key=lambda p: len(p.parts), reverse=True):
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
+        job["state"] = "done" if job["failed"] == 0 else "partial"
+    except Exception as exc:
+        job["state"] = "error"
+        job["error"] = str(exc)[:300]
+    finally:
+        job["finished"] = time.time()
+
+
+def relocate_status(job_id: str) -> Optional[dict]:
+    with _reloc_lock:
+        job = _relocations.get(job_id)
+        return dict(job) if job else None
+
+
+def candidate_cache_locations() -> list[dict]:
+    """Mount points suitable for storing tiles, with free space."""
+    import string
+    from . import config as cfg
+    from .mbtiles import _is_mount_root
+
+    raw_current = str(configured_cache_path() or "")
+    candidates: list[Path] = [cfg.MAP_TILE_DIR / "cache"]
+    if raw_current:
+        candidates.append(Path(raw_current).expanduser())
+    if os.name == "nt":
+        for letter in string.ascii_uppercase[3:]:
+            drive = Path(f"{letter}:\\")
+            try:
+                if drive.exists():
+                    candidates.append(drive / "DarkSec-Tiles")
+            except OSError:
+                continue
+    else:
+        for mount in ("/media", "/run/media", "/mnt", "/Volumes"):
+            base = Path(mount)
+            try:
+                if not base.is_dir():
+                    continue
+            except OSError:
+                continue
+            try:
+                entries = [e for e in base.iterdir() if e.is_dir()]
+            except OSError:
+                continue
+            for entry in entries:
+                candidates.append(entry / "DarkSec-Tiles")
+                try:
+                    for drive in entry.iterdir():
+                        if drive.is_dir() and drive.name not in ("lost+found",):
+                            candidates.append(drive / "DarkSec-Tiles")
+                except OSError:
+                    continue
+    seen: set[str] = set()
+    out = []
+    for path in candidates:
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        info = disk_info(path if path.exists() else path.parent)
+        out.append({
+            "path": str(path),
+            "label": str(path),
+            "exists": path.exists(),
+            "default": path == cfg.MAP_TILE_DIR / "cache",
+            "writable": os.access(path if path.exists() else path.parent, os.W_OK),
+            "mount": _is_mount_root(path.parent if path.name == "DarkSec-Tiles" else path),
+            **info,
+        })
+    out.sort(key=lambda item: (not item["writable"], not item["exists"], item["path"]))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Stats & maintenance
 # ---------------------------------------------------------------------------
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -521,11 +770,14 @@ def cache_stats(source: Optional[str] = None) -> dict:
             "max_zoom": TILE_SOURCES[src]["max_zoom"],
             "attribution": TILE_SOURCES[src]["attribution"],
         })
+    info = disk_info()
     result = {
         "tile_count": total_tiles,
         "total_bytes": total_bytes,
         "total_mb": round(total_bytes / (1024 * 1024), 2),
         "path": str(cache_root()),
+        "free_bytes": info["free_bytes"],
+        "free_gb": info["free_gb"],
         "sources": out,
     }
     if source:

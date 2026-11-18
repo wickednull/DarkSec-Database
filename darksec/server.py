@@ -3774,7 +3774,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                        "map_vector", "map_auto_pack", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter", "assistant_system_tools", "assistant_medical_tools", "assistant_history_encrypted"):
                 value = bool(value)
             if key in ("callsign", "team", "operator", "timezone", "units", "date_format",
-                       "grid_format", "accent", "tile_source", "mbtiles_path", "dem_mbtiles_path",
+                       "grid_format", "accent", "tile_source", "mbtiles_path", "map_cache_path", "dem_mbtiles_path",
                        "dem_encoding", "epoch", "position_source", "position_updated_at", "position_fix_at",
                        "ollama_base_url", "ollama_model", "assistant_keep_alive"):
                 value = str(value)[:500]
@@ -3812,6 +3812,16 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                         detail="mbtiles_path must be an .mbtiles file or a folder containing .mbtiles archives",
                     )
                 value = str(Path(str(value)).expanduser())
+            if key == "map_cache_path":
+                from . import tilecache as _tilecache
+                text = str(value or "").strip()
+                if not text:
+                    value = ""
+                else:
+                    try:
+                        value = str(_tilecache.validate_cache_path(text))
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc))
             if key == "dem_mbtiles_path" and value:
                 p = Path(str(value)).expanduser()
                 if not p.exists() or not p.is_file():
@@ -3832,6 +3842,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 # Apply a source switch immediately instead of after the
                 # 30-second hot-path cache expires.
                 _tile_source_cache.update({"at": 0.0, "value": None})
+            if key == "map_cache_path":
+                from . import tilecache as _tilecache
+                _tilecache.invalidate_cache_path(str(value or ""))
         if "lan_access_enabled" in payload:
             lm = getattr(request.app.state, "lan_manager", None)
             if payload.get("lan_access_enabled"):
@@ -5360,6 +5373,56 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         from . import tilecache
         return {"sources": tilecache.sources_info(), "default": tilecache.DEFAULT_SOURCE,
                 "online": tilecache.is_online()}
+
+    @app.get("/api/map/cache/check")
+    def cache_check(path: str = ""):
+        """Validate a candidate tile folder without creating it."""
+        from . import tilecache
+        try:
+            candidate = tilecache.validate_cache_path(path, create=False)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc), "path": str(path or "")}
+        info = tilecache.disk_info(candidate if candidate.exists() else candidate.parent)
+        return {
+            "ok": True,
+            "path": str(candidate),
+            "exists": candidate.exists(),
+            "writable": os.access(candidate if candidate.exists() else candidate.parent, os.W_OK),
+            "default": not str(path or "").strip(),
+            **info,
+        }
+
+    @app.get("/api/map/cache/locations")
+    def cache_locations():
+        from . import tilecache
+        return {
+            "current": str(tilecache.cache_root()),
+            "configured": tilecache.configured_cache_path(),
+            "items": tilecache.candidate_cache_locations(),
+            "free_gb": tilecache.disk_info()["free_gb"],
+        }
+
+    @app.post("/api/map/cache/relocate")
+    def cache_relocate(request: Request, body: dict = Body(default={})):
+        """Copy existing cached tiles to a USB folder before switching paths."""
+        from . import tilecache
+        destination = str(body.get("destination") or "").strip()
+        require(bool(destination), "Destination folder is required", 400)
+        try:
+            job = tilecache.start_relocate(destination, remove_source=bool(body.get("remove_source")))
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        db(request).audit("MAP_CACHE_RELOCATE", f"{job['source']} -> {job['destination']} "
+                          f"files={job['total']}", request.client.host if request.client else "")
+        return job
+
+    @app.get("/api/map/cache/relocate/{job_id}")
+    def cache_relocate_job(job_id: str):
+        from . import tilecache
+        job = tilecache.relocate_status(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Unknown relocation job")
+        return job
 
     @app.post("/api/map/cache/estimate")
     def cache_estimate(body: dict = Body(default={})):
