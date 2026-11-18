@@ -84,6 +84,7 @@ async function boot() {
   bindChrome();
   applyAppearance();
   updateStatusUI(lastStatus);
+  updateBadges(lastStatus);
   document.getElementById("app").hidden = false;
   try {
     if (localStorage.getItem("darksec.nav.collapsed") === "1") {
