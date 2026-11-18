@@ -32,13 +32,15 @@ database.
 
 ![Situation report in the Daylight light theme](docs/screenshots/situation-report-light.png)
 
-Dark and light backgrounds are both supported. Light themes include Daylight,
-Paper, Solarized, Cloud, Sand, Mint, Blueprint, Lavender and high-contrast
-light; dark themes include Nightwatch, Midnight, Blackout, Forest, Slate, Ocean,
-Ember, Plum and high contrast. The sun/moon button in the top bar switches
-between your saved dark and light themes. **Settings → Identity & display** sets
-the background mode (Dark / Light / Follow system), both theme variants, and the
-accent colour.
+Dark and light backgrounds are both supported. Light themes use soft, low-glare
+palettes inspired by Catppuccin Latte, Rosé Pine Dawn, Solarized Light, GitHub
+Light, Everforest Light and Tokyo Night Day: Daylight (soft cool), Paper (warm
+rose), Solarized (cream), Cloud (neutral), Sand (parchment), Mint (sage),
+Blueprint (cool blue), Lavender (iris) and high-contrast light. Dark themes
+include Nightwatch, Midnight, Blackout, Forest, Slate, Ocean, Ember, Plum and
+high contrast. The sun/moon button in the top bar switches between your saved
+dark and light themes. **Settings → Identity & display** sets the background
+mode (Dark / Light / Follow system), both theme variants, and the accent colour.
 
 ### Global search
 

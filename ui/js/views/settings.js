@@ -141,14 +141,14 @@ export async function render(root) {
     { value: "contrast", label: "High contrast" },
   ], settings.dark_theme || settings.theme || "nightwatch");
   const lightTheme = select([
-    { value: "daylight", label: "Daylight (default)" },
-    { value: "paper", label: "Paper" },
-    { value: "solarized", label: "Solarized light" },
-    { value: "cloud", label: "Cloud" },
-    { value: "sand", label: "Sand" },
-    { value: "mint", label: "Mint" },
-    { value: "blueprint", label: "Blueprint" },
-    { value: "lavender", label: "Lavender" },
+    { value: "daylight", label: "Daylight · soft cool" },
+    { value: "paper", label: "Paper · warm rose" },
+    { value: "solarized", label: "Solarized · cream" },
+    { value: "cloud", label: "Cloud · neutral" },
+    { value: "sand", label: "Sand · parchment" },
+    { value: "mint", label: "Mint · sage" },
+    { value: "blueprint", label: "Blueprint · cool blue" },
+    { value: "lavender", label: "Lavender · iris" },
     { value: "contrast-light", label: "High contrast light" },
   ], settings.light_theme || "daylight");
   const accent = select([
