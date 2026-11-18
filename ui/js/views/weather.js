@@ -201,6 +201,9 @@ export async function render(root) {
       const out = await api.post("/api/feeds/refresh", { id: feed.id });
       const result = (out.results || [])[0] || {};
       if (result.status === "OK") toast(`${feed.name}: ${result.count ?? 0} items`);
+      else if (result.status === "STALE") {
+        toast(`${feed.name}: refresh failed — showing cached data${result.error ? ` (${result.error})` : ""}`, "warn", 7000);
+      }
       else toast(`${feed.name}: ${result.error || result.status || "failed"}`, "error");
       render(root);
     } catch (err) { toast(err.message || "Feed refresh failed", "error"); }

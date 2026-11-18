@@ -1193,3 +1193,86 @@ def test_map_tile_falls_back_to_bundled_overview(client, monkeypatch):
         assert r.headers.get("x-tile-source") == "bundled-overview"
     finally:
         tile.unlink(missing_ok=True)
+
+
+def _weather_payload(temp_c=7.8):
+    return {"items": [{
+        "id": "wx-1", "kind": "weather", "time": "2026-11-17T03:15",
+        "title": "Overcast", "summary": "Overcast",
+        "temperature_c": temp_c, "apparent_c": 2.8, "condition": "overcast",
+        "wind_kmh": 26.0, "gust_kmh": 44.3, "precip_mm": 0.0,
+        "humidity_pct": 84, "pressure_hpa": 1022.6, "lat": 39.8, "lon": -98.6,
+        "forecast": [{"date": "2026-11-17", "temp_max_c": 9.9, "temp_min_c": 7.3,
+                      "precip_mm": 0.0, "weather_code": 3, "condition": "overcast"}],
+        "source": "Open-Meteo",
+    }], "fetched_at": "2026-11-17T03:15:00+00:00"}
+
+
+def _fail_weather_fetch(monkeypatch, calls):
+    import requests
+
+    from darksec import feeds
+
+    def fake_get(*args, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        raise requests.Timeout("Read timed out. (read timeout=30)")
+
+    monkeypatch.setattr(feeds.requests, "get", fake_get)
+    monkeypatch.setattr(feeds.time, "sleep", lambda *_: None)
+
+
+def test_weather_refresh_timeout_keeps_cached_snapshot(tmp_path, monkeypatch):
+    import json
+
+    from darksec import feeds
+    from darksec.db import Database
+
+    db = Database(str(tmp_path / "weather-stale.db"))
+    db.execute(
+        "UPDATE feeds SET status='OK', fetched_at=?, payload=? WHERE id='open_meteo_weather'",
+        ("2026-11-17T03:15:00+00:00", json.dumps(_weather_payload())),
+    )
+    calls = []
+    _fail_weather_fetch(monkeypatch, calls)
+
+    results = feeds.refresh(db, "open_meteo_weather")
+    assert results[0]["status"] == "STALE"
+    assert results[0]["cached"] is True
+    # One retry for Open-Meteo, using the longer timeout.
+    assert len(calls) == 2 and all(t == feeds.OPEN_METEO_TIMEOUT for t in calls)
+
+    row = next(f for f in feeds.list_feeds(db) if f["id"] == "open_meteo_weather")
+    assert row["status"] == "STALE"
+    assert row["count"] == 1 and row["items"][0]["temperature_c"] == 7.8
+    assert "timed out" in (row["error"] or "").lower()
+
+
+def test_weather_refresh_timeout_without_cache_is_error(tmp_path, monkeypatch):
+    from darksec import feeds
+    from darksec.db import Database
+
+    db = Database(str(tmp_path / "weather-empty.db"))
+    db.execute("UPDATE feeds SET payload=NULL, status='NEVER' WHERE id='open_meteo_weather'")
+    calls = []
+    _fail_weather_fetch(monkeypatch, calls)
+
+    results = feeds.refresh(db, "open_meteo_weather")
+    assert results[0]["status"] == "ERROR"
+    assert results[0]["cached"] is False
+
+
+def test_cached_items_turn_feed_error_into_stale(tmp_path):
+    import json
+
+    from darksec import feeds
+    from darksec.db import Database
+
+    db = Database(str(tmp_path / "weather-display.db"))
+    db.execute(
+        "UPDATE feeds SET status='ERROR', error='Read timed out', "
+        "fetched_at='2026-11-17T03:15:00+00:00', payload=? WHERE id='open_meteo_weather'",
+        (json.dumps(_weather_payload(temp_c=3.1)),),
+    )
+    row = next(f for f in feeds.list_feeds(db) if f["id"] == "open_meteo_weather")
+    assert row["status"] == "STALE"
+    assert row["items"][0]["temperature_c"] == 3.1

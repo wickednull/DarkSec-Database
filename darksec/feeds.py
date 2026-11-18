@@ -32,6 +32,7 @@ UA = {
     "Accept": "text/plain,text/xml,application/xml,application/json,*/*;q=0.8",
 }
 TIMEOUT = 15
+OPEN_METEO_TIMEOUT = 30
 UCDP_TIMEOUT = 90
 
 SAFECAST_URL = "https://api.safecast.org/measurements.json"
@@ -2419,19 +2420,29 @@ def refresh(db: Database, feed_id: str | None = None) -> list[dict]:
                             continue
                         raise
                 else:
-                    if fid == "gdacs":
-                        # GDACS's WAF rejects browser-like User-Agent strings
-                        # (including the app's standard UA) with an HTML
-                        # "Request Rejected" page. A plain client UA gets JSON.
-                        resp = requests.get(
-                            url,
-                            headers={"User-Agent": "python-requests/2.32.3",
-                                     "Accept": "application/json"},
-                            timeout=TIMEOUT,
-                        )
-                    else:
-                        resp = requests.get(url, headers=UA, timeout=TIMEOUT)
-                    resp.raise_for_status()
+                    slow_kind = row["kind"] in ("weather", "air_quality")
+                    timeout = OPEN_METEO_TIMEOUT if slow_kind else TIMEOUT
+                    attempts = 2 if slow_kind else 1
+                    for attempt in range(attempts):
+                        try:
+                            if fid == "gdacs":
+                                # GDACS's WAF rejects browser-like User-Agent strings
+                                # (including the app's standard UA) with an HTML
+                                # "Request Rejected" page. A plain client UA gets JSON.
+                                resp = requests.get(
+                                    url,
+                                    headers={"User-Agent": "python-requests/2.32.3",
+                                             "Accept": "application/json"},
+                                    timeout=timeout,
+                                )
+                            else:
+                                resp = requests.get(url, headers=UA, timeout=timeout)
+                            resp.raise_for_status()
+                            break
+                        except requests.RequestException:
+                            if attempt + 1 >= attempts:
+                                raise
+                            time.sleep(0.6)
                     raw = resp.text
                     items = _normalize(row["kind"], raw, row["name"])
                 if not items and raw.lstrip().lower().startswith(("<!doctype", "<html")):
@@ -2444,11 +2455,23 @@ def refresh(db: Database, feed_id: str | None = None) -> list[dict]:
             )
             results.append({"id": row["id"], "status": "OK", "count": len(items)})
         except Exception as exc:
+            # A failed refresh must not throw away a usable older snapshot.
+            # Mark it STALE so the UI and Delamain keep showing the cached data
+            # with its true age; only use ERROR when there is nothing to show.
+            cached_items = 0
+            try:
+                cached = db.one("SELECT payload FROM feeds WHERE id=?", (row["id"],))
+                if cached and cached["payload"]:
+                    cached_items = len((json.loads(cached["payload"]) or {}).get("items") or [])
+            except Exception:
+                cached_items = 0
+            status = "STALE" if cached_items else "ERROR"
             db.execute(
-                "UPDATE feeds SET status='ERROR', error=? WHERE id=?",
-                (str(exc)[:300], row["id"]),
+                "UPDATE feeds SET status=?, error=? WHERE id=?",
+                (status, str(exc)[:300], row["id"]),
             )
-            results.append({"id": row["id"], "status": "ERROR", "error": str(exc)[:300]})
+            results.append({"id": row["id"], "status": status, "error": str(exc)[:300],
+                            "cached": bool(cached_items)})
     return results
 
 
@@ -2471,6 +2494,10 @@ def list_feeds(db: Database, item_limit: int | None = 30) -> list[dict]:
         if latest_time is not None:
             data_age = max(0, int((now - latest_time).total_seconds()))
         status = row["status"] or "NEVER"
+        # Providers can fail while an older snapshot remains perfectly usable.
+        # Present that as STALE rather than a hard ERROR.
+        if status == "ERROR" and items:
+            status = "STALE"
         stale_reason = None
         if status == "OK" and age is not None and age > STALE_AFTER.get(row["id"], DEFAULT_STALE_AFTER):
             status = "STALE"
