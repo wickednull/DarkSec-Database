@@ -1179,9 +1179,10 @@ def test_plain_chat_history_default_after_purge(client):
     assert raw["title"] == "plain chat" and raw["encrypted"] == 0
 
 
-def test_map_tile_falls_back_to_bundled_overview(client, monkeypatch):
+def test_map_tile_falls_back_to_bundled_overview(client, monkeypatch, tmp_path):
     from darksec import config, server
 
+    monkeypatch.setattr(config, "MAP_TILE_DIR", tmp_path)
     # z15 x5799 y11950 maps to the z5 ancestor tile 5/11.
     tile = config.MAP_TILE_DIR / "overview" / "5" / "5" / "11.png"
     tile.parent.mkdir(parents=True, exist_ok=True)

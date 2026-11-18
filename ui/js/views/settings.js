@@ -473,6 +473,7 @@ export async function render(root) {
   const mbCheck = btn("CHECK", { size: "sm", icon: "check", onClick: () => checkMbtiles() });
   const mbRow = h("div", { class: "row gap-6 wrap" }, h("div", { class: "grow" }, mbtiles), mbScan, mbCheck);
   const mapVector = checkbox("Render offline vector basemap", settings.map_vector !== false);
+  const mapAutoPack = checkbox("Cache viewed map areas automatically while online", settings.map_auto_pack !== false);
   const layersBox = h("div", { class: "col gap-4" }, h("div", { class: "tiny muted", text: "Loading layers…" }));
   const mapPanel = panel({
     title: "Offline maps",
@@ -484,6 +485,7 @@ export async function render(root) {
         field("MBTiles path", mbRow, "A single .mbtiles file or a folder of archives, including a mounted USB drive. Raster archives draw on both maps; vector PBF archives draw in the 3D GL map. Read in place, read-only — keep the drive mounted while using it.")),
       mbStatus,
       mapVector,
+      mapAutoPack,
       h("div", { class: "settings-subhead", text: "Layers" }),
       layersBox,
       h("div", { class: "settings-actions" },
@@ -831,7 +833,11 @@ export async function render(root) {
   }
 
   async function saveMap() {
-    const patch = { tile_source: tileSource.value, mbtiles_path: mbtiles.value.trim(), map_vector: mapVector.querySelector("input").checked };
+    const patch = {
+      tile_source: tileSource.value, mbtiles_path: mbtiles.value.trim(),
+      map_vector: mapVector.querySelector("input").checked,
+      map_auto_pack: mapAutoPack.querySelector("input").checked,
+    };
     await saveSimple(patch, "Map settings saved");
   }
 

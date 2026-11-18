@@ -534,6 +534,24 @@ def lookup_tile(z: int, x: int, y: int, raw: str | None = None) -> tuple[bytes, 
     return None
 
 
+def lookup_tile_ancestor(z: int, x: int, y: int, raw: str | None = None,
+                         max_up: int = 5) -> tuple[bytes, str] | None:
+    """Nearest lower-zoom raster tile in the archive, for offline overzoom."""
+    raw = configured_path() if raw is None else raw
+    for path in resolve_sources(raw):
+        archive = _archive_for(path)
+        if archive is None or not archive.raster:
+            continue
+        for up in range(1, max_up + 1):
+            zz = z - up
+            if zz < 0:
+                break
+            data = archive.tile(zz, x >> up, y >> up)
+            if data:
+                return data, archive.path.name
+    return None
+
+
 def lookup_vector_tile(z: int, x: int, y: int, raw: str | None = None) -> tuple[bytes, str] | None:
     """Return ``(pbf_tile_bytes, archive_name)`` from a vector archive."""
     raw = configured_path() if raw is None else raw

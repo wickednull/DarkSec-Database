@@ -256,10 +256,24 @@ overview (zooms 0–5) — and `maps/vector/world.geojson` for the dark vector
 layer. Both work with no network.
 
 For detail around your position, open **Map → Manage offline map**, choose a
-radius or the current viewport and a zoom range, and download. Tiles are
-validated before they are stored under `maps/tiles/cache/<source>/z/x/y.ext`,
-so a provider error page can never end up in the cache. **Clear offline tiles**
-in the same dialog removes downloaded tiles.
+radius or the current viewport and a maximum zoom. **Download the full zoom
+stack** is enabled by default so zooming out uses the same provider instead of
+switching to a different basemap. Tiles are validated before they are stored
+under `maps/tiles/cache/<source>/z/x/y.ext`, so a provider error page can never
+end up in the cache.
+
+The map uses one source at a time: the active provider's exact tile, then that
+same provider online, then an overzoomed parent tile from the same provider,
+and only then the bundled overview. Cached tiles from unrelated providers are
+never mixed into the same view. Missing high-zoom tiles therefore stay aligned
+with roads, waypoints and intel instead of turning into a patchwork.
+
+**Cache viewed areas automatically** in Settings → Offline maps is on by
+default: after the map is idle for a few seconds it downloads the missing full
+zoom stack for the current viewport while online. Cached tiles are skipped.
+**Verify cache** in the offline-map dialog removes HTML error pages, partial
+files and corrupt images (and is also checked whenever a tile is read).
+**Clear offline tiles** removes downloaded tiles.
 
 #### MBTiles from a USB drive
 
@@ -509,7 +523,6 @@ the running process loads the new code.
 - Host-header and cross-origin checks are enforced; the server also sends CSP
   and related security headers.
 - No telemetry is included.
-
 
 ## Legal and safety
 

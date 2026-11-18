@@ -98,6 +98,7 @@ def default_settings() -> dict:
         "dem_encoding": "terrarium",
         "dem_enabled": True,
         "map_vector": True,
+        "map_auto_pack": True,
         "auto_deep_index": True,
         "document_bundle_manifest_url": "https://github.com/wickednull/DarkSec-Database/releases/download/docs-2026-11-16/document-library.bundle.json",
         "feed_auto_refresh": True,

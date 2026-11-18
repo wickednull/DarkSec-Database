@@ -137,6 +137,33 @@ def tile_path(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Path:
     return tile_cache_dir(source) / str(z) / str(x) / f"{y}.{ext}"
 
 
+def _looks_like_image(data: bytes) -> bool:
+    if len(data) < 24:
+        return False
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return True
+    if data[:3] == b"\xff\xd8\xff":
+        return True
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return True
+    return False
+
+
+def _read_valid_tile(path: Path) -> Optional[bytes]:
+    """Read a cached tile, deleting HTML/error/corrupt files on sight."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if _looks_like_image(data):
+        return data
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return None
+
+
 def is_cached(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> bool:
     p = tile_path(z, x, y, source)
     return p.exists() and p.stat().st_size > 0
@@ -145,10 +172,20 @@ def is_cached(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> bool:
 def get_cached(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Optional[bytes]:
     p = tile_path(z, x, y, source)
     if p.exists() and p.stat().st_size > 0:
-        try:
-            return p.read_bytes()
-        except OSError:
-            return None
+        return _read_valid_tile(p)
+    return None
+
+
+def find_cached_ancestor(z: int, x: int, y: int, source: str = DEFAULT_SOURCE,
+                         max_up: int = 6) -> Optional[tuple[str, bytes]]:
+    """Nearest cached parent tile from the same source, for offline overzoom."""
+    for up in range(1, max_up + 1):
+        zz = z - up
+        if zz < 0:
+            break
+        data = get_cached(zz, x >> up, y >> up, source)
+        if data is not None:
+            return source, data
     return None
 
 
@@ -267,8 +304,11 @@ def fetch_tile(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Optional
         raise TileBlocked(f"{source} returned a text error tile")
 
     media = _media_type(data, "image/png")
-    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[media]
-    p = tile_cache_dir(source) / str(z) / str(x) / f"{y}.{ext}"
+    if media not in ("image/png", "image/jpeg", "image/webp"):
+        return None
+    # Always use the source's configured extension so lookups find the file
+    # even when a provider returns a different image format for one tile.
+    p = tile_path(z, x, y, source)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".part")
     tmp.write_bytes(data)
@@ -522,6 +562,54 @@ def clear_cache(source: Optional[str] = None) -> dict:
     return {"removed": removed, "freed_bytes": freed,
             "freed_mb": round(freed / (1024 * 1024), 2),
             "source": source or "all"}
+
+
+def verify_cache(source: Optional[str] = None, fix: bool = True) -> dict:
+    """Check every cached tile is a real image and optionally remove bad ones."""
+    targets = [source] if source else list(TILE_SOURCES)
+    checked = invalid = removed = 0
+    freed = 0
+    details: list[str] = []
+    for src in targets:
+        base = cache_root() / _safe(src)
+        if not base.exists():
+            continue
+        for f in base.rglob("*"):
+            if not f.is_file():
+                continue
+            if f.suffix == ".part":
+                if fix:
+                    try:
+                        freed += f.stat().st_size
+                        f.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+                continue
+            if f.suffix.lower() not in _IMAGE_SUFFIXES:
+                continue
+            checked += 1
+            try:
+                data = f.read_bytes()
+            except OSError:
+                continue
+            if _looks_like_image(data):
+                continue
+            invalid += 1
+            if len(details) < 8:
+                details.append(str(f.relative_to(cache_root())))
+            if fix:
+                try:
+                    freed += f.stat().st_size
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+    return {
+        "checked": checked, "invalid": invalid, "removed": removed,
+        "freed_bytes": freed, "freed_mb": round(freed / (1024 * 1024), 2),
+        "details": details, "source": source or "all",
+    }
 
 
 def sources_info() -> list[dict]:

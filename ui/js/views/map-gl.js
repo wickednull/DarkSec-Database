@@ -30,8 +30,12 @@ function loadMapLibre() {
   return maplibrePromise;
 }
 
-function rasterStyle(revision = "") {
-  const suffix = revision ? `?r=${encodeURIComponent(revision)}` : "";
+function rasterStyle(revision = "", source = "", generation = 0) {
+  const params = new URLSearchParams();
+  if (revision) params.set("r", revision);
+  if (source) params.set("s", source);
+  if (generation) params.set("b", String(generation));
+  const suffix = params.toString() ? `?${params.toString()}` : "";
   const tile = `${location.origin}/api/map/tiles/{z}/{x}/{y}.png${suffix}`;
   return {
     version: 8,
@@ -135,7 +139,7 @@ export async function render(root) {
       toast(`Vector basemap style unavailable: ${err.message || err}`, "warn", 7000);
     }
   }
-  if (!mapStyle) mapStyle = rasterStyle(mbInfo.revision || "");
+  if (!mapStyle) mapStyle = rasterStyle(mbInfo.revision || "", mapLayers?.activeSource || "", mapLayers?.cacheGeneration || 0);
   let intelAlpr = { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };
   let alprFetchTimer = null, alprQueryKey = "";
 

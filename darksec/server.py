@@ -3771,7 +3771,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     raise HTTPException(status_code=400, detail=f"{key} out of range")
                 value = f
             if key in ("sdr_tx_enabled", "sdr_tx_attested", "sdr_amp", "scanlines", "sound",
-                       "map_vector", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter", "assistant_system_tools", "assistant_medical_tools", "assistant_history_encrypted"):
+                       "map_vector", "map_auto_pack", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter", "assistant_system_tools", "assistant_medical_tools", "assistant_history_encrypted"):
                 value = bool(value)
             if key in ("callsign", "team", "operator", "timezone", "units", "date_format",
                        "grid_format", "accent", "tile_source", "mbtiles_path", "dem_mbtiles_path",
@@ -3828,6 +3828,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             d.set_setting(key, value)
             if key == "mbtiles_path":
                 mbtiles.invalidate(str(value or ""))
+            if key == "tile_source":
+                # Apply a source switch immediately instead of after the
+                # 30-second hot-path cache expires.
+                _tile_source_cache.update({"at": 0.0, "value": None})
         if "lan_access_enabled" in payload:
             lm = getattr(request.app.state, "lan_manager", None)
             if payload.get("lan_access_enabled"):
@@ -5049,6 +5053,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         from . import tilecache
         d = Database()
         active_source = d.get_setting("tile_source", tilecache.DEFAULT_SOURCE) or tilecache.DEFAULT_SOURCE
+        try:
+            cache_generation = int(d.get_setting("map_cache_generation", 0) or 0)
+        except (TypeError, ValueError):
+            cache_generation = 0
         d.close()
         if active_source not in tilecache.TILE_SOURCES:
             active_source = tilecache.DEFAULT_SOURCE
@@ -5087,6 +5095,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             "raster": layers,
             "vector": vectors,
             "activeSource": active_source,
+            "cacheGeneration": cache_generation,
             "mbtiles": {
                 "configured": mb["configured"],
                 "usable": mb["usable"],
@@ -5218,7 +5227,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             ctype = "image/jpeg"
         elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
             ctype = "image/webp"
-        headers = {"Cache-Control": "public, max-age=604800"}
+        # A lower-zoom parent tile must not stay in the browser cache for a
+        # week after the real tile has been downloaded.
+        max_age = 60 if source.endswith("-overzoom") else 604800
+        headers = {"Cache-Control": f"public, max-age={max_age}"}
         if source:
             headers["X-Tile-Source"] = source
         return Response(content=data, media_type=ctype, headers=headers)
@@ -5273,9 +5285,42 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
 
     @app.get("/api/map/tiles/{z}/{x}/{y}.png")
     def map_tile(z: int, x: int, y: int):
-        """Basemap tile: bundled overview, MBTiles, then the offline cache."""
+        """Basemap tile from one consistent local/active source.
+
+        Source order matters for a clean picture: an operator MBTiles archive
+        wins, then the *active* source's cache, then that same source online,
+        then an ancestor of the same source (overzoom), and only then the
+        bundled overview. Never mixing cached tiles from unrelated providers
+        prevents the patchwork of imagery/topo styles seen when zooming.
+        """
         from . import tilecache
         require(0 <= z <= 22 and x >= 0 and y >= 0, "Invalid tile coordinates", 400)
+
+        # Operator archive (local, read-only) and its own parent tiles.
+        data = _mbtiles_tile(z, x, y)
+        if data:
+            return _tile_response(data, "mbtiles")
+        ancestor = mbtiles.lookup_tile_ancestor(z, x, y)
+        if ancestor:
+            return _tile_response(ancestor[0], "mbtiles-overzoom")
+
+        src = _active_tile_source()
+        blob = tilecache.get_cached(z, x, y, src)
+        if blob:
+            return _tile_response(blob, src)
+        # Nothing cached: fetch only if the operator is online, never block the map.
+        if tilecache.is_online():
+            try:
+                blob = tilecache.fetch_tile(z, x, y, src)
+            except tilecache.TileBlocked:
+                blob = None
+            if blob:
+                return _tile_response(blob, src)
+        # Offline or upstream unavailable: overzoom the nearest cached parent
+        # from the same source before falling back to the bundled overview.
+        parent = tilecache.find_cached_ancestor(z, x, y, src)
+        if parent:
+            return _tile_response(parent[1], f"{src}-overzoom")
         for dirname in ("overview", "us_tiles"):
             for ext in ("jpg", "png", "webp"):
                 path = config.MAP_TILE_DIR / dirname / str(z) / str(x) / f"{y}.{ext}"
@@ -5285,24 +5330,6 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     except OSError:
                         continue
                     return _tile_response(data, dirname)
-        data = _mbtiles_tile(z, x, y)
-        if data:
-            return _tile_response(data, "mbtiles")
-        hit = tilecache.find_cached(z, x, y, _active_tile_source())
-        if hit:
-            src, blob = hit
-            return _tile_response(blob, src)
-        # Nothing cached: fetch only if the operator is online, never block the map.
-        if tilecache.is_online():
-            src = _active_tile_source()
-            try:
-                blob = tilecache.fetch_tile(z, x, y, src)
-            except tilecache.TileBlocked:
-                blob = None
-            if blob:
-                return _tile_response(blob, src)
-        # Offline or upstream unavailable: overzoom the bundled overview rather
-        # than returning blank tiles for every viewport request.
         fallback = _bundled_ancestor_tile(z, x, y)
         if fallback:
             return _tile_response(fallback, "bundled-overview")
@@ -5383,13 +5410,35 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             raise HTTPException(status_code=404, detail="Unknown download job")
         return job
 
-    @app.post("/api/map/cache/clear")
-    def cache_clear(body: dict = Body(default={})):
+    def _bump_cache_generation(d) -> int:
+        try:
+            generation = int(d.get_setting("map_cache_generation", 0) or 0) + 1
+        except (TypeError, ValueError):
+            generation = 1
+        d.set_setting("map_cache_generation", generation)
+        return generation
+
+    @app.post("/api/map/cache/verify")
+    def cache_verify(request: Request, body: dict = Body(default={})):
+        """Validate cached image files and remove HTML/error/corrupt tiles."""
         from . import tilecache
         source = body.get("source") or None
         if source and source not in tilecache.TILE_SOURCES:
             raise HTTPException(status_code=400, detail="Unknown tile source")
-        return tilecache.clear_cache(source)
+        result = tilecache.verify_cache(source, fix=True)
+        if result.get("removed"):
+            result["generation"] = _bump_cache_generation(db(request))
+        return result
+
+    @app.post("/api/map/cache/clear")
+    def cache_clear(request: Request, body: dict = Body(default={})):
+        from . import tilecache
+        source = body.get("source") or None
+        if source and source not in tilecache.TILE_SOURCES:
+            raise HTTPException(status_code=400, detail="Unknown tile source")
+        result = tilecache.clear_cache(source)
+        result["generation"] = _bump_cache_generation(db(request))
+        return result
 
     # -------------------------------------------------------------- DEM / terrain (offline raster-dem tiles)
     def _dem_mbtiles_tile(d: Database, z: int, x: int, y: int) -> bytes | None:

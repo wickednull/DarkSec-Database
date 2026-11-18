@@ -137,6 +137,7 @@ export async function render(root, params = {}) {
   const raster = (layers.raster || []);
   let mbtilesInfo = layers.mbtiles || {};
   let tileRevision = mbtilesInfo.revision || "";
+  let cacheGeneration = Number(layers.cacheGeneration) || 0;
   let tileAvailable = !!(raster.length || mbtilesInfo.raster);
   let disposed = false;
   let world = null;
@@ -159,6 +160,12 @@ export async function render(root, params = {}) {
   };
   let activeSource = layers.activeSource || "esri_imagery";
   let cacheStatusEl = null;
+  let autoPackEl = null;
+  let mapOnline = false;
+  const autoPackEnabled = settings.map_auto_pack !== false;
+  let autoPackJob = false;
+  let autoPackTimer = null;
+  let lastPackKey = "";
 
   root.replaceChildren();
   root.appendChild(pageHead({
@@ -299,6 +306,7 @@ export async function render(root, params = {}) {
   displayOpts.appendChild(checkbox("Auto-refresh map intel (60s)", liveEnabled, (on) => { liveEnabled = on; scheduleLive(); }));
   layerRows.appendChild(displayOpts);
   cacheStatusEl = h("div", { class: "map-cache-status tiny muted", text: cacheStatusText() });
+  autoPackEl = h("div", { class: "tiny muted", text: autoPackEnabled ? "Auto-cache: checking connection…" : "Auto-cache: off (Settings → Offline maps)" });
   const intelSummaryEl = h("div", { class: "map-cache-status tiny", text: "Intel not loaded" });
   const ageFilter = select([
     { value: "0", label: "Intel age: all cached" },
@@ -317,6 +325,7 @@ export async function render(root, params = {}) {
       intelSummaryEl,
       h("div", { class: "tiny dim mt-10", text: `${raster.length} raster source(s) · MBTiles ${mbtilesInfo.configured ? (mbtilesInfo.usable ? `${mbtilesInfo.count || 1} archive(s)${mbtilesInfo.vector ? " · vector (3D GL)" : ""}` : "configured · unusable") : "not configured"}` }),
       cacheStatusEl,
+      autoPackEl,
       h("div", { class: "row gap-6 mt-8" },
         btn("MANAGE OFFLINE MAP", { size: "sm", icon: "download", tone: "primary", onClick: openDownloadDialog }),
         btn("REFRESH", { size: "sm", tone: "ghost", onClick: async () => { await Promise.all([refreshCache(), refreshMapIntel(), refreshAlpr(true)]); draw(); } }))),
@@ -452,6 +461,7 @@ export async function render(root, params = {}) {
     updateScale(w, hh);
     positionMapPopup();
     scheduleAlprFetch();
+    scheduleAutoPack();
   }
 
   /* ------------------------------------------------------- offline map packs */
@@ -464,14 +474,74 @@ export async function render(root, params = {}) {
     attribution.textContent = attr ? `Tiles: ${attr}` : "Vector basemap · no tile attribution";
   }
   api.get("/api/map/cache/sources").then((r) => {
+    mapOnline = !!r.online;
     for (const s of r.sources || []) sourceMeta[s.id] = s;
     updateAttribution();
-  }).catch(() => {});
+    updateAutoPackText();
+    scheduleAutoPack(true);
+  }).catch(() => { updateAutoPackText(); });
   updateAttribution();
 
   function cacheStatusText() {
     if (!cacheInfo.tile_count) return "No offline tiles stored";
     return `${cacheInfo.tile_count.toLocaleString()} tiles · ${cacheInfo.total_mb} MB cached`;
+  }
+
+  function updateAutoPackText() {
+    if (!autoPackEl) return;
+    autoPackEl.textContent = !autoPackEnabled
+      ? "Auto-cache: off (Settings → Offline maps)"
+      : !mapOnline
+        ? "Auto-cache: on · offline, viewed tiles remain cached"
+        : autoPackJob ? "Auto-cache: downloading viewed area…" : "Auto-cache: on · online";
+  }
+
+  function scheduleAutoPack(force = false) {
+    if (!autoPackEnabled || !mapOnline || downloading || !tileAvailable || mbtilesInfo.raster) return;
+    const key = `${view.lat.toFixed(3)}/${view.lon.toFixed(3)}/${view.zoom.toFixed(2)}`;
+    if (!force && key === lastPackKey) return;
+    lastPackKey = key;
+    if (autoPackTimer) clearTimeout(autoPackTimer);
+    autoPackTimer = setTimeout(startAutoPack, 3000);
+  }
+
+  async function startAutoPack() {
+    if (autoPackJob || downloading || !autoPackEnabled || !mapOnline || !tileAvailable || mbtilesInfo.raster) return;
+    const bbox = viewportBounds();
+    const maxZoom = Number(sourceMeta[activeSource]?.max_zoom) || 19;
+    const zMax = Math.max(6, Math.min(maxZoom, 15, Math.round(view.zoom) + 1));
+    autoPackJob = true;
+    updateAutoPackText();
+    try {
+      const job = await api.post("/api/map/cache/download", {
+        lat_min: bbox.latMin, lat_max: bbox.latMax,
+        lon_min: bbox.lonMin, lon_max: bbox.lonMax,
+        zoom_min: 0, zoom_max: zMax, source: activeSource,
+      });
+      await pollAutoPack(job.id);
+    } catch {
+      /* offline or a blocked provider: the visible tiles still work from cache */
+    } finally {
+      autoPackJob = false;
+      updateAutoPackText();
+    }
+  }
+
+  function pollAutoPack(jobId) {
+    return new Promise((resolve) => {
+      const tick = async () => {
+        let job;
+        try { job = await api.get(`/api/map/cache/job/${jobId}`); }
+        catch { resolve(); return; }
+        if (job.state === "done" || job.state === "error" || job.state === "blocked") {
+          if (job.downloaded) await refreshCache();
+          resolve();
+          return;
+        }
+        setTimeout(tick, 2000);
+      };
+      tick();
+    });
   }
 
   async function refreshCache() {
@@ -485,6 +555,11 @@ export async function render(root, params = {}) {
         if (l.activeSource) activeSource = l.activeSource;
         mbtilesInfo = l.mbtiles || {};
         tileRevision = mbtilesInfo.revision || "";
+        const nextGeneration = Number(l.cacheGeneration) || 0;
+        if (nextGeneration !== cacheGeneration) {
+          cacheGeneration = nextGeneration;
+          tileCache.clear();
+        }
         tileAvailable = !!((l.raster || []).length || mbtilesInfo.raster);
         updateAttribution();
       }
@@ -592,10 +667,11 @@ export async function render(root, params = {}) {
       { value: "100", label: `${U.distKm(100)} radius` }, { value: "viewport", label: "Current viewport only" },
     ], "25");
     const zoomSel = select([
-      { value: "12", label: "Zoom 8–12 (regional)" }, { value: "13", label: "Zoom 9–13" },
-      { value: "14", label: "Zoom 10–14" }, { value: "15", label: "Zoom 11–15 (street detail)" },
-      { value: "16", label: "Zoom 12–16 (building detail)" },
+      { value: "12", label: "Max zoom 12 (regional)" }, { value: "13", label: "Max zoom 13" },
+      { value: "14", label: "Max zoom 14" }, { value: "15", label: "Max zoom 15 (street detail)" },
+      { value: "16", label: "Max zoom 16 (building detail)" },
     ], "15");
+    const fullStack = checkbox("Download the full zoom stack (z0 → max) for seamless zooming", true);
     const centerLat = input({ type: "number", step: "0.0001", value: view.lat.toFixed(4) });
     const centerLon = input({ type: "number", step: "0.0001", value: view.lon.toFixed(4) });
     const estimateEl = h("div", { class: "callout", text: "Calculating…" });
@@ -612,7 +688,8 @@ export async function render(root, params = {}) {
         "Only the area you choose is stored. Nothing is uploaded." }),
       field("Tile source", sourceSel),
       field("Area", radiusSel),
-      field("Detail (zoom range)", zoomSel),
+      field("Detail (max zoom)", zoomSel),
+      fullStack,
       h("div", { class: "row gap-8" },
         field("Centre latitude", centerLat),
         field("Centre longitude", centerLon)),
@@ -625,6 +702,16 @@ export async function render(root, params = {}) {
       body,
       wide: true,
       actions: [
+        btn("VERIFY CACHE", { size: "sm", icon: "check", onClick: async () => {
+          try {
+            const r = await api.post("/api/map/cache/verify", { source: sourceSel.value || activeSource });
+            toast(r.removed
+              ? `Verified ${r.checked} tiles · removed ${r.removed} corrupt file(s) (${r.freed_mb} MB)`
+              : `Verified ${r.checked} cached tiles · all valid`, r.removed ? "warn" : "success");
+            await refreshCache();
+            draw();
+          } catch (err) { toast(`Verify failed: ${err.message}`, "error"); }
+        }}),
         btn("CLEAR CACHE", { tone: "danger", size: "sm", onClick: async () => {
           const ok = await confirmDialog({
             title: "Clear offline tiles",
@@ -655,7 +742,9 @@ export async function render(root, params = {}) {
       } else {
         bbox = radiusBounds(Number(centerLat.value) || 0, Number(centerLon.value) || 0, Number(radius));
       }
-      const zMin = Math.max(6, zMax - 4);
+      // A full stack avoids a different (or missing) basemap when the user
+      // zooms out. The old zMax-4 packs left most overview zooms absent.
+      const zMin = fullStack.querySelector("input").checked ? 0 : Math.max(6, zMax - 4);
       return { source, bbox, zMin, zMax };
     }
 
@@ -669,6 +758,7 @@ export async function render(root, params = {}) {
         zoom_min: zMin, zoom_max: zMax, source,
       }).then((e) => {
         if (seq !== estimateSeq) return;
+        lastEstimate = e;
         const mb = (e.missing * 18 / 1024).toFixed(1);
         estimateEl.textContent = `Zoom ${zMin}–${zMax} · ${e.total.toLocaleString()} tiles · ` +
           `${e.missing.toLocaleString()} to fetch · ≈${mb} MB`;
@@ -679,8 +769,9 @@ export async function render(root, params = {}) {
         estimateEl.className = "callout danger";
       });
     }
+    let lastEstimate = null;
     updateEstimate();
-    [sourceSel, radiusSel, zoomSel, centerLat, centerLon].forEach((el) =>
+    [sourceSel, radiusSel, zoomSel, centerLat, centerLon, fullStack].forEach((el) =>
       el.addEventListener("change", updateEstimate));
 
     api.get("/api/map/cache/sources").then((r) => {
@@ -703,6 +794,14 @@ export async function render(root, params = {}) {
     async function startDownload() {
       if (downloading) return;
       const { source, bbox, zMin, zMax } = currentRequest();
+      if (lastEstimate && lastEstimate.missing > 30000) {
+        const ok = await confirmDialog({
+          title: "Large download",
+          message: `This pack needs ${lastEstimate.missing.toLocaleString()} tiles. It can take a long time and a lot of bandwidth. Continue?`,
+          confirmText: "DOWNLOAD", danger: true,
+        });
+        if (!ok) return;
+      }
       downloading = true;
       progressTrack.style.display = "";
       try {
@@ -755,27 +854,32 @@ export async function render(root, params = {}) {
 
   function drawTiles(ctx, w, hh) {
     if (!tileAvailable) return;
-    const z = Math.round(view.zoom);
-    if (z > 19) return;
-    const scale = TILE * (2 ** z);
-    const c = { x: project(view.lat, view.lon).x * scale, y: project(view.lat, view.lon).y * scale };
+    const z = Math.max(0, Math.min(19, Math.round(view.zoom)));
+    // Draw the tile raster at the same fractional scale as waypoints, intel
+    // and the vector overlay. Previously tiles were snapped to an integer zoom
+    // while everything else used view.zoom, which made the picture break apart
+    // as soon as the user zoomed in or out.
+    const worldScale = TILE * (2 ** view.zoom);
+    const tileSize = TILE * (2 ** (view.zoom - z));
+    const center = project(view.lat, view.lon);
+    const c = { x: center.x * worldScale, y: center.y * worldScale };
     const left = c.x - w / 2, top = c.y - hh / 2;
-    const x0 = Math.floor(left / TILE), x1 = Math.floor((left + w) / TILE);
-    const y0 = Math.floor(top / TILE), y1 = Math.floor((top + hh) / TILE);
+    const x0 = Math.floor(left / tileSize), x1 = Math.floor((left + w) / tileSize);
+    const y0 = Math.floor(top / tileSize), y1 = Math.floor((top + hh) / tileSize);
     const n = 2 ** z;
     for (let ty = y0; ty <= y1; ty++) {
       if (ty < 0 || ty >= n) continue;
       for (let tx = x0; tx <= x1; tx++) {
         const wx = ((tx % n) + n) % n;
-        const sx = tx * TILE - left, sy = ty * TILE - top;
+        const sx = tx * tileSize - left, sy = ty * tileSize - top;
         const img = tileImage(z, wx, ty);
         if (img && img.complete && img.naturalWidth) {
-          ctx.globalAlpha = 0.84;
-          try { ctx.drawImage(img, sx, sy, TILE, TILE); } catch {}
+          ctx.globalAlpha = 0.9;
+          try { ctx.drawImage(img, sx, sy, tileSize + 0.6, tileSize + 0.6); } catch {}
           ctx.globalAlpha = 1;
         } else {
           ctx.fillStyle = "rgba(255,255,255,.01)";
-          ctx.fillRect(sx, sy, TILE, TILE);
+          ctx.fillRect(sx, sy, tileSize, tileSize);
         }
       }
     }
@@ -787,8 +891,21 @@ export async function render(root, params = {}) {
     const img = new Image();
     img.decoding = "async";
     img.onload = () => draw();
-    img.onerror = () => { img.dataset.failed = "1"; };
-    img.src = `/api/map/tiles/${z}/${x}/${y}.png?v=4${tileRevision ? `&r=${encodeURIComponent(tileRevision)}` : ""}`;
+    img.onerror = () => {
+      img.dataset.failed = "1";
+      // A tile that failed while offline should get another chance after the
+      // connection returns instead of staying blank for the whole session.
+      const attempts = Number(img.dataset.retries || 0);
+      if (attempts >= 2) return;
+      img.dataset.retries = String(attempts + 1);
+      setTimeout(() => {
+        if (tileCache.get(key) === img) {
+          tileCache.delete(key);
+          draw();
+        }
+      }, 15000);
+    };
+    img.src = `/api/map/tiles/${z}/${x}/${y}.png?v=5&s=${encodeURIComponent(activeSource)}&b=${cacheGeneration}${tileRevision ? `&r=${encodeURIComponent(tileRevision)}` : ""}`;
     tileCache.set(key, img);
     if (tileCache.size > 320) {
       const first = tileCache.keys().next().value;
@@ -2222,9 +2339,24 @@ export async function render(root, params = {}) {
   }
   document.addEventListener("keydown", onKey);
 
+  const onBrowserOnline = () => {
+    mapOnline = true;
+    updateAutoPackText();
+    scheduleAutoPack(true);
+  };
+  const onBrowserOffline = () => {
+    mapOnline = false;
+    updateAutoPackText();
+  };
+  window.addEventListener("online", onBrowserOnline);
+  window.addEventListener("offline", onBrowserOffline);
+
   return () => {
     disposed = true;
     if (raf) cancelAnimationFrame(raf);
+    if (autoPackTimer) clearTimeout(autoPackTimer);
+    window.removeEventListener("online", onBrowserOnline);
+    window.removeEventListener("offline", onBrowserOffline);
     if (liveTimer) clearInterval(liveTimer);
     if (hudLiveTimer) clearInterval(hudLiveTimer);
     if (alprFetchTimer) clearTimeout(alprFetchTimer);
