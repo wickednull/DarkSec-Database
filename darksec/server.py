@@ -16,6 +16,7 @@ import csv
 import hashlib
 import html
 import io
+import ipaddress
 import json
 import mimetypes
 import os
@@ -2715,7 +2716,7 @@ def _announce_when_ready(port: int, token: str, handshake: bool, browser_url: st
 def create_app(port: int = 0, token: str | None = None, open_browser: bool = False,
                handshake: bool = False, no_index: bool = False,
                lan: bool = False, lan_ip: str | None = None,
-               secure_cookies: bool = False) -> FastAPI:
+               lan_tls: bool = False, secure_cookies: bool = False) -> FastAPI:
     token = token or secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(18)
 
@@ -2764,13 +2765,23 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         if getattr(app.state, "lan_manager", None) is None:
             app.state.lan_manager = LanManager()
         lm = app.state.lan_manager
-        if db.get_setting("lan_access_enabled") and not db.get_setting("opsec_mode"):
+        app.state.lan_easy_access = bool(db.get_setting("lan_easy_access", True))
+        if lan:
+            # --lan already binds the main server to all interfaces; do not open
+            # a second listener on another port.
+            lm.adopt_external(app.state.lan_ip, port, "https" if lan_tls else "http")
+        elif db.get_setting("lan_access_enabled") and not db.get_setting("opsec_mode"):
             ip = app.state.lan_ip
-            if lm.start(app, ip=ip):
+            try:
+                lan_port = int(db.get_setting("lan_port", 8080) or 8080)
+            except (TypeError, ValueError):
+                lan_port = 8080
+            if lm.start(app, ip=ip, port=lan_port,
+                        use_tls=bool(db.get_setting("lan_tls"))):
                 if lm.ip:
                     app.state.allowed_hosts.add(lm.ip)
                 if lm.ip and lm.port:
-                    app.state.allowed_origins.add(f"https://{lm.ip}:{lm.port}")
+                    app.state.allowed_origins.add(f"{lm.scheme}://{lm.ip}:{lm.port}")
         app.state.sweep_active = False
         db.audit("APP_START", f"port={port} version={__version__}")
         if not os.environ.get("DARKSEC_NO_SYNC"):
@@ -2787,7 +2798,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         if handshake or open_browser:
             if lan:
                 browser_host = lan_ip or "127.0.0.1"
-                browser_url = f"https://{browser_host}:{port}/?token={token}"
+                scheme = "https" if lan_tls else "http"
+                browser_url = f"{scheme}://{browser_host}:{port}/?token={token}"
             else:
                 browser_url = f"http://127.0.0.1:{port}/?token={token}"
             threading.Thread(
@@ -2823,7 +2835,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                        f"http://[::1]:{port}"}
     if lan and lan_ip:
         allowed_hosts.add(lan_ip)
-        scheme = "https"
+        scheme = "https" if lan_tls else "http"
         allowed_origins.add(f"{scheme}://{lan_ip}:{port}")
         allowed_origins.add(f"{scheme}://localhost:{port}")
 
@@ -2834,6 +2846,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     app.state.port = port
     app.state.lan = lan
     app.state.lan_ip = lan_ip
+    app.state.lan_tls = lan_tls
+    app.state.lan_easy_access = True
     app.state.secure_cookies = secure_cookies
     app.state.allowed_hosts = allowed_hosts
     app.state.allowed_origins = allowed_origins
@@ -2856,6 +2870,47 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             return True
         return False
 
+    def _private_lan_client(value: str) -> bool:
+        """Private/link-local/CGNAT addresses only — never a public client."""
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        mapped = getattr(address, "ipv4_mapped", None)
+        if mapped is not None:
+            address = mapped
+        if address.is_loopback:
+            return False
+        if address.is_private or address.is_link_local:
+            return True
+        return address.version == 4 and address in ipaddress.ip_network("100.64.0.0/10")
+
+    def _lan_easy_ok(request: Request) -> bool:
+        """Trusted-LAN convenience mode: no token for private LAN clients."""
+        if not getattr(request.app.state, "lan_easy_access", True):
+            return False
+        lm = getattr(request.app.state, "lan_manager", None)
+        if not (getattr(request.app.state, "lan", False) or (lm is not None and lm.enabled)):
+            return False
+        client = request.client.host if request.client else ""
+        if not _private_lan_client(client):
+            return False
+        name = host_name(request.headers.get("host", ""))
+        if not name or name not in getattr(request.app.state, "allowed_hosts", allowed_hosts):
+            return False
+        try:
+            if db(request).get_setting("opsec_mode"):
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _set_lan_cookies(resp, secure: bool) -> None:
+        resp.set_cookie(COOKIE, token, httponly=True, samesite="lax", path="/",
+                        secure=secure)
+        resp.set_cookie(CSRF_COOKIE, csrf, httponly=False, samesite="lax", path="/",
+                        secure=secure)
+
     @app.middleware("http")
     async def guard(request: Request, call_next):
         path = request.url.path
@@ -2865,6 +2920,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         origin = request.headers.get("origin")
         if origin and not origin_allowed(request, origin):
             return JSONResponse({"error": "Cross-origin request denied"}, status_code=403)
+        issue_lan_cookie = False
         # Token bootstrap: /?token=... sets the cookie and redirects.
         if path == "/" and request.query_params.get("token"):
             if secrets.compare_digest(request.query_params["token"], token):
@@ -2872,11 +2928,17 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 dest = "/ui/?" + urlencode(params) if params else "/ui/"
                 resp = RedirectResponse(dest, status_code=303)
                 resp.set_cookie(COOKIE, token, httponly=True, samesite="strict", path="/",
-                                secure=secure_cookies)
+                                secure=secure_cookies or request.url.scheme == "https")
                 resp.set_cookie(CSRF_COOKIE, csrf, httponly=False, samesite="strict", path="/",
-                                secure=secure_cookies)
+                                secure=secure_cookies or request.url.scheme == "https")
                 return resp
             return PlainTextResponse("Invalid launch token", status_code=403)
+        # Trusted-LAN convenience: a private phone/tablet opening the UI gets
+        # the session and CSRF cookies immediately, so it only needs the IP.
+        if (not check_token(request)
+                and path in ("/", "/ui", "/ui/", "/ui/index.html")
+                and _lan_easy_ok(request)):
+            issue_lan_cookie = True
         if lan and path.startswith("/api/"):
             try:
                 if db(request).get_setting("opsec_mode"):
@@ -2889,9 +2951,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                         request.query_params["token"], token):
                     resp = JSONResponse({"error": "Token accepted; retry with cookie"}, status_code=401)
                     resp.set_cookie(COOKIE, token, httponly=True, samesite="strict", path="/",
-                                    secure=secure_cookies)
+                                    secure=secure_cookies or request.url.scheme == "https")
                     resp.set_cookie(CSRF_COOKIE, csrf, httponly=False, samesite="strict", path="/",
-                                    secure=secure_cookies)
+                                    secure=secure_cookies or request.url.scheme == "https")
                     return resp
                 return JSONResponse({"error": "Authentication required"}, status_code=401)
             if request.method not in ("GET", "HEAD", "OPTIONS"):
@@ -2905,6 +2967,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     if not csrf_header or not secrets.compare_digest(csrf_header, csrf):
                         return JSONResponse({"error": "CSRF check failed"}, status_code=403)
         resp = await call_next(request)
+        if issue_lan_cookie:
+            _set_lan_cookies(resp, request.url.scheme == "https")
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         resp.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -3780,7 +3844,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                    "declination": (-180, 180), "sdr_rx_gain": (0, 62), "sdr_lna_gain": (0, 40),
                    "position_accuracy_m": (0, 100000),
                    "position_mode": (0, 3), "font_scale": (0.8, 1.5),
-                   "critical_radius_km": (100, 10000)}
+                   "critical_radius_km": (100, 10000), "lan_port": (1, 65535)}
         for key, value in payload.items():
             if key in numeric:
                 if key == "position_accuracy_m" and value is None:
@@ -3795,8 +3859,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     raise HTTPException(status_code=400, detail=f"{key} out of range")
                 value = f
             if key in ("sdr_tx_enabled", "sdr_tx_attested", "sdr_amp", "scanlines", "sound",
-                       "map_vector", "map_auto_pack", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter", "assistant_system_tools", "assistant_medical_tools", "assistant_history_encrypted"):
+                       "map_vector", "map_auto_pack", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter", "assistant_system_tools", "assistant_medical_tools", "assistant_history_encrypted", "lan_easy_access", "lan_tls"):
                 value = bool(value)
+            if key == "lan_port":
+                value = int(float(value))
             if key in ("callsign", "team", "operator", "timezone", "units", "date_format",
                        "grid_format", "accent", "tile_source", "mbtiles_path", "map_cache_path", "dem_mbtiles_path",
                        "dem_encoding", "epoch", "position_source", "position_updated_at", "position_fix_at",
@@ -3869,6 +3935,24 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             if key == "map_cache_path":
                 from . import tilecache as _tilecache
                 _tilecache.invalidate_cache_path(str(value or ""))
+            if key == "lan_easy_access":
+                request.app.state.lan_easy_access = bool(value)
+        if ({"lan_port", "lan_tls"} & set(payload)
+                and d.get_setting("lan_access_enabled")
+                and not d.get_setting("opsec_mode")):
+            # Apply a port/TLS change to the live listener.
+            lm = getattr(request.app.state, "lan_manager", None)
+            if lm is not None and lm.enabled:
+                lm.stop()
+                try:
+                    port = int(d.get_setting("lan_port", 8080) or 8080)
+                except (TypeError, ValueError):
+                    port = 8080
+                if lm.start(request.app, ip=request.app.state.lan_ip, port=port,
+                            use_tls=bool(d.get_setting("lan_tls"))):
+                    request.app.state.allowed_hosts.add(lm.ip)
+                    request.app.state.allowed_origins.add(f"{lm.scheme}://{lm.ip}:{lm.port}")
+
         if "lan_access_enabled" in payload:
             lm = getattr(request.app.state, "lan_manager", None)
             if payload.get("lan_access_enabled"):
@@ -3876,16 +3960,20 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     from .lan import LanManager
                     lm = LanManager()
                     request.app.state.lan_manager = lm
-                if not (d.get_setting("opsec_mode") if False else False):
-                    pass
                 if d.get_setting("opsec_mode"):
                     d.set_setting("lan_access_enabled", False)
                 else:
-                    if lm.start(request.app, ip=request.app.state.lan_ip):
+                    try:
+                        lan_port = int(d.get_setting("lan_port", 8080) or 8080)
+                    except (TypeError, ValueError):
+                        lan_port = 8080
+                    if lm.start(request.app, ip=request.app.state.lan_ip, port=lan_port,
+                                use_tls=bool(d.get_setting("lan_tls"))):
                         if lm.ip:
                             request.app.state.allowed_hosts.add(lm.ip)
                         if lm.ip and lm.port:
-                            request.app.state.allowed_origins.add(f"https://{lm.ip}:{lm.port}")
+                            request.app.state.allowed_origins.add(
+                                f"{lm.scheme}://{lm.ip}:{lm.port}")
                     else:
                         d.set_setting("lan_access_enabled", False)
             elif lm is not None:
@@ -6517,10 +6605,14 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         # If a LAN listener is active, make sure its host/origin are allowed.
         if st.get("enabled") and st.get("ip") and st.get("port"):
             request.app.state.allowed_hosts.add(st["ip"])
-            request.app.state.allowed_origins.add(f"https://{st['ip']}:{st['port']}")
+            scheme = st.get("scheme") or "http"
+            request.app.state.allowed_origins.add(f"{scheme}://{st['ip']}:{st['port']}")
             token = getattr(request.app.state, "token", None)
-            if token and not (st.get("url") or "").count("token="):
-                st["url"] = f"https://{st['ip']}:{st['port']}/?token={token}"
+            easy = bool(db(request).get_setting("lan_easy_access", True))
+            st["easy_access"] = easy
+            st["managed"] = not bool(getattr(request.app.state, "lan", False))
+            if token and not easy and not (st.get("url") or "").count("token="):
+                st["url"] = f"{scheme}://{st['ip']}:{st['port']}/?token={token}"
         return st
 
     @app.post("/api/lan/start")
@@ -6534,24 +6626,44 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         if d.get_setting("opsec_mode"):
             raise HTTPException(status_code=403, detail="LAN access disabled in OPSEC mode")
         d.set_setting("lan_access_enabled", True)
+        if getattr(request.app.state, "lan", False):
+            request.app.state.lan_manager.adopt_external(
+                request.app.state.lan_ip, request.app.state.port,
+                "https" if request.app.state.lan_tls else "http",
+            )
+            return lan_status(request)
         ip = request.app.state.lan_ip
-        ok = lm.start(request.app, ip=ip)
+        try:
+            lan_port = int(d.get_setting("lan_port", 8080) or 8080)
+        except (TypeError, ValueError):
+            lan_port = 8080
+        ok = lm.start(request.app, ip=ip, port=lan_port,
+                      use_tls=bool(d.get_setting("lan_tls")))
         if ok and lm.ip and lm.port:
             request.app.state.allowed_hosts.add(lm.ip)
-            request.app.state.allowed_origins.add(f"https://{lm.ip}:{lm.port}")
+            request.app.state.allowed_origins.add(f"{lm.scheme}://{lm.ip}:{lm.port}")
         else:
             d.set_setting("lan_access_enabled", False)
         st = lm.status(request.app)
         if st.get("enabled") and st.get("ip") and st.get("port"):
+            scheme = st.get("scheme") or "http"
             token = getattr(request.app.state, "token", None)
-            if token and not (st.get("url") or "").count("token="):
-                st["url"] = f"https://{st['ip']}:{st['port']}/?token={token}"
+            easy = bool(d.get_setting("lan_easy_access", True))
+            st["easy_access"] = easy
+            st["managed"] = not bool(getattr(request.app.state, "lan", False))
+            if token and not easy and not (st.get("url") or "").count("token="):
+                st["url"] = f"{scheme}://{st['ip']}:{st['port']}/?token={token}"
             request.app.state.allowed_hosts.add(st["ip"])
-            request.app.state.allowed_origins.add(f"https://{st['ip']}:{st['port']}")
+            request.app.state.allowed_origins.add(f"{scheme}://{st['ip']}:{st['port']}")
         return st
 
     @app.post("/api/lan/stop")
     def lan_stop(request: Request):
+        if getattr(request.app.state, "lan", False):
+            raise HTTPException(
+                status_code=409,
+                detail="LAN was enabled at startup with --lan. Restart DarkSec without --lan to disable it.",
+            )
         lm = getattr(request.app.state, "lan_manager", None)
         if lm is not None:
             lm.stop()

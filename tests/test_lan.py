@@ -50,3 +50,67 @@ def test_stop_joins_a_live_listener_thread():
 
     assert server.should_exit is True
     assert not thread.is_alive()
+
+
+def test_easy_lan_access_sets_cookies_for_private_clients():
+    from fastapi.testclient import TestClient
+
+    from darksec.server import COOKIE, create_app
+
+    app = create_app(token="lan-token", no_index=True, lan=True, lan_ip="192.168.1.10")
+    with TestClient(app, base_url="http://192.168.1.10",
+                    client=("192.168.1.50", 50000)) as client:
+        assert client.get("/").status_code == 200
+        assert COOKIE in client.cookies
+        assert client.get("/api/status").status_code == 200
+
+    with TestClient(app, base_url="http://192.168.1.10",
+                    client=("8.8.8.8", 50000)) as public:
+        public.get("/")
+        assert COOKIE not in public.cookies
+        assert public.get("/api/status").status_code == 401
+
+
+def test_easy_lan_access_can_be_disabled():
+    from fastapi.testclient import TestClient
+
+    from darksec.server import COOKIE, create_app
+
+    app = create_app(token="lan-token", no_index=True, lan=True, lan_ip="192.168.1.10")
+    with TestClient(app, base_url="http://192.168.1.10",
+                    client=("192.168.1.50", 50000)) as client:
+        app.state.lan_easy_access = False
+        client.get("/")
+        assert COOKIE not in client.cookies
+        assert client.get("/api/status").status_code == 401
+
+
+def test_lan_listener_reports_http_scheme():
+    from darksec.lan import LanManager
+
+    manager = LanManager()
+    manager.enabled = True
+    manager.ip = "192.168.1.10"
+    manager.port = 8080
+    status = manager.status()
+    assert status["scheme"] == "http"
+    assert status["url"] == "http://192.168.1.10:8080/"
+
+
+def test_lan_settings_validation(client):
+    old = client.get("/api/settings").json()
+    try:
+        r = client.put("/api/settings", json={
+            "lan_port": 8099, "lan_easy_access": False, "lan_tls": False,
+        })
+        assert r.status_code == 200
+        updated = r.json()
+        assert updated["lan_port"] == 8099
+        assert updated["lan_easy_access"] is False
+        assert client.put("/api/settings", json={"lan_port": 70000}).status_code == 400
+    finally:
+        client.put("/api/settings", json={
+            "lan_port": old.get("lan_port", 8080),
+            "lan_easy_access": old.get("lan_easy_access", True),
+            "lan_tls": old.get("lan_tls", False),
+        })

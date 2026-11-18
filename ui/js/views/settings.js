@@ -321,6 +321,10 @@ export async function render(root) {
   /* ---------------------------------------------------- LAN / mobile access */
   const lanToggle = checkbox("Enable LAN / mobile access", !!settings.lan_access_enabled);
   const lanInput = lanToggle.querySelector("input");
+  const lanEasy = checkbox("Easy access: any device on this LAN can open the console without a token", settings.lan_easy_access !== false);
+  const lanPort = h("input", { class: "input", type: "number", min: "1", max: "65535", step: "1", value: String(settings.lan_port || 8080) });
+  const lanTls = checkbox("Use self-signed HTTPS instead of HTTP (advanced)", !!settings.lan_tls);
+  const lanSave = btn("SAVE LAN SETTINGS", { size: "sm", icon: "save", onClick: saveLanSettings });
   const lanStatus = h("div", { class: "small muted", text: "Checking..." });
   const lanUrl = h("div", { class: "small mono wrap-any", text: "" });
   const lanQr = h("img", { alt: "LAN access QR code", style: { display: "none", maxWidth: "320px", height: "auto", border: "1px solid var(--line)", background: "#fff" } });
@@ -332,28 +336,55 @@ export async function render(root) {
   } });
   const lanPanel = panel({
     title: "LAN / mobile access", icon: "wifi",
-    sub: "Optional second HTTPS listener for phones/tablets on the trusted local network",
+    sub: "Open the console from a phone/tablet on the trusted local network",
     body: h("div", { class: "col gap-8" },
       h("div", { class: "settings-subhead", text: "Listener" }),
       settingsDetails("Privacy and exposure",
-        h("p", { class: "settings-note-text", text: "Binds a separate HTTPS listener to all interfaces using a self-signed certificate. The main API stays loopback-only. OPSEC mode disables LAN access. Do not expose to the public internet." })),
+        h("p", { class: "settings-note-text", text: "Starts a separate HTTP listener on all interfaces at the selected port; the main API stays loopback-only. Easy access lets any device on this private LAN open the console without a launch token. Use it only on a network you trust, never on public Wi-Fi or the internet. OPSEC mode disables LAN access." })),
       lanToggle,
+      lanEasy,
+      h("div", { class: "form-grid" },
+        field("LAN port", lanPort, "Default 8080. Use 80 only if DarkSec can bind privileged ports; otherwise open http://<ip>:8080/."),
+        field("Transport", lanTls, "HTTP is simplest. HTTPS uses a self-signed certificate and phones will warn.")),
+      h("div", { class: "settings-actions" }, lanSave),
       h("div", { class: "row gap-6" }, h("span", { class: "small muted", text: "Status:" }), lanStatus),
       lanUrl,
       lanQr,
       h("div", { class: "settings-actions" }, lanCopy),
-      h("div", { class: "tiny muted", text: "Scan the QR (or open the URL) on the phone, accept the certificate warning, and the session cookie is set." }),
+      h("div", { class: "tiny muted", text: "On the phone or another computer, open the URL (or scan the QR). With easy access on, no token or certificate warning is needed." }),
     ),
   });
   addSectionHead("radio");
   grid.appendChild(lanPanel);
   lanInput.disabled = !!settings.opsec_mode;
 
+  async function saveLanSettings() {
+    const port = Number(lanPort.value);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      toast("LAN port must be between 1 and 65535", "warn");
+      return;
+    }
+    try {
+      await store.saveSettings({
+        lan_easy_access: lanEasy.querySelector("input").checked,
+        lan_port: port,
+        lan_tls: lanTls.querySelector("input").checked,
+      });
+      toast("LAN settings saved");
+      await refreshLan();
+    } catch (err) {
+      toast(err.message || "Could not save LAN settings", "error");
+    }
+  }
+
   async function refreshLan() {
     try {
       const st = await api.get("/api/lan/status");
       lanInput.checked = !!st.enabled;
-      lanStatus.textContent = st.enabled ? `ACTIVE · ${st.ip}:${st.port}` : "INACTIVE";
+      lanStatus.textContent = st.enabled
+        ? `ACTIVE · ${st.scheme || "http"}://${st.ip}:${st.port}${st.easy_access ? " · easy access" : ""}${st.managed === false ? " · started with --lan" : ""}`
+        : (st.error ? `ERROR · ${st.error}` : "INACTIVE");
+      if (st.enabled && st.managed === false) lanInput.disabled = true;
       if (st.enabled && st.url) {
         lanUrl.textContent = st.url;
         lanQr.src = `/api/lan/qr?${Date.now()}`;
@@ -368,9 +399,13 @@ export async function render(root) {
   }
   lanInput.addEventListener("change", async () => {
     try {
-      if (lanInput.checked) await api.post("/api/lan/start");
+      let lanResult = null;
+      if (lanInput.checked) lanResult = await api.post("/api/lan/start");
       else await api.post("/api/lan/stop");
       await refreshLan();
+      if (lanInput.checked && lanResult && !lanResult.enabled) {
+        toast(lanResult.error || "LAN listener could not start", "error", 8000);
+      }
       // When LAN/mobile access is enabled, also start phone GPS on the LAN IP
       // if possible, so a mobile browser can provide a position fix.
       if (lanInput.checked) {

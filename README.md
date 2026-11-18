@@ -233,15 +233,24 @@ same trusted network while the PC runs the console:
 python3 -m darksec --lan
 ```
 
-This binds to all interfaces, serves over HTTPS with an auto-generated
-self-signed certificate, and prints a token URL. Open that URL on the phone,
-accept the certificate warning, and the session cookie is set exactly as on
-desktop. `--lan-ip ADDRESS` overrides the auto-detected address; `--port N`
-still applies. OPSEC mode disables LAN access.
+This binds to all interfaces over plain HTTP and prints a URL such as
+`http://192.168.1.20:8765/`. On a trusted network, open that URL on the phone
+or computer and the session is created automatically — no token URL and no
+certificate warning. `--lan-ip ADDRESS` overrides the auto-detected address;
+`--port N` still applies. Use `--port 80` when DarkSec can bind privileged
+ports if you want `http://<ip>/` with no port. `--lan-tls` switches back to
+self-signed HTTPS.
 
-Do **not** expose this to the public internet. There is no rate limiting or
-account system beyond the per-launch token; treat the LAN like a trusted
-environment.
+From the desktop UI, **Settings → LAN / mobile access** starts the same
+listener at the configured LAN port (default **8080**) and shows a URL and QR
+code. **Easy access** is on by default: any device on the same private LAN can
+open the console without a token. Turn it off to require the printed token
+URL again. LAN ports and transport changes apply when saved.
+
+Do **not** expose this to the public internet or run it on shared Wi-Fi. Easy
+access trusts every device on the LAN; there is no account system. OPSEC mode
+disables LAN access. For a Pi, run it on a private network/hotspot and use a
+firewall rule so only your own devices can reach the port.
 
 ## Data locations
 
@@ -536,8 +545,11 @@ the running process loads the new code.
 ## Security model and limits
 
 - The API binds to `127.0.0.1` only.
-- A random per-launch token is required; it is stored in an HttpOnly,
-  SameSite=Strict cookie. Mutations require same-origin or the CSRF token.
+- Loopback/desktop access uses a random per-launch token stored in an
+  HttpOnly cookie. Mutations require same-origin or the CSRF token.
+- Optional LAN **easy access** deliberately bypasses the token for clients on
+  private/link-local addresses when LAN access is enabled. It is intended for
+  a trusted home/field network only; disable it to require the token URL.
 - Vault notes use AES-256-GCM with PBKDF2-HMAC-SHA256 (600,000 iterations).
   The key exists only in process memory and is dropped on lock, timeout or
   shutdown.

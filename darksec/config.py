@@ -144,4 +144,7 @@ def default_settings() -> dict:
         "assistant_library_context": True,
         "assistant_keep_alive": "30m",
         "lan_access_enabled": False,
+        "lan_easy_access": True,
+        "lan_port": 8080,
+        "lan_tls": False,
     }
