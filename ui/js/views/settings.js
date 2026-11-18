@@ -765,6 +765,12 @@ export async function render(root) {
   /* ------------------------------------------------------ program updates */
   const updateBox = h("div", { class: "col" });
   const updateMsg = h("div", { class: "callout small", text: "Checking local update state…" });
+  const updateBar = progressBar(0);
+  const updateBarText = h("div", { class: "tiny muted", text: "Idle" });
+  const updateLog = h("div", { class: "update-log", role: "log", "aria-live": "polite" });
+  const updateProgressWrap = h("div", { class: "col gap-6", style: { display: "none" } },
+    updateBar, updateBarText, updateLog);
+  let updateRunning = false;
   const updateCheckBtn = btn("CHECK FOR UPDATES", { icon: "refresh", onClick: checkUpdates });
   const updateApplyBtn = btn("UPDATE NOW", { tone: "primary", icon: "download", onClick: applyUpdate, disabled: true });
   const updatePanel = panel({
@@ -775,9 +781,10 @@ export async function render(root) {
       h("div", { class: "settings-subhead", text: "Git remote" }),
       updateBox,
       updateMsg,
+      updateProgressWrap,
       h("div", { class: "settings-actions" }, updateCheckBtn, updateApplyBtn),
       settingsDetails("What an update changes",
-        h("p", { class: "settings-note-text", text: "Updating fetches and fast-forwards program files from origin. Operator data in fielddata/ is ignored by git and is never changed. Uncommitted changes to tracked files block the update; untracked files are kept. Restart DarkSec after a successful update to run the new code. Checking for updates contacts the configured remote." }))),
+        h("p", { class: "settings-note-text", text: "Updating fetches and fast-forwards program files from origin. The progress bar and log show each step: checking, fetching, backing up local changes, fast-forwarding, reapplying local edits and finishing. Operator data in fielddata/ is ignored by git and is never changed. Local tracked edits are saved to fielddata/backups and reapplied; untracked files are kept. Restart DarkSec after a successful update to run the new code. Checking for updates contacts the configured remote." }))),
   });
   grid.appendChild(updatePanel);
   loadUpdateStatus();
@@ -957,9 +964,24 @@ export async function render(root) {
       updateMsg.className = "callout small amber";
       updateMsg.textContent = err.message || "Update status unavailable";
     }
+    try {
+      const job = await api.get("/api/update/job");
+      if (job && job.state === "running") {
+        updateRunning = true;
+        updateApplyBtn.disabled = true;
+        updateCheckBtn.disabled = true;
+        showUpdateJob(job);
+        pollUpdateJob(job.id).finally(() => {
+          updateRunning = false;
+          updateCheckBtn.disabled = false;
+          updateApplyBtn.disabled = !updateInfo?.can_update;
+        });
+      }
+    } catch { /* older backend or no job */ }
   }
 
   async function checkUpdates() {
+    if (updateRunning) return;
     const label = updateCheckBtn.querySelector("span");
     const original = label?.textContent;
     updateCheckBtn.disabled = true;
@@ -978,7 +1000,66 @@ export async function render(root) {
     }
   }
 
+  function appendUpdateLog(lines) {
+    const start = Number(updateLog.dataset.count || 0);
+    for (let i = start; i < (lines || []).length; i++) {
+      const line = lines[i] || {};
+      updateLog.appendChild(h("div", { class: `update-log-line ${line.level || "info"}` },
+        h("span", { class: "ts", text: fmt.time(line.ts) }),
+        h("span", { text: line.message || "" })));
+    }
+    updateLog.dataset.count = String((lines || []).length);
+    updateLog.scrollTop = updateLog.scrollHeight;
+  }
+
+  function showUpdateJob(job) {
+    updateProgressWrap.style.display = "";
+    const pct = Math.max(0, Math.min(100, Number(job?.percent) || 0));
+    const fill = updateBar.firstChild;
+    if (fill) fill.style.width = `${pct}%`;
+    updateBarText.textContent = `${pct}% · ${job?.step || "Working"}`;
+    appendUpdateLog(job?.log || []);
+  }
+
+  async function pollUpdateJob(jobId) {
+    let lastStep = "";
+    while (true) {
+      let job;
+      try {
+        job = await api.get(`/api/update/job/${encodeURIComponent(jobId)}`);
+      } catch (err) {
+        updateMsg.className = "callout small amber";
+        updateMsg.textContent = err.message || "Lost contact with the update job";
+        return null;
+      }
+      showUpdateJob(job);
+      if (job.step && job.step !== lastStep) {
+        lastStep = job.step;
+        updateMsg.className = "callout small";
+        updateMsg.textContent = `${job.step} · ${Number(job.percent) || 0}%`;
+      }
+      if (job.state === "done" || job.state === "error") {
+        if (job.result) renderUpdate(job.result);
+        if (job.state === "error") {
+          const error = job.error || job.result?.error || "Update failed";
+          updateMsg.className = "callout small amber";
+          updateMsg.textContent = error;
+          toast(error, "error", 9000);
+        } else if (job.result?.local_changes === "saved") {
+          toast(job.result.message || "Updated. Local changes saved to backup.", "warn", 9000);
+        } else if (job.result?.updated) {
+          toast("Updated. Restart DarkSec to run the new code.", "ok");
+        } else {
+          toast(job.result?.message || "Already up to date");
+        }
+        return job;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+  }
+
   async function applyUpdate() {
+    if (updateRunning) return;
     const ok = await confirmDialog({
       title: "Update DarkSec",
       message: updateInfo?.dirty
@@ -988,20 +1069,28 @@ export async function render(root) {
       requireText: "UPDATE",
     });
     if (!ok) return;
+    updateRunning = true;
     updateApplyBtn.disabled = true;
     updateCheckBtn.disabled = true;
     updateMsg.className = "callout small";
-    updateMsg.textContent = "Updating from origin…";
+    updateMsg.textContent = "Starting update…";
+    updateProgressWrap.style.display = "";
+    updateLog.replaceChildren();
+    delete updateLog.dataset.count;
+    const fill = updateBar.firstChild;
+    if (fill) fill.style.width = "0%";
+    updateBarText.textContent = "0% · Starting";
     try {
-      const info = await api.post("/api/update/apply");
-      renderUpdate(info);
-      if (!info.ok) toast(info.error || "Update failed", "error");
-      else if (info.local_changes === "saved") toast(info.message || "Updated. Local changes saved to backup.", "warn", 9000);
-      else if (info.updated) toast("Updated. Restart DarkSec to run the new code.", "ok");
-      else toast(info.message || "Already up to date");
+      const job = await api.post("/api/update/job");
+      if (!job?.id) throw new Error("The update job did not start");
+      showUpdateJob(job);
+      await pollUpdateJob(job.id);
     } catch (err) {
-      toast(err.message || "Update failed", "error");
+      updateMsg.className = "callout small amber";
+      updateMsg.textContent = err.message || "Update failed";
+      toast(err.message || "Update failed", "error", 9000);
     } finally {
+      updateRunning = false;
       updateCheckBtn.disabled = false;
       updateApplyBtn.disabled = !updateInfo?.can_update;
     }

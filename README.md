@@ -500,7 +500,10 @@ interchange; keep a copy on removable media.
 
 **Settings → Program updates** checks the installation's git remote and
 fast-forwards the program files from `origin`. It requires a real git checkout
-with an `origin` remote; a detached HEAD still blocks the update.
+with an `origin` remote; a detached HEAD still blocks the update. **Update now**
+runs in the background with a progress bar and a live step log (checking,
+fetching, backing up local changes, fast-forwarding, reapplying edits,
+finishing). Reopening Settings while an update runs resumes the same job.
 
 Local work is preserved. Before updating, tracked edits are saved to
 `fielddata/backups/pre-update-<timestamp>/` as `local-changes.patch` plus

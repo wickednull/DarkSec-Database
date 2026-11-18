@@ -174,3 +174,33 @@ def test_ignored_local_file_is_not_silently_overwritten(tmp_path, monkeypatch):
     backup = Path(result["backup_dir"])
     saved = backup / "untracked-conflicts" / "notes.local"
     assert saved.read_text(encoding="utf-8") == "local ignored version\n"
+
+
+def test_background_apply_job_reports_progress_and_log(tmp_path, monkeypatch):
+    import time
+
+    from darksec import updater
+
+    _remote, work, other = make_remote(tmp_path)
+    publish_upstream(work, other, app_py="a = 5\nb = 2\nc = 3\nd = 4\n")
+    setup_updater(monkeypatch, tmp_path, work)
+
+    job = updater.start_apply()
+    assert job["state"] == "running"
+    assert job["id"]
+    selected = job
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        selected = updater.apply_job_status(job["id"])
+        if selected["state"] != "running":
+            break
+        time.sleep(0.05)
+
+    assert selected["state"] == "done", selected
+    assert selected["percent"] == 100
+    assert selected["result"]["updated"] is True
+    messages = " | ".join(line["message"] for line in selected["log"])
+    assert "Fetching from origin" in messages
+    assert "Fast-forwarding" in messages
+    assert "Updated" in messages
+    assert any(line["level"] == "success" for line in selected["log"])

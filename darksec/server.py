@@ -3096,6 +3096,30 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         )
         return result
 
+    @app.post("/api/update/job")
+    def update_job_start(request: Request):
+        from . import updater
+        job = updater.start_apply()
+        db(request).audit(
+            "UPDATE_APPLY_START",
+            f"job={job.get('id')} state={job.get('state')}"[:300],
+            request.client.host if request.client else "",
+        )
+        return job
+
+    @app.get("/api/update/job")
+    def update_job_current():
+        from . import updater
+        return updater.apply_job_status() or {"state": "idle", "log": []}
+
+    @app.get("/api/update/job/{job_id}")
+    def update_job_status(job_id: str):
+        from . import updater
+        job = updater.apply_job_status(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Unknown update job")
+        return job
+
     @app.post("/api/update/apply")
     def update_apply(request: Request):
         from . import updater

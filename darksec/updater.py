@@ -20,6 +20,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -69,6 +72,88 @@ def _git(root: Path, args: list[str], timeout: int = LOCAL_TIMEOUT) -> tuple[int
     return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
 
 
+# ---------------------------------------------------------------------------
+# Background apply job + human-readable log
+# ---------------------------------------------------------------------------
+_apply_lock = threading.RLock()
+_apply_jobs: dict[str, dict[str, Any]] = {}
+_apply_current: dict[str, Any] | None = None
+
+
+def _log(job: dict[str, Any] | None, message: str, level: str = "info",
+         percent: int | None = None, step: str | None = None) -> None:
+    if job is None:
+        return
+    line = {"ts": _now(), "level": level, "message": str(message)[:500]}
+    with _apply_lock:
+        job["log"].append(line)
+        if len(job["log"]) > 600:
+            del job["log"][:200]
+        if percent is not None:
+            job["percent"] = max(0, min(100, int(percent)))
+        if step:
+            job["step"] = str(step)
+        job["updated_at"] = line["ts"]
+
+
+def _snapshot(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    if job is None:
+        return None
+    with _apply_lock:
+        return {**job, "log": [dict(item) for item in job.get("log", [])]}
+
+
+def start_apply() -> dict[str, Any]:
+    """Run apply() in a thread and return a pollable job with a live log."""
+    global _apply_current
+    with _apply_lock:
+        if _apply_current and _apply_current.get("state") == "running":
+            return _snapshot(_apply_current) or {}
+        job = {
+            "id": uuid.uuid4().hex[:12],
+            "state": "running",
+            "percent": 0,
+            "step": "Starting",
+            "log": [],
+            "result": None,
+            "error": None,
+            "started": _now(),
+            "updated_at": _now(),
+            "finished": None,
+        }
+        _apply_jobs[job["id"]] = job
+        _apply_current = job
+    threading.Thread(target=_run_apply_job, args=(job,), daemon=True).start()
+    return _snapshot(job) or {}
+
+
+def apply_job_status(job_id: str | None = None) -> dict[str, Any] | None:
+    with _apply_lock:
+        job = _apply_jobs.get(job_id) if job_id else _apply_current
+        return _snapshot(job)
+
+
+def _run_apply_job(job: dict[str, Any]) -> None:
+    try:
+        result = apply(job)
+        job["result"] = result
+        job["error"] = None if result.get("ok") else result.get("error")
+        if result.get("ok"):
+            _log(job, result.get("message") or "Update complete.", "success", 100, "Complete")
+            job["state"] = "done"
+        else:
+            error = result.get("error") or "Update failed."
+            if not job["log"] or job["log"][-1].get("message") != error:
+                _log(job, error, "error", 100, "Failed")
+            job["state"] = "error"
+    except Exception as exc:  # never leave the job stuck
+        job["error"] = f"{type(exc).__name__}: {exc}"[:400]
+        _log(job, job["error"], "error", 100, "Failed")
+        job["state"] = "error"
+    finally:
+        job["finished"] = _now()
+
+
 def _git_bytes(root: Path, args: list[str], timeout: int = LOCAL_TIMEOUT) -> tuple[int, bytes, str]:
     """Run git with raw stdout, for patches that may not be valid UTF-8."""
     try:
@@ -84,6 +169,61 @@ def _git_bytes(root: Path, args: list[str], timeout: int = LOCAL_TIMEOUT) -> tup
         return 1, b"", str(exc)
     err = proc.stderr.decode("utf-8", "replace").strip()
     return proc.returncode, proc.stdout, err
+
+
+def _git_stream(root: Path, args: list[str], job: dict[str, Any] | None,
+                timeout: int = FETCH_TIMEOUT) -> tuple[int, str, str]:
+    """Run git while streaming progress lines into the update log."""
+    try:
+        proc = subprocess.Popen(
+            ["git", "-C", str(root), *args],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            env=_env(), bufsize=1,
+        )
+    except FileNotFoundError:
+        return 127, "", "git is not installed"
+    except Exception as exc:
+        return 1, "", str(exc)
+    lines: list[str] = []
+    timed_out = threading.Event()
+
+    def _kill() -> None:
+        timed_out.set()
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    timer = threading.Timer(timeout, _kill)
+    timer.daemon = True
+    timer.start()
+    try:
+        assert proc.stdout is not None
+        while True:
+            line = proc.stdout.readline()
+            if line:
+                text = "\r".join(part.strip() for part in line.split("\r") if part.strip())
+                if not text:
+                    continue
+                text = re.sub(r"(https?://)[^/\s@]+@", r"\1", text)[:300]
+                lines.append(text)
+                _log(job, f"git: {text}")
+                continue
+            if proc.poll() is not None:
+                break
+    finally:
+        timer.cancel()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    if timed_out.is_set():
+        return 124, "", f"git command timed out after {timeout}s"
+    return proc.returncode or 0, "\n".join(lines[-20:]), ""
 
 
 def _repo_root() -> Path | None:
@@ -416,29 +556,44 @@ def _write_manifest(backup: Path, st: dict[str, Any], info: dict[str, Any],
     _prune_backups()
 
 
-def apply() -> dict[str, Any]:
+def apply(job: dict[str, Any] | None = None) -> dict[str, Any]:
     """Fast-forward the checkout from origin. Never force or create a merge."""
+    def note(message: str, level: str = "info", percent: int | None = None,
+             step: str | None = None) -> None:
+        _log(job, message, level, percent, step)
+
+    note("Checking installation and git state…", percent=2, step="Checking")
     st = status()
     st["checked_at"] = _now()
+    if st.get("frozen"):
+        note("Packaged builds cannot self-update.", "warn")
+    elif st.get("repo"):
+        note(f"Repository: {st.get('root')}")
+        note(f"Branch {st.get('branch') or '?'} · commit {st.get('commit') or '?'} "
+             f"· upstream {st.get('upstream') or 'none'}")
+        if st.get("dirty"):
+            note(f"{st.get('dirty_count')} modified tracked file(s) will be backed up first.",
+                 "warn")
     if not st["can_update"]:
         error = st["reason"] or "Update is not available for this installation."
-        if st["dirty"]:
-            files = ", ".join(st["dirty_files"][:5])
-            error = (
-                f"Local changes block the update ({st['dirty_count']} file(s): "
-                f"{files}). Commit or discard them first."
-            )
+        note(error, "error", 100, "Blocked")
         st.update({"ok": False, "error": error, "updated": False, "restart_required": False})
         return st
 
     root = Path(st["root"])
-    rc, out, err = _git(root, ["fetch", "--prune", "origin"], timeout=FETCH_TIMEOUT)
+    note("Fetching from origin (up to 90s)…", percent=12, step="Fetching")
+    rc, out, err = _git_stream(root, ["fetch", "--prune", "--progress", "origin"],
+                               job, timeout=FETCH_TIMEOUT)
     if rc != 0:
-        st.update({"ok": False, "error": _clean_error(err or out), "updated": False, "restart_required": False})
+        error = _clean_error(err or out)
+        note(f"Fetch failed: {error}", "error", 100, "Failed")
+        st.update({"ok": False, "error": error, "updated": False, "restart_required": False})
         return st
+    note("Fetch complete.", "success", 22, "Fetching")
 
     ahead, behind, count_err = _counts(root, st["upstream"])
     if ahead is None or behind is None:
+        note(f"Could not compare with upstream: {count_err}", "error", 100, "Failed")
         st.update({"ok": False, "error": count_err, "updated": False, "restart_required": False})
         return st
     st["ahead"] = ahead
@@ -447,8 +602,11 @@ def apply() -> dict[str, Any]:
     st["update_available"] = behind > 0
     old_commit = st["commit"]
     old_full = st["commit_full"]
+    note(f"{behind} commit(s) behind, {ahead} local commit(s) ahead.", percent=28,
+         step="Comparing")
 
     if behind == 0:
+        note("Already up to date.", "success", 100, "Complete")
         st.update({
             "ok": True,
             "updated": False,
@@ -457,12 +615,14 @@ def apply() -> dict[str, Any]:
         })
         return st
     if ahead > 0:
+        error = (
+            f"The branch has {ahead} local commit(s) not on {st['upstream']}; "
+            "a fast-forward update is not possible. Push or reset manually."
+        )
+        note(error, "error", 100, "Blocked")
         st.update({
             "ok": False,
-            "error": (
-                f"The branch has {ahead} local commit(s) not on {st['upstream']}; "
-                "a fast-forward update is not possible. Push or reset manually."
-            ),
+            "error": error,
             "updated": False,
             "restart_required": False,
         })
@@ -479,40 +639,58 @@ def apply() -> dict[str, Any]:
     moved: list[str] = []
     if st["dirty"] or untracked_conflicts:
         try:
+            note("Saving local changes before touching the working tree…", percent=34,
+                 step="Backing up")
             backup = _backup_path()
             if st["dirty"]:
                 backup_info = _backup_local_changes(root, backup)
+                note(f"Saved patch: {backup_info.get('patch')}")
+                note(f"Copied {len(backup_info.get('files') or [])} modified file(s); "
+                     f"{len(backup_info.get('deleted') or [])} deleted file(s).")
             if untracked_conflicts:
                 moved = _move_untracked_conflicts(root, backup, untracked_conflicts)
+                note(f"Moved {len(moved)} untracked/ignored file(s) into the backup: "
+                     f"{', '.join(moved[:6])}{'…' if len(moved) > 6 else ''}", "warn")
             _write_manifest(backup, st, backup_info, moved)
+            note(f"Backup ready at {backup}", "success", 46, "Backing up")
         except Exception as exc:
+            error = f"Could not back up local changes, update aborted: {exc}"
+            note(error, "error", 100, "Failed")
             st.update({
                 "ok": False,
-                "error": f"Could not back up local changes, update aborted: {exc}",
+                "error": error,
                 "updated": False,
                 "restart_required": False,
             })
             return st
 
     if st["dirty"]:
+        note("Resetting tracked files to HEAD (local copy is in the backup)…", percent=52,
+             step="Preparing")
         rc, out, err = _git(root, ["reset", "--hard", "HEAD"])
         if rc != 0:
+            error = f"Could not prepare the working tree: {_clean_error(err or out)}"
+            note(error, "error", 100, "Failed")
             st.update({
                 "ok": False,
-                "error": f"Could not prepare the working tree: {_clean_error(err or out)}",
+                "error": error,
                 "updated": False,
                 "restart_required": False,
                 "backup_dir": str(backup) if backup else None,
             })
             return st
+        note("Working tree is clean.", "success", 56, "Preparing")
 
+    note(f"Fast-forwarding to {st['upstream']}…", percent=62, step="Merging")
     rc, out, err = _git(root, ["merge", "--ff-only", st["upstream"]], timeout=PULL_TIMEOUT)
     if rc != 0:
         error = _clean_error(err or out)
+        note(f"Fast-forward failed: {error}", "error", 100, "Failed")
         restored = None
         if backup:
             # Put the old tree and the operator's changes back if the update
             # itself could not be applied.
+            note("Restoring the previous tree and local changes…", "warn", 90, "Restoring")
             _git(root, ["reset", "--hard", st["commit_full"] or "HEAD"])
             _restore_untracked(root, backup, moved)
             if backup_info.get("patch") and not backup_info.get("patch_empty"):
@@ -532,15 +710,19 @@ def apply() -> dict[str, Any]:
             "local_changes_restored": restored,
         })
         return st
+    note("Fast-forward complete.", "success", 76, "Merging")
 
     # Reapply the operator's tracked edits on top of the new code. If they do
     # not apply cleanly the updated tree is reset to a clean state so DarkSec
     # still starts; the patch and file copies remain in the backup folder.
     local_state = "untracked-moved" if moved and not st["dirty"] else "none"
     if backup and st["dirty"]:
+        note("Reapplying your local changes on top of the new code…", percent=82,
+             step="Reapplying")
         patch_path = backup_info.get("patch") or ""
         if not patch_path or backup_info.get("patch_empty"):
             local_state = "reapplied"
+            note("No tracked changes needed reapplying.", "success")
         else:
             rc, out, err = _git(
                 root,
@@ -551,9 +733,13 @@ def apply() -> dict[str, Any]:
                 # Leave the operator's edits unstaged, as they were before.
                 _git(root, ["reset"])
                 local_state = "reapplied"
+                note("Local changes reapplied cleanly.", "success", 90, "Reapplying")
             else:
                 _git(root, ["reset", "--hard", "HEAD"])
                 local_state = "saved"
+                note("Local changes conflicted with the update. The tree was reset to the "
+                     f"new clean code; the patch and file copies are in {backup}.", "warn",
+                     90, "Reapplying")
 
     new_st = status()
     updated = bool(old_full and new_st["commit_full"] != old_full)
@@ -572,6 +758,12 @@ def apply() -> dict[str, Any]:
         message += (
             f" Conflicting untracked file(s) were moved to {backup} before the update."
         )
+    if updated:
+        note(f"Updated {old_commit or '?'} → {new_st['commit'] or '?'}.", "success", 98,
+             "Complete")
+        note("Restart DarkSec to run the new code.", "warn", 100, "Complete")
+    else:
+        note(message, "success", 100, "Complete")
     new_st.update({
         "ok": True,
         "updated": updated,

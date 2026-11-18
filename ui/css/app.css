@@ -1769,3 +1769,21 @@ html[data-scheme="dark"] *::-webkit-scrollbar-thumb {
   background-clip: content-box; border-radius: 999px;
 }
 html[data-scheme="dark"] *::-webkit-scrollbar-thumb:hover { background: #3a4d43; background-clip: content-box; }
+
+/* Program update progress log */
+.update-log {
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, .22);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+}
+html[data-scheme="light"] .update-log { background: rgba(0, 0, 0, .035); }
+.update-log-line { display: flex; gap: 8px; align-items: flex-start; }
+.update-log-line .ts { color: var(--muted); flex: 0 0 auto; }
+.update-log-line.error { color: var(--red); }
+.update-log-line.warn { color: var(--amber); }
+.update-log-line.success { color: var(--acc); }
