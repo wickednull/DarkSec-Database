@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import json
 import os
+import re
 import sqlite3
 import string
 import threading
@@ -175,6 +177,9 @@ class Archive:
         self.minzoom: int | None = None
         self.maxzoom: int | None = None
         self.bounds: list[float] | None = None
+        self.vector_layers: list[str] = []
+        self.attribution = ""
+        self.indexed = False
         self.name = path.stem
         self._open()
 
@@ -193,6 +198,9 @@ class Archive:
         self.minzoom = None
         self.maxzoom = None
         self.bounds = None
+        self.vector_layers = []
+        self.attribution = ""
+        self.indexed = False
         self.metadata = {}
         try:
             self.conn = _connect(self.path)
@@ -203,6 +211,10 @@ class Archive:
                 raise RuntimeError("archive has no tiles table")
             self.metadata = self._read_metadata()
             self._apply_metadata()
+            try:
+                self.indexed = bool(self.conn.execute("PRAGMA index_list('tiles')").fetchall())
+            except sqlite3.Error:
+                self.indexed = False
             self._failed_at = 0.0
         except Exception as exc:
             self.error = str(exc)[:240]
@@ -259,6 +271,18 @@ class Archive:
                     self.bounds = parts
             except (TypeError, ValueError):
                 self.bounds = None
+        # Attribution is inserted into MapLibre's HTML control; keep it plain
+        # text so a supplied archive cannot inject markup into the UI.
+        raw_attribution = re.sub(r"<[^>]{0,300}>", " ", meta.get("attribution") or "")
+        self.attribution = " ".join(raw_attribution.split())[:300]
+        try:
+            extra = json.loads(meta.get("json") or "{}")
+            self.vector_layers = [
+                str(layer.get("id")) for layer in (extra.get("vector_layers") or [])
+                if layer.get("id")
+            ]
+        except (TypeError, ValueError):
+            self.vector_layers = []
         if not self.format:
             self.format = self._sniff_format()
         if self.minzoom is None or self.maxzoom is None:
@@ -307,7 +331,12 @@ class Archive:
 
     @property
     def usable(self) -> bool:
-        return self.conn is not None and not self.vector
+        """Readable archive, raster or vector."""
+        return self.conn is not None
+
+    @property
+    def raster(self) -> bool:
+        return self.usable and not self.vector
 
     def _ensure_current(self) -> None:
         if self.conn is None:
@@ -325,8 +354,8 @@ class Archive:
             self._close()
             self._open()
 
-    def tile(self, z: int, x: int, y: int) -> bytes | None:
-        if self.vector:
+    def tile(self, z: int, x: int, y: int, *, vector: bool = False) -> bytes | None:
+        if self.vector and not vector:
             return None
         if self.minzoom is not None and z < self.minzoom:
             return None
@@ -377,7 +406,11 @@ class Archive:
             "maxzoom": self.maxzoom,
             "bounds": self.bounds,
             "vector": self.vector,
+            "raster": self.raster,
             "usable": self.usable,
+            "vector_layers": self.vector_layers,
+            "attribution": self.attribution,
+            "indexed": self.indexed,
             "error": self.error,
         }
         return out
@@ -405,13 +438,26 @@ def _archive_for(path: Path) -> Archive | None:
 
 
 def lookup_tile(z: int, x: int, y: int, raw: str | None = None) -> tuple[bytes, str] | None:
-    """Return ``(tile_bytes, archive_name)`` from the configured source."""
+    """Return ``(raster_tile_bytes, archive_name)`` from the configured source."""
     raw = configured_path() if raw is None else raw
     for path in resolve_sources(raw):
         archive = _archive_for(path)
-        if archive is None or not archive.usable:
+        if archive is None or not archive.raster:
             continue
         data = archive.tile(z, x, y)
+        if data:
+            return data, archive.path.name
+    return None
+
+
+def lookup_vector_tile(z: int, x: int, y: int, raw: str | None = None) -> tuple[bytes, str] | None:
+    """Return ``(pbf_tile_bytes, archive_name)`` from a vector archive."""
+    raw = configured_path() if raw is None else raw
+    for path in resolve_sources(raw):
+        archive = _archive_for(path)
+        if archive is None or not archive.vector or not archive.usable:
+            continue
+        data = archive.tile(z, x, y, vector=True)
         if data:
             return data, archive.path.name
     return None
@@ -441,26 +487,65 @@ def describe_source(raw: str | None = None) -> dict[str, Any]:
     raw = configured_path() if raw is None else raw
     paths = resolve_sources(raw)
     archives = [a.describe() for a in (_archive_for(p) for p in paths) if a is not None]
-    usable = [a for a in archives if a.get("usable")]
+    readable = [a for a in archives if a.get("usable")]
     return {
         "configured": bool(str(raw or "").strip()),
         "path": str(raw or ""),
         "archives": archives,
         "count": len(archives),
-        "usable": bool(usable),
+        "usable": bool(readable),
+        "raster": any(a.get("raster") for a in archives),
+        "vector": any(a.get("vector") for a in archives),
         "error": None if not archives else next(
             (a["error"] for a in archives if a.get("error")), None
         ),
     }
 
 
+def _missing_component(path: Path) -> Path | None:
+    """First missing ancestor, so an error can say which part is absent."""
+    current = path
+    while True:
+        parent = current.parent
+        if parent == current:
+            return current
+        try:
+            if parent.exists():
+                return current if not current.exists() else None
+        except OSError:
+            return None
+        current = parent
+
+
+def _access_error(path: Path) -> str:
+    try:
+        import getpass
+        user = getpass.getuser()
+    except Exception:
+        user = "the DarkSec process"
+    return (f"Permission denied — the DarkSec process (user {user}) cannot read {path}. "
+            "Check the mount permissions or run DarkSec as the desktop user who mounted the drive.")
+
+
 def describe_path(path_text: str) -> dict[str, Any]:
     """Validate one operator-supplied path (file or folder)."""
-    path = Path(str(path_text or "").strip()).expanduser()
-    if not str(path_text or "").strip():
+    text = str(path_text or "").strip()
+    path = Path(text).expanduser()
+    if not text:
         return {"ok": False, "error": "No path supplied"}
-    if not path.exists():
-        return {"ok": False, "error": "Path does not exist"}
+    try:
+        path.stat()
+    except PermissionError:
+        return {"ok": False, "path": str(path), "error": _access_error(path)}
+    except FileNotFoundError:
+        missing = _missing_component(path)
+        hint = f" Missing component: {missing}" if missing and missing != path else ""
+        return {"ok": False, "path": str(path), "error": f"Path does not exist: {path}.{hint}"}
+    except OSError as exc:
+        return {"ok": False, "path": str(path),
+                "error": f"Cannot access {path}: {exc.strerror or exc}"}
+    if not os.access(path, os.R_OK):
+        return {"ok": False, "path": str(path), "error": _access_error(path)}
     if path.is_file():
         if path.suffix.lower() != ".mbtiles":
             return {"ok": False, "error": "Not an .mbtiles archive"}
@@ -469,17 +554,24 @@ def describe_path(path_text: str) -> dict[str, Any]:
         info["ok"] = bool(info.get("usable"))
         return info
     if not path.is_dir():
-        return {"ok": False, "error": "Not a file or folder"}
+        return {"ok": False, "path": str(path), "error": "Not a file or folder"}
+    if not os.access(path, os.R_OK | os.X_OK):
+        return {"ok": False, "path": str(path), "error": _access_error(path)}
     archives = [a.describe() for a in (_archive_for(p) for p in _iter_archives(path)) if a]
-    usable = [a for a in archives if a.get("usable")]
+    readable = [a for a in archives if a.get("usable")]
     return {
-        "ok": bool(usable),
+        "ok": bool(readable),
         "path": str(path),
         "directory": True,
         "archives": archives,
         "count": len(archives),
-        "usable": bool(usable),
-        "error": None if usable else "No usable .mbtiles archives in this folder",
+        "usable": bool(readable),
+        "raster": any(a.get("raster") for a in archives),
+        "vector": any(a.get("vector") for a in archives),
+        "error": None if readable else (
+            f"No .mbtiles archives found in this folder ({path}). "
+            "Put the archive directly in this folder or in a first-level subfolder."
+        ),
     }
 
 
@@ -494,15 +586,17 @@ _SKIP_DIRS = {
 }
 
 
-def search_roots() -> list[Path]:
-    roots: list[Path] = []
-    try:
-        from . import config
+def _is_mount_root(path: Path) -> bool:
+    text = str(path)
+    if os.name == "nt":
+        return len(text) <= 3 and text[1:3] == ":\\"
+    return text.startswith(("/media", "/run/media", "/mnt", "/Volumes"))
 
-        roots += [config.DATA_DIR, config.RESOURCE_ROOT / "maps"]
-    except Exception:
-        pass
-    roots.append(Path.home())
+
+def search_roots() -> list[Path]:
+    # Removable media first: a huge home folder must never consume the scan
+    # budget before the USB drive is reached.
+    roots: list[Path] = []
     if os.name == "nt":
         # USB sticks normally mount as D:..Z:; never crawl the system drive.
         for letter in string.ascii_uppercase[3:]:
@@ -520,6 +614,13 @@ def search_roots() -> list[Path]:
                     roots.append(p)
             except OSError:
                 continue
+    try:
+        from . import config
+
+        roots += [config.DATA_DIR, config.RESOURCE_ROOT / "maps"]
+    except Exception:
+        pass
+    roots.append(Path.home())
     seen: set[str] = set()
     out: list[Path] = []
     for root in roots:
@@ -548,15 +649,20 @@ def scan(extra_roots: list[Path] | None = None, *, budget: float = SCAN_BUDGET_S
     for root in roots:
         if time.monotonic() - started > budget or len(found) >= limit:
             break
+        # Mount points are usually shallow and quick; cap the home tree so it
+        # cannot use the entire budget on unrelated folders.
+        remaining = budget - (time.monotonic() - started)
+        share = remaining if _is_mount_root(root) else min(remaining, max(1.0, budget * 0.3))
+        root_deadline = time.monotonic() + share
         stack: list[tuple[Path, int]] = [(root, 0)]
-        while stack and time.monotonic() - started <= budget and len(found) < limit:
+        while stack and time.monotonic() <= root_deadline and len(found) < limit:
             folder, level = stack.pop()
             try:
                 entries = list(os.scandir(folder))
             except OSError:
                 continue
             for entry in entries:
-                if time.monotonic() - started > budget or len(found) >= limit:
+                if time.monotonic() > root_deadline or len(found) >= limit:
                     break
                 try:
                     if entry.is_file(follow_symlinks=False):

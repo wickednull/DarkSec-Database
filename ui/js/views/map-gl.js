@@ -1,5 +1,5 @@
 /* WebGL/3D prototype map (MapLibre GL) alongside the classic canvas map.
-   Uses local/offline-capable raster tiles: /api/map/tiles/{z}/{x}/{y}.png
+   Uses local/offline-capable raster tiles or OpenMapTiles-schema vector MBTiles.
    Raster style (no external glyphs/sprites). True DEM terrain requires raster-dem tiles. */
 import { api, download } from "../api.js";
 import { store } from "../store.js";
@@ -42,6 +42,16 @@ function rasterStyle(revision = "") {
       { id: "local-raster", type: "raster", source: "local", paint: { "raster-opacity": 0.92, "raster-fade-duration": 120 } }
     ]
   };
+}
+
+async function vectorStyle(revision = "") {
+  const style = await api.get("/api/map/vector/style");
+  const source = style?.sources?.omt;
+  if (source) {
+    const rev = revision ? `/${encodeURIComponent(revision)}` : "";
+    source.tiles = [`${location.origin}/api/map/vector/tiles${rev}/{z}/{x}/{y}.pbf`];
+  }
+  return style;
 }
 
 function escapeHtml(s){ return String(s ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
@@ -98,7 +108,7 @@ export async function render(root) {
   let intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud, mapLayers;
   let statusBox = null, coordBox = null;
   try {
-    [intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud] = await Promise.all([
+    [intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud, mapLayers] = await Promise.all([
       api.get("/api/map/intel").catch(() => null),
       api.get("/api/records/waypoints?limit=2000").then(r=>r.items||[]).catch(() => []),
       api.get("/api/records/tracks?limit=500").then(r=>r.items||[]).catch(() => []),
@@ -116,6 +126,16 @@ export async function render(root) {
 
   const state = { maxAgeHours: 0, show: { hazards:true, conflict:true, aircraft:true, sats:true, satsOverheadOnly:false, maritime:true, cables:true, cctv:true, cctvAlpr:true, wind:false, rain:false, cloud:false, terrain: !!demStatus?.available, waypoints:true, tracks:true, daynight:true, home:!hidePosition }, live: true, lastRefresh: Date.now() };
   let map = null, popup = null, daynightTimer = null, glLiveTimer = null, liveTimer = null, freshTimer = null, inspector = null;
+  let mapStyle = null;
+  const mbInfo = mapLayers?.mbtiles || {};
+  if (mbInfo.vector) {
+    try {
+      mapStyle = await vectorStyle(mbInfo.revision || "");
+    } catch (err) {
+      toast(`Vector basemap style unavailable: ${err.message || err}`, "warn", 7000);
+    }
+  }
+  if (!mapStyle) mapStyle = rasterStyle(mbInfo.revision || "");
   let intelAlpr = { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };
   let alprFetchTimer = null, alprQueryKey = "";
 
@@ -123,7 +143,7 @@ export async function render(root) {
   root.appendChild(pageHead({
     kicker: "COMMAND // TERRAIN (GL)",
     title: "Map & Terrain — 3D/GL",
-    desc: `WebGL situational map over local/offline raster tiles. Pitch/rotate for 3D perspective. Position: ${hidePosition ? "OP//MASKED" : positionInfo.mapLabel}. DEM terrain, wind/rain/cloud overlays, and maritime/cables/CCTV layers use local cache when available.`,
+    desc: `WebGL situational map over local/offline raster or vector MBTiles. Pitch/rotate for 3D perspective. Position: ${hidePosition ? "OP//MASKED" : positionInfo.mapLabel}. DEM terrain, wind/rain/cloud overlays, and maritime/cables/CCTV layers use local cache when available.`,
     actions: [
       btn("2D CANVAS", { icon: "map", onClick: () => { location.hash = "#/map?renderer=2d"; } }),
       btn("3D GL", { icon: "layers", tone: "primary", onClick: () => { location.hash = "#/map?renderer=gl"; } }),
@@ -135,7 +155,10 @@ export async function render(root) {
       btn("REFRESH OVERLAYS", { icon: "refresh", tone:"ghost", onClick: refreshOverlays }),
     ],
   }));
-  root.appendChild(alertStrip(`Local/offline basemap + cached intel. DEM ${demStatus?.available ? 'available (' + (demStatus.encoding||'terrarium') + ')' : 'not configured/cached'} · overlays cached via operator refresh (online required to fetch). Cables auto-populate from a cached public dataset on feed refresh (online first time; attribution required). CCTV can load nearby OSM surveillance locations via feed refresh when operator position is set. Maritime/AIS works with a configured GeoJSON/JSON source or local file (fielddata/maps/ais.geojson).`, demStatus?.available ? "cyan" : "amber"));
+  const vectorNote = mbInfo.vector
+    ? `Offline vector basemap: ${(mbInfo.archives || []).map((a) => a.name).filter(Boolean).slice(0, 2).join(", ") || "configured archive"} · water/roads/boundaries/building geometry, no text labels (no glyph pack bundled). `
+    : "";
+  root.appendChild(alertStrip(`${vectorNote}Local/offline basemap + cached intel. DEM ${demStatus?.available ? 'available (' + (demStatus.encoding||'terrarium') + ')' : 'not configured/cached'} · overlays cached via operator refresh (online required to fetch). Cables auto-populate from a cached public dataset on feed refresh (online first time; attribution required). CCTV can load nearby OSM surveillance locations via feed refresh when operator position is set. Maritime/AIS works with a configured GeoJSON/JSON source or local file (fielddata/maps/ais.geojson).`, demStatus?.available ? "cyan" : "amber"));
 
   const layout = h("div", { class: "map-layout mt-14" });
   const wrap = h("div", { class: "map-shell", style: { height: "min(72vh, 820px)", minHeight: "460px", position: "relative" } });
@@ -211,7 +234,7 @@ export async function render(root) {
   side.appendChild(panel({ title:"Legend", icon:"info", body: glLegend }));
   side.appendChild(panel({ title:"Inspector", icon:"info", body: inspector }));
 
-  map = new maplibregl.Map({ container, style: rasterStyle(mapLayers?.mbtiles?.revision || ""), center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 3.5, pitch:0, bearing:0, attributionControl:true, maxPitch:85 });
+  map = new maplibregl.Map({ container, style: mapStyle, center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 3.5, pitch:0, bearing:0, attributionControl:true, maxPitch:85 });
   map.addControl(new maplibregl.NavigationControl({ visualizePitch:true, showCompass:true, showZoom:true }), "top-right");
   map.addControl(new maplibregl.ScaleControl({ maxWidth:120, unit: U.isImperial() ? "imperial" : "metric" }), "bottom-left");
   try { if (typeof map.setProjection === 'function') map.setProjection({ type:'globe' }); } catch (e) { console.warn('Initial globe projection failed', e); }

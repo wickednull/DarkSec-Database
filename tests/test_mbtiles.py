@@ -12,7 +12,7 @@ PNG2 = b"\x89PNG\r\n\x1a\n" + b"\x01" * 48
 
 def make_mbtiles(path: Path, *, scheme: str = "tms", fmt: str = "png",
                  tiles: dict[tuple[int, int, int], bytes] | None = None,
-                 gz: bool = False) -> Path:
+                 gz: bool = False, extra_meta: dict | None = None) -> Path:
     """Create a minimal MBTiles archive in XYZ coordinates."""
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -25,6 +25,7 @@ def make_mbtiles(path: Path, *, scheme: str = "tms", fmt: str = "png",
         )
         meta = {"name": path.stem, "format": fmt, "scheme": scheme,
                 "minzoom": "0", "maxzoom": "14"}
+        meta.update(extra_meta or {})
         conn.executemany("INSERT INTO metadata VALUES (?, ?)", list(meta.items()))
         for (z, x, y), data in (tiles or {}).items():
             row_y = y if scheme == "xyz" else (1 << z) - 1 - y
@@ -78,14 +79,26 @@ def test_mbtiles_directory_of_archives(tmp_path):
     assert info["ok"] and info["count"] == 2 and info["directory"] is True
 
 
-def test_mbtiles_vector_archive_is_reported_not_drawn(tmp_path):
+def test_mbtiles_vector_archive_is_read_for_the_gl_map(tmp_path):
     from darksec import mbtiles
 
-    archive = make_mbtiles(tmp_path / "vector.mbtiles", fmt="pbf", tiles={(5, 1, 1): b"pbf"})
+    payload = b"\x1a\x2bvector-tile"
+    archive = make_mbtiles(
+        tmp_path / "vector.mbtiles", fmt="pbf", gz=True,
+        tiles={(5, 1, 1): payload},
+        extra_meta={"json": json.dumps({"vector_layers": [{"id": "water"}, {"id": "transportation"}]})},
+    )
     info = mbtiles.describe_path(str(archive))
     assert info["vector"] is True
-    assert info["ok"] is False
+    assert info["raster"] is False
+    assert info["ok"] is True
+    assert info["usable"] is True
+    assert info["vector_layers"] == ["water", "transportation"]
+    assert info["indexed"] is True
+    # The 2D raster path must not return PBF bytes as an image.
     assert mbtiles.lookup_tile(5, 1, 1, raw=str(archive)) is None
+    hit = mbtiles.lookup_vector_tile(5, 1, 1, raw=str(archive))
+    assert hit and hit[0] == payload
 
 
 def test_mbtiles_api_tiles_layers_and_settings_validation(client, tmp_path, monkeypatch):
@@ -129,6 +142,53 @@ def test_mbtiles_api_tiles_layers_and_settings_validation(client, tmp_path, monk
     assert fallback.headers.get("x-tile-source") != "mbtiles"
 
 
+def test_vector_mbtiles_style_and_tiles(client, tmp_path, monkeypatch):
+    from darksec import mbtiles
+
+    payload = b"\x1a\x2bvector-tile"
+    archive = make_mbtiles(
+        tmp_path / "planet-latest.planet.mbtiles", fmt="pbf", gz=True,
+        tiles={(7, 69, 43): payload},
+        extra_meta={"json": json.dumps({"vector_layers": [{"id": "water"}, {"id": "transportation"}]}),
+                    "attribution": "OpenMapTiles test data"},
+    )
+    monkeypatch.setattr(mbtiles, "search_roots", lambda: [tmp_path])
+    try:
+        assert client.put("/api/settings", json={"mbtiles_path": str(archive)}).status_code == 200
+
+        layers = client.get("/api/map/layers").json()["mbtiles"]
+        assert layers["vector"] is True and layers["raster"] is False
+        assert layers["usable"] is True
+
+        style = client.get("/api/map/vector/style").json()
+        assert style["version"] == 8
+        assert style["sources"]["omt"]["type"] == "vector"
+        assert style["sources"]["omt"]["maxzoom"] == 14
+        assert style["sources"]["omt"]["attribution"] == "OpenMapTiles test data"
+        assert any(layer.get("source-layer") == "water" for layer in style["layers"])
+        assert not any(layer.get("type") == "symbol" for layer in style["layers"])
+
+        tile = client.get("/api/map/vector/tiles/7/69/43.pbf")
+        assert tile.status_code == 200
+        assert tile.headers["content-type"].startswith("application/vnd.mapbox-vector-tile")
+        assert tile.content == payload
+
+        # Cache-busting revision lives in the path so MapLibre's {z}/{x}/{y}
+        # template keeps working.
+        revised = client.get("/api/map/vector/tiles/abc123/7/69/43.pbf")
+        assert revised.status_code == 200 and revised.content == payload
+
+        # Raster endpoint must not present the PBF archive as imagery.
+        raster = client.get("/api/map/tiles/7/69/43.png")
+        assert raster.headers.get("x-tile-source") != "mbtiles"
+
+        scan = client.get("/api/map/mbtiles/scan", params={"refresh": "true",
+                                                          "path": str(archive)}).json()
+        assert any(item["path"] == str(archive) and item["vector"] for item in scan["items"])
+    finally:
+        client.put("/api/settings", json={"mbtiles_path": ""})
+
+
 def test_mbtiles_missing_tiles_table_is_unusable(tmp_path):
     import sqlite3
 
@@ -158,3 +218,46 @@ def test_mbtiles_revision_changes_with_archive(tmp_path):
     os.utime(archive, ns=(1, 2_000_000_000))
     assert mbtiles.revision(str(archive)) != first
     assert mbtiles.revision(str(tmp_path / "missing.mbtiles")) == ""
+
+
+def test_mbtiles_path_error_explains_missing_and_permission(tmp_path):
+    import os
+
+    from darksec import mbtiles
+
+    missing = tmp_path / "PNY512_4" / "planet-latest.planet.mbtiles"
+    info = mbtiles.describe_path(str(missing))
+    assert info["ok"] is False
+    assert "does not exist" in info["error"]
+    assert "planet-latest.planet.mbtiles" in info["error"]
+
+    if os.geteuid() != 0:
+        blocked = tmp_path / "blocked.mbtiles"
+        blocked.write_bytes(b"")
+        os.chmod(blocked, 0)
+        try:
+            info = mbtiles.describe_path(str(blocked))
+            assert info["ok"] is False
+            assert "Permission denied" in info["error"]
+        finally:
+            os.chmod(blocked, 0o644)
+
+
+def test_scan_prefers_mounted_media_and_accepts_extra_root(tmp_path):
+    from darksec import mbtiles
+
+    archive = make_mbtiles(tmp_path / "usb" / "region.mbtiles", tiles={(6, 1, 1): PNG})
+    items = mbtiles.scan(extra_roots=[tmp_path], budget=3.0)
+    assert any(item["path"] == str(archive) for item in items)
+
+
+def test_vector_style_light_and_dark():
+    from darksec import mapstyle
+
+    dark = mapstyle.vector_style(theme="dark", minzoom=2, maxzoom=12)
+    light = mapstyle.vector_style(theme="light", minzoom=2, maxzoom=12)
+    assert dark["sources"]["omt"]["minzoom"] == 2
+    assert dark["sources"]["omt"]["maxzoom"] == 12
+    assert dark["layers"][0]["paint"]["background-color"] != light["layers"][0]["paint"]["background-color"]
+    assert any(layer.get("source-layer") == "water" for layer in dark["layers"])
+    assert not any(layer.get("type") == "symbol" for layer in dark["layers"])

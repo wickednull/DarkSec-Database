@@ -42,7 +42,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTe
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, assistant, astro, autosync, config, feeds, geo, geocoding, intel, library, mbtiles, phonegps, sdr, sitrep, tilecache
+from . import __version__, assistant, astro, autosync, config, feeds, geo, geocoding, intel, library, mapstyle, mbtiles, phonegps, sdr, sitrep, tilecache
 from .config import APP_NAME
 from .brief import build_brief, to_markdown
 from .calc_catalog import CALC_CATALOG, CALC_FUNCS
@@ -5088,6 +5088,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             "mbtiles": {
                 "configured": mb["configured"],
                 "usable": mb["usable"],
+                "raster": mb["raster"],
+                "vector": mb["vector"],
                 "count": mb["count"],
                 "error": mb["error"],
                 "revision": mbtiles.revision(),
@@ -5099,13 +5101,82 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             },
         }
 
+    @app.get("/api/map/vector/style")
+    def map_vector_style(request: Request):
+        """MapLibre style for an offline OpenMapTiles-schema vector archive."""
+        s = db(request).all_settings()
+        source = mbtiles.describe_source()
+        archives = [a for a in source["archives"] if a.get("usable") and a.get("vector")]
+        require(bool(archives), "No vector MBTiles archive configured", 404)
+        lows = [a["minzoom"] for a in archives if a.get("minzoom") is not None]
+        highs = [a["maxzoom"] for a in archives if a.get("maxzoom") is not None]
+        attribution = next((a.get("attribution") for a in archives if a.get("attribution")), "")
+        if not attribution:
+            names = ", ".join(a.get("name") or a.get("file") or "" for a in archives[:3])
+            attribution = f"MBTiles · {names}" if names else "Offline MBTiles"
+        return mapstyle.vector_style(
+            theme=str(s.get("theme_mode") or "dark"),
+            minzoom=min(lows) if lows else 0,
+            maxzoom=max(highs) if highs else 14,
+            attribution=attribution,
+        )
+
+    def _vector_tile_response(z: int, x: int, y: int):
+        require(0 <= z <= 22 and x >= 0 and y >= 0, "Invalid tile coordinates", 400)
+        hit = mbtiles.lookup_vector_tile(z, x, y)
+        require(hit is not None, "Vector tile not found", 404)
+        data, name = hit
+        return Response(
+            content=data,
+            media_type="application/vnd.mapbox-vector-tile",
+            headers={"Cache-Control": "public, max-age=604800",
+                     "X-Tile-Source": f"mbtiles-vector/{name}"},
+        )
+
+    @app.get("/api/map/vector/tiles/{revision}/{z}/{x}/{y}.pbf")
+    def map_vector_tile_revision(revision: str, z: int, x: int, y: int):
+        """Revision in the path busts caches without breaking MapLibre templates."""
+        return _vector_tile_response(z, x, y)
+
+    @app.get("/api/map/vector/tiles/{z}/{x}/{y}.pbf")
+    def map_vector_tile(z: int, x: int, y: int):
+        """Raw (decompressed) vector tile from the configured archive."""
+        return _vector_tile_response(z, x, y)
+
     @app.get("/api/map/mbtiles/scan")
-    def map_mbtiles_scan(refresh: bool = False):
-        """Find .mbtiles archives in the data folders and mounted media."""
-        items = mbtiles.scan() if refresh else mbtiles.cached_scan()
+    def map_mbtiles_scan(refresh: bool = False, path: str = ""):
+        """Find .mbtiles archives in the data folders and mounted media.
+
+        ``path`` lets the operator search a folder (or the folder containing a
+        pasted archive) first, which avoids waiting for the default roots.
+        """
+        text = str(path or "").strip()
+        extra: list[Path] = []
+        direct: Path | None = None
+        if text:
+            target = Path(text).expanduser()
+            try:
+                if target.is_file():
+                    direct = target
+                    extra = [target.parent]
+                elif target.is_dir():
+                    extra = [target]
+            except OSError:
+                extra = []
+        if refresh or text:
+            items = mbtiles.scan(extra_roots=extra)
+        else:
+            items = mbtiles.cached_scan()
+        if direct is not None:
+            info = mbtiles.describe_path(str(direct))
+            info["ok"] = bool(info.get("usable"))
+            key = str(direct)
+            if not any(str(i.get("path")) == key for i in items):
+                items.insert(0, info)
         return {
             "items": items,
             "roots": [str(p) for p in mbtiles.search_roots()],
+            "requested": text,
             "note": ("Archives are read in place; keep the USB drive mounted while using them. "
                      "A folder containing several .mbtiles files can be selected as the path."),
         }

@@ -481,7 +481,7 @@ export async function render(root) {
       h("div", { class: "settings-subhead", text: "Tile source" }),
       h("div", { class: "form-grid" },
         field("Tile source", tileSource, "Used for live view and for new offline downloads. Bundled and cached tiles are always preferred."),
-        field("MBTiles path", mbRow, "A single .mbtiles file or a folder of archives, including a mounted USB drive. Read in place, read-only — keep the drive mounted while using it.")),
+        field("MBTiles path", mbRow, "A single .mbtiles file or a folder of archives, including a mounted USB drive. Raster archives draw on both maps; vector PBF archives draw in the 3D GL map. Read in place, read-only — keep the drive mounted while using it.")),
       mbStatus,
       mapVector,
       h("div", { class: "settings-subhead", text: "Layers" }),
@@ -1463,16 +1463,20 @@ export async function render(root) {
     if (info.directory) {
       const archives = info.archives || [];
       const usable = archives.filter((a) => a.usable);
-      if (!usable.length) return { text: info.error || "No usable .mbtiles archives in this folder", ok: false };
+      if (!usable.length) return { text: info.error || "No readable .mbtiles archives in this folder", ok: false };
       const names = usable.slice(0, 4).map((a) => `${a.file} (${(a.format || "?").toUpperCase()} ${mbZoom(a)})`).join(", ");
       const more = usable.length > 4 ? ` +${usable.length - 4} more` : "";
-      return { text: `READY · ${usable.length}/${archives.length} archive(s): ${names}${more}`, ok: true };
-    }
-    if (info.vector) {
-      return { text: `Vector archive (${String(info.format || "pbf").toUpperCase()}) — the raster basemap cannot render it`, ok: false };
+      const vectorNote = usable.some((a) => a.vector) ? " · vector archives render in the 3D GL map" : "";
+      return { text: `READY · ${usable.length}/${archives.length} archive(s): ${names}${more}${vectorNote}`, ok: true };
     }
     if (!info.usable) {
       return { text: info.error || "Archive could not be opened", ok: false };
+    }
+    if (info.vector) {
+      return {
+        text: `READY · VECTOR ${String(info.format || "pbf").toUpperCase()} · ${mbZoom(info)} · ${String(info.scheme || "tms").toUpperCase()} rows · renders in the 3D GL map`,
+        ok: true,
+      };
     }
     return {
       text: `READY · ${info.name || info.file} · ${fmt.bytes(info.size_bytes)} · ${String(info.format || "?").toUpperCase()} · ${mbZoom(info)} · ${String(info.scheme || "tms").toUpperCase()} rows`,
@@ -1513,9 +1517,10 @@ export async function render(root) {
       body,
       actions: [btn("CLOSE", { tone: "ghost", onClick: () => m.close() })],
     });
+    const typed = String(mbtiles.value || "").trim();
     let out;
     try {
-      out = await api.get("/api/map/mbtiles/scan?refresh=true");
+      out = await api.get(`/api/map/mbtiles/scan?refresh=true${typed ? `&path=${encodeURIComponent(typed)}` : ""}`);
     } catch (err) {
       body.replaceChildren(h("div", { class: "callout danger", text: err.message || "Scan failed" }));
       return;
@@ -1523,9 +1528,18 @@ export async function render(root) {
     const items = out.items || [];
     body.replaceChildren();
     if (!items.length) {
+      let reason = "";
+      if (typed) {
+        try {
+          const info = await api.get(`/api/map/mbtiles/info?path=${encodeURIComponent(typed)}`);
+          reason = info.error || "";
+        } catch (err) {
+          reason = err.message || "";
+        }
+      }
       body.appendChild(emptyState(
         "No MBTiles archives found",
-        `Plug in the drive and scan again. Searched: ${(out.roots || []).slice(0, 6).join(", ")}`,
+        reason || `Plug in the drive and scan again. Searched: ${(out.roots || []).slice(0, 6).join(", ")}`,
       ));
       return;
     }
@@ -1542,16 +1556,16 @@ export async function render(root) {
           m.close();
         },
       });
-      const tone = it.usable ? "green" : it.vector ? "amber" : "red";
+      const tone = it.usable ? (it.vector ? "cyan" : "green") : "red";
       const detail = it.vector
-        ? "vector tiles are not supported by the raster basemap"
+        ? "vector PBF archive · renders in the 3D GL map"
         : (it.error || `${(it.format || "?").toUpperCase()} · ${mbZoom(it)} · ${String(it.scheme || "tms").toUpperCase()} rows`);
       list.appendChild(h("div", { class: "list-item" },
         h("div", { class: "li-main" },
           h("div", { class: "li-title truncate", text: `${it.name || it.file} · ${fmt.bytes(it.size_bytes)}` }),
           h("div", { class: "li-sub mono truncate", text: it.path, title: it.path }),
           h("div", { class: "li-sub", text: detail })),
-        badge(it.usable ? "READY" : it.vector ? "VECTOR" : "UNUSABLE", tone),
+        badge(it.vector ? "VECTOR" : it.usable ? "READY" : "UNUSABLE", tone),
         use));
     }
     body.appendChild(list);

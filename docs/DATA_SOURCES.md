@@ -24,7 +24,7 @@ redistributing any data.
 | Layer | Source | Storage | Notes |
 |---|---|---|---|
 | Vector basemap | Bundled Natural Earth-derived data (`maps/vector`) | Local files | No tile server contacted by default. |
-| Raster tiles | Operator-supplied MBTiles/local tiles or configured local sources | Local files/cache | Read in place from local disks or USB. Raster PNG/JPEG/WebP only; no external tile server unless operator configures one. |
+| Raster tiles | Operator-supplied MBTiles/local tiles or configured local sources | Local files/cache | Read in place from local disks or USB. Raster PNG/JPEG/WebP on the 2D map; vector PBF/MVT in the 3D GL map. No external tile server unless operator configures one. |
 | Subsea/data cables | Cached/public dataset import when available, or local GeoJSON (`fielddata/maps/submarine-cables.geojson` etc.) | Feed cache | Preserve dataset attribution in feed `source_note`. Verify license before redistribution. |
 
 ## Offline MBTiles
@@ -33,9 +33,11 @@ redistributing any data.
 archives, including a mounted USB drive. Archives are opened read-only and are
 never modified. Supported: raster PNG/JPEG/WebP tiles, gzip-compressed tile
 blobs, standard MBTiles TMS row order and non-standard `scheme=xyz` archives.
-Vector PBF/MVT archives are detected and reported as unusable by the raster
-basemap rather than failing silently. The **Find on USB** scanner searches the
-data folder, `maps/`, the home folder and common removable-media mount points.
+Vector PBF/MVT archives (OpenMapTiles/MapTiler and similar) render in the
+**3D GL map**; the 2D canvas reports that they need the GL renderer. The
+offline vector style deliberately has no text labels because no glyph pack is
+bundled. The **Find on USB** scanner checks removable-media mounts first, then
+the data folder, `maps/` and the home folder.
 
 Operators are responsible for the license and attribution of imported map
 imagery.

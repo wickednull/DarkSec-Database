@@ -274,11 +274,16 @@ multi-gigabyte regional map does not have to be copied into the app folder:
 4. Pick an archive, or point the path at a folder containing several
    `.mbtiles` files. Press **CHECK** to verify it.
 
-Raster PNG/JPEG/WebP archives are supported, including gzip-compressed tile
-blobs and both the standard MBTiles TMS row order and non-standard `scheme=xyz`
-archives. Vector PBF/MVT archives are reported as unsupported because the
-basemap renderer draws raster tiles. Keep the drive mounted while the map is in
-use; if it is removed the map falls back to bundled and cached tiles.
+Raster PNG/JPEG/WebP archives are supported on both map renderers, including
+gzip-compressed tile blobs and both the standard MBTiles TMS row order and
+non-standard `scheme=xyz` archives.
+
+Vector PBF/MVT archives (for example an OpenMapTiles/MapTiler
+`planet-latest.planet.mbtiles`) are supported by the **3D GL map**. The 2D
+canvas cannot rasterise PBF tiles, so it tells you to open the 3D map instead.
+The GL style draws land, water, boundaries, roads and buildings; text labels
+are omitted because no glyph pack is bundled. Keep the drive mounted while the
+map is in use; if it is removed the map falls back to bundled and cached tiles.
 
 To rebuild the bundled overview from a working provider (online, once):
 

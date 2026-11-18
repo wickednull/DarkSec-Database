@@ -137,7 +137,7 @@ export async function render(root, params = {}) {
   const raster = (layers.raster || []);
   let mbtilesInfo = layers.mbtiles || {};
   let tileRevision = mbtilesInfo.revision || "";
-  let tileAvailable = !!(raster.length || mbtilesInfo.usable);
+  let tileAvailable = !!(raster.length || mbtilesInfo.raster);
   let disposed = false;
   let world = null;
   let selected = null;
@@ -174,7 +174,9 @@ export async function render(root, params = {}) {
     ],
   }));
 
-  if (!layers.vector?.length && !tileAvailable) {
+  if (mbtilesInfo.vector && !mbtilesInfo.raster) {
+    root.appendChild(alertStrip("Vector MBTiles (PBF) configured. The 2D canvas cannot draw vector tiles — open the 3D GL map to use this archive.", "amber"));
+  } else if (!layers.vector?.length && !tileAvailable) {
     root.appendChild(alertStrip("No offline basemap is installed. Waypoints and tracks still work, but no terrain will render. Add maps/vector/world.geojson or point Settings at an MBTiles archive.", "red"));
   } else if (!tileAvailable) {
     root.appendChild(alertStrip("Vector basemap only. Detail is limited at close range; use a paper map or add an MBTiles archive for tactical-scale imagery.", ""));
@@ -182,7 +184,7 @@ export async function render(root, params = {}) {
   if (mbtilesInfo.configured && !mbtilesInfo.usable) {
     const why = mbtilesInfo.error
       || (mbtilesInfo.archives || [])
-        .map((a) => a.vector ? `${a.file}: vector (PBF) archives are not renderable` : a.error)
+        .map((a) => a.error)
         .filter(Boolean).join("; ")
       || "archive cannot be opened";
     root.appendChild(alertStrip(`Configured MBTiles source is not usable — ${why}. Check Settings → Offline maps.`, "red"));
@@ -313,7 +315,7 @@ export async function render(root, params = {}) {
       layerRows,
       h("div", { class: "mt-8" }, field("INTEL AGE FILTER", ageFilter)),
       intelSummaryEl,
-      h("div", { class: "tiny dim mt-10", text: `${raster.length} raster source(s) · MBTiles ${mbtilesInfo.configured ? (mbtilesInfo.usable ? `${mbtilesInfo.count || 1} archive(s)` : "configured · unusable") : "not configured"}` }),
+      h("div", { class: "tiny dim mt-10", text: `${raster.length} raster source(s) · MBTiles ${mbtilesInfo.configured ? (mbtilesInfo.usable ? `${mbtilesInfo.count || 1} archive(s)${mbtilesInfo.vector ? " · vector (3D GL)" : ""}` : "configured · unusable") : "not configured"}` }),
       cacheStatusEl,
       h("div", { class: "row gap-6 mt-8" },
         btn("MANAGE OFFLINE MAP", { size: "sm", icon: "download", tone: "primary", onClick: openDownloadDialog }),
@@ -483,7 +485,7 @@ export async function render(root, params = {}) {
         if (l.activeSource) activeSource = l.activeSource;
         mbtilesInfo = l.mbtiles || {};
         tileRevision = mbtilesInfo.revision || "";
-        tileAvailable = !!((l.raster || []).length || mbtilesInfo.usable);
+        tileAvailable = !!((l.raster || []).length || mbtilesInfo.raster);
         updateAttribution();
       }
     } catch { /* offline: keep last known values */ }
