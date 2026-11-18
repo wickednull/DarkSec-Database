@@ -7,18 +7,21 @@
 #   ./install.sh                 core app + document/OCR tools
 #   ./install.sh --with-sdr      also install optional radio/GPS tools
 #   ./install.sh --no-venv       use the system Python instead of .venv
+#   ./install.sh --no-system     skip system packages (tools already installed)
 #
 set -euo pipefail
 cd "$(dirname "$0")"
 
 WITH_SDR=0
 MAKE_VENV=1
+SKIP_SYSTEM=0
 for arg in "$@"; do
   case "$arg" in
     --with-sdr) WITH_SDR=1 ;;
     --no-venv) MAKE_VENV=0 ;;
+    --no-system) SKIP_SYSTEM=1 ;;
     -h|--help)
-      sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+      awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
       exit 0
       ;;
     *)
@@ -28,18 +31,35 @@ for arg in "$@"; do
   esac
 done
 
+if [ "${SKIP_SYSTEM:-0}" -eq 0 ] && [ "$(id -u)" -ne 0 ] && [ ! -t 0 ]; then
+  cat >&2 <<'EOF'
+This installer needs an interactive terminal so sudo can ask for your password.
+Open a terminal in this folder and run:
+
+    bash install.sh
+
+If the tools are already installed and you do not want system packages, run:
+
+    bash install.sh --no-system
+EOF
+  exit 1
+fi
+
 SUDO=""
-if [ "$(id -u)" -ne 0 ]; then
+if [ "$SKIP_SYSTEM" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
   if command -v sudo >/dev/null 2>&1; then
     SUDO="sudo"
   else
     echo "This installer needs root or sudo for system packages." >&2
+    echo "Alternatively run: bash install.sh --no-system" >&2
     exit 1
   fi
 fi
 
 PM=""
-if command -v apt-get >/dev/null 2>&1; then PM=apt
+if [ "$SKIP_SYSTEM" -eq 1 ]; then
+  PM=""
+elif command -v apt-get >/dev/null 2>&1; then PM=apt
 elif command -v dnf >/dev/null 2>&1; then PM=dnf
 elif command -v pacman >/dev/null 2>&1; then PM=pacman
 elif command -v zypper >/dev/null 2>&1; then PM=zypper
@@ -47,30 +67,34 @@ elif command -v apk >/dev/null 2>&1; then PM=apk
 elif command -v brew >/dev/null 2>&1; then PM=brew
 fi
 
+INSTALL_LOG="${TMPDIR:-/tmp}/darksec-install.log"
+: > "$INSTALL_LOG" 2>/dev/null || INSTALL_LOG="/tmp/darksec-install.log"
+
 echo "DarkSec installer"
 echo "Package manager: ${PM:-not detected}"
+echo "Log: $INSTALL_LOG"
 echo
 
 install_one() {
   local package="$1"
   case "$PM" in
     apt)
-      DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends "$package" >/dev/null
+      DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends "$package" >>"$INSTALL_LOG" 2>&1
       ;;
     dnf)
-      $SUDO dnf install -y "$package" >/dev/null
+      $SUDO dnf install -y "$package" >>"$INSTALL_LOG" 2>&1
       ;;
     pacman)
-      $SUDO pacman -S --needed --noconfirm "$package" >/dev/null
+      $SUDO pacman -S --needed --noconfirm "$package" >>"$INSTALL_LOG" 2>&1
       ;;
     zypper)
-      $SUDO zypper --non-interactive install "$package" >/dev/null
+      $SUDO zypper --non-interactive install "$package" >>"$INSTALL_LOG" 2>&1
       ;;
     apk)
-      $SUDO apk add --no-cache "$package" >/dev/null
+      $SUDO apk add --no-cache "$package" >>"$INSTALL_LOG" 2>&1
       ;;
     brew)
-      brew install "$package" >/dev/null
+      brew install "$package" >>"$INSTALL_LOG" 2>&1
       ;;
     *)
       return 1
@@ -86,7 +110,7 @@ install_group() {
     if install_one "$package"; then
       echo "ok"
     else
-      echo "skipped/unavailable"
+      echo "skipped/unavailable (see $INSTALL_LOG)"
       failed+=("$package")
     fi
   done
@@ -97,7 +121,10 @@ install_group() {
 
 if [ -n "$PM" ]; then
   if [ "$PM" = "apt" ]; then
-    $SUDO apt-get update -y >/dev/null
+    echo "Updating the package index (this can take a minute)…"
+    if ! $SUDO apt-get update -y >>"$INSTALL_LOG" 2>&1; then
+      echo "Package index update failed; continuing with installed packages." >&2
+    fi
   elif [ "$PM" = "brew" ]; then
     brew update >/dev/null 2>&1 || true
   fi
@@ -146,7 +173,12 @@ if [ -n "$PM" ]; then
     echo
   fi
 else
-  echo "No supported package manager found. Install these packages manually:"
+  if [ "$SKIP_SYSTEM" -eq 1 ]; then
+    echo "Skipping system packages (--no-system)."
+  else
+    echo "No supported package manager found. Install these packages manually:"
+  fi
+  echo "  poppler-utils, tesseract-ocr (+ English data), djvulibre-bin, ffmpeg, sox, git"
   echo "  poppler-utils, tesseract-ocr (+ English data), djvulibre-bin, ffmpeg, sox, git"
   echo "  Python 3.11+ with pip and venv"
   echo

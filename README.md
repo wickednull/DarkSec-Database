@@ -121,6 +121,21 @@ tools Delamain needs to read PDFs and scanned pages:
 ./install.sh --with-sdr  # also install optional radio/GPS tools
 ```
 
+If `./install.sh` does nothing, says **Permission denied**, or the checkout was
+copied from a ZIP/USB drive (which can lose the executable bit or be mounted
+`noexec`), run it through bash instead:
+
+```bash
+bash install.sh
+```
+
+From a file manager, double-click **`install-gui.sh`** so the terminal stays
+open and you can read any error. The installer needs an interactive terminal
+because `sudo` may ask for a password; running it from a launcher with no
+terminal prints a clear message and stops. If the tools are already installed
+and you do not want system packages, use `bash install.sh --no-system`.
+Progress and package-manager output are written to `/tmp/darksec-install.log`.
+
 The installer supports apt, dnf, pacman, zypper, apk and Homebrew. It installs
 poppler-utils (`pdftotext`, `pdftoppm`), `tesseract-ocr` with English data,
 `djvulibre-bin`, `ffmpeg`, `sox`, `git`, Node.js/npm, a `.venv`, the Python

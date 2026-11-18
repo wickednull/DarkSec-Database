@@ -8,8 +8,15 @@ sets up all of them, including the OCR tools Delamain uses to read scanned PDFs.
 From the repository root:
 
 ```bash
-./install.sh
+bash install.sh
 ```
+
+Use `bash install.sh` rather than double-clicking the script: the installer
+needs a terminal for the `sudo` password prompt. If the checkout came from a
+ZIP file or a `noexec` USB mount, `bash install.sh` also avoids the missing
+execute-bit error. Double-click `install-gui.sh` to keep the terminal open.
+Use `bash install.sh --no-system` when the system tools are already installed;
+the installer logs to `/tmp/darksec-install.log`.
 
 Add optional radio/GPS tools:
 
