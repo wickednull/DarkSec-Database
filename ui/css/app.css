@@ -704,10 +704,6 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
   display: grid; grid-template-columns: 260px 1fr; gap: 18px; align-items: center;
   padding: 14px 18px; position: relative; overflow: hidden;
 }
-.hero::after {
-  content: ""; position: absolute; right: -30px; top: -60px; width: 260px; height: 260px;
-  border: 1px solid rgba(var(--acc-rgb), .08); border-radius: 50%; pointer-events: none;
-}
 .hero-copy .bandline { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
 .hero-copy h2 { font-size: 26px; letter-spacing: .08em; }
 .hero-copy p { color: var(--muted); font-size: 11px; margin: 4px 0 0; max-width: 640px; }
