@@ -51,6 +51,67 @@ def _is_archive(path: Path) -> bool:
         return False
 
 
+def _varint(data: bytes, offset: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while offset < len(data):
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, offset
+        shift += 7
+        if shift > 63:
+            break
+    raise ValueError("bad varint")
+
+
+def _mvt_layer_names(data: bytes) -> list[str]:
+    """Read layer names from a Mapbox Vector Tile blob without dependencies."""
+    names: list[str] = []
+    offset = 0
+    while offset < len(data):
+        key, offset = _varint(data, offset)
+        field, wire = key >> 3, key & 7
+        if wire == 2:
+            length, offset = _varint(data, offset)
+            payload = data[offset:offset + length]
+            offset += length
+            if field != 3:  # Tile.layers
+                continue
+            name = ""
+            inner = 0
+            while inner < len(payload):
+                lkey, inner = _varint(payload, inner)
+                lfield, lwire = lkey >> 3, lkey & 7
+                if lwire == 2:
+                    llen, inner = _varint(payload, inner)
+                    value = payload[inner:inner + llen]
+                    inner += llen
+                    if lfield == 1:
+                        name = value.decode("utf-8", "replace")
+                        break
+                elif lwire == 0:
+                    _value, inner = _varint(payload, inner)
+                elif lwire == 5:
+                    inner += 4
+                elif lwire == 1:
+                    inner += 8
+                else:
+                    break
+            if name:
+                names.append(name)
+        elif wire == 0:
+            _value, offset = _varint(data, offset)
+        elif wire == 5:
+            offset += 4
+        elif wire == 1:
+            offset += 8
+        else:
+            break
+    return names
+
+
 def _iter_archives(folder: Path) -> list[Path]:
     """Top-level archives plus one level of subfolders, without following links."""
     found: list[Path] = []
@@ -283,10 +344,33 @@ class Archive:
             ]
         except (TypeError, ValueError):
             self.vector_layers = []
+        if self.vector and not self.vector_layers:
+            self.vector_layers = self._probe_vector_layers()
         if not self.format:
             self.format = self._sniff_format()
         if self.minzoom is None or self.maxzoom is None:
             self._zoom_range()
+
+    def _probe_vector_layers(self) -> list[str]:
+        """Fallback for archives that omit the metadata json vector_layers."""
+        try:
+            row = self.conn.execute(
+                "SELECT tile_data FROM tiles ORDER BY zoom_level LIMIT 1"
+            ).fetchone()
+        except sqlite3.Error:
+            return []
+        if not row:
+            return []
+        data = bytes(row[0] or b"")
+        if data[:2] == b"\x1f\x8b":
+            try:
+                data = gzip.decompress(data)
+            except OSError:
+                return []
+        try:
+            return _mvt_layer_names(data)
+        except (ValueError, IndexError):
+            return []
 
     def _sniff_format(self) -> str:
         try:

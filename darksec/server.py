@@ -5095,6 +5095,12 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 "count": mb["count"],
                 "error": mb["error"],
                 "revision": mbtiles.revision(),
+                "layers": sorted({
+                    str(layer)
+                    for archive in mb["archives"]
+                    for layer in (archive.get("vector_layers") or [])
+                    if str(layer).strip()
+                }),
                 "archives": mb["archives"][:8],
             },
             "cache": {
@@ -5116,11 +5122,18 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         if not attribution:
             names = ", ".join(a.get("name") or a.get("file") or "" for a in archives[:3])
             attribution = f"MBTiles · {names}" if names else "Offline MBTiles"
+        vector_layers = sorted({
+            str(layer)
+            for archive in archives
+            for layer in (archive.get("vector_layers") or [])
+            if str(layer).strip()
+        })
         return mapstyle.vector_style(
             theme=str(s.get("theme_mode") or "dark"),
             minzoom=min(lows) if lows else 0,
             maxzoom=max(highs) if highs else 14,
             attribution=attribution,
+            layers=vector_layers,
         )
 
     def _vector_tile_response(z: int, x: int, y: int):

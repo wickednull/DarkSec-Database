@@ -7,6 +7,7 @@ resolves them against the DarkSec origin.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _DARK = {
@@ -87,10 +88,91 @@ def _match(layer_id: str, source_layer: str, classes: list[str], color: str, **e
                  filter=["match", ["get", "class"], classes, True, False], **extra)
 
 
+_OMT_LAYERS = {
+    "water", "waterway", "landcover", "landuse", "park", "boundary",
+    "transportation", "building", "aeroway",
+}
+_LABEL_LAYERS = {
+    "place", "poi", "water_name", "transportation_name", "housenumber",
+    "mountain_peak",
+}
+
+
+def _safe_id(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "-", name)[:48] or "layer"
+
+
+def _generic_kind(name: str) -> str:
+    low = name.lower()
+    if any(k in low for k in ("water", "ocean", "sea", "river", "lake", "coast", "bay")):
+        return "water"
+    if any(k in low for k in ("road", "street", "highway", "transport", "rail", "route", "path")):
+        return "road"
+    if "building" in low:
+        return "building"
+    if any(k in low for k in ("boundary", "admin", "border")):
+        return "boundary"
+    if any(k in low for k in ("park", "forest", "wood", "landcover", "landuse", "green", "nature")):
+        return "green"
+    if any(k in low for k in ("place", "poi", "label", "name", "peak")):
+        return "point"
+    return "generic"
+
+
+def _generic_layers(names: list[str], c: dict[str, str], dark: bool) -> list[dict[str, Any]]:
+    """Render any vector schema without knowing its layer names.
+
+    A fill, line and circle layer is added per unknown source-layer, so mixed
+    point/line/polygon tiles from tilemaker, tippecanoe or custom pipelines are
+    visible instead of producing a black map.
+    """
+    fills: list[dict[str, Any]] = []
+    lines: list[dict[str, Any]] = []
+    circles: list[dict[str, Any]] = []
+    accent = "#8fe3b0" if dark else "#2f6b4f"
+    for name in names:
+        if name in _LABEL_LAYERS:
+            continue
+        kind = _generic_kind(name)
+        lid = _safe_id(name)
+        if kind in ("water", "green", "building", "generic"):
+            color = {"water": c["water"], "green": c["park"],
+                     "building": c["building"]}.get(kind, c["land"])
+            fills.append({
+                "id": f"gen-{lid}-fill", "type": "fill", "source": "omt",
+                "source-layer": name,
+                "paint": {"fill-color": color,
+                          "fill-opacity": 0.32 if kind == "generic" else 0.75},
+            })
+        if kind in ("water", "road", "boundary", "generic"):
+            color = {"water": c["waterway"], "road": c["road"],
+                     "boundary": c["boundary"]}.get(kind, c["road"])
+            lines.append({
+                "id": f"gen-{lid}-line", "type": "line", "source": "omt",
+                "source-layer": name,
+                "paint": {"line-color": color,
+                          "line-width": 1.4 if kind == "road" else 0.8,
+                          "line-opacity": 0.85},
+            })
+        if kind in ("point", "generic"):
+            circles.append({
+                "id": f"gen-{lid}-point", "type": "circle", "source": "omt",
+                "source-layer": name,
+                "paint": {"circle-radius": 2.2, "circle-color": accent,
+                          "circle-opacity": 0.7,
+                          "circle-stroke-color": c["bg"], "circle-stroke-width": 0.5},
+            })
+    return fills + lines + circles
+
+
 def vector_style(*, theme: str = "dark", minzoom: int | None = 0,
-                 maxzoom: int | None = 14, attribution: str = "") -> dict[str, Any]:
-    """Build a MapLibre style for an OpenMapTiles vector archive."""
+                 maxzoom: int | None = 14, attribution: str = "",
+                 layers: list[str] | None = None) -> dict[str, Any]:
+    """Build a MapLibre style for an OpenMapTiles or generic vector archive."""
     c = _color(theme)
+    dark = str(theme or "").lower() != "light"
+    requested = [str(name) for name in (layers or []) if str(name).strip()]
+    unknown = [name for name in requested if name not in _OMT_LAYERS]
     lo = max(0, int(minzoom or 0))
     hi = max(lo, int(maxzoom or 14))
     layers: list[dict[str, Any]] = [
@@ -119,11 +201,21 @@ def vector_style(*, theme: str = "dark", minzoom: int | None = 0,
         _line("aeroway", "aeroway", c["aeroway"], 1.0, minzoom=9),
         _fill("building", "building", c["building"], minzoom=13),
     ]
+    if unknown:
+        layers.extend(_generic_layers(unknown, c, dark))
     attribution = str(attribution or "").strip()
+    schema = "generic" if requested and not (set(requested) & _OMT_LAYERS) else (
+        "mixed" if unknown else "openmaptiles"
+    )
     return {
         "version": 8,
         "name": "DarkSec Offline Vector",
-        "metadata": {"darksec:basemap": "vector-mbtiles", "darksec:labels": False},
+        "metadata": {
+            "darksec:basemap": "vector-mbtiles",
+            "darksec:labels": False,
+            "darksec:schema": schema,
+            "darksec:layers": requested[:40],
+        },
         "sources": {
             "omt": {
                 "type": "vector",

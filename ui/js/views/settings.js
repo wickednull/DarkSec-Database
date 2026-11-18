@@ -1487,8 +1487,10 @@ export async function render(root) {
       return { text: info.error || "Archive could not be opened", ok: false };
     }
     if (info.vector) {
+      const layerNames = (info.vector_layers || []).slice(0, 6).join(", ");
+      const layerNote = layerNames ? ` · layers: ${layerNames}${info.vector_layers.length > 6 ? "…" : ""}` : "";
       return {
-        text: `READY · VECTOR ${String(info.format || "pbf").toUpperCase()} · ${mbZoom(info)} · ${String(info.scheme || "tms").toUpperCase()} rows · renders in the 3D GL map`,
+        text: `READY · VECTOR ${String(info.format || "pbf").toUpperCase()} · ${mbZoom(info)} · ${String(info.scheme || "tms").toUpperCase()} rows${layerNote} · renders in the 3D GL map`,
         ok: true,
       };
     }
@@ -1572,7 +1574,7 @@ export async function render(root) {
       });
       const tone = it.usable ? (it.vector ? "cyan" : "green") : "red";
       const detail = it.vector
-        ? "vector PBF archive · renders in the 3D GL map"
+        ? `vector PBF · ${(it.vector_layers || []).length || "?"} layer(s)${it.indexed ? "" : " · no tile index"} · renders in the 3D GL map`
         : (it.error || `${(it.format || "?").toUpperCase()} · ${mbZoom(it)} · ${String(it.scheme || "tms").toUpperCase()} rows`);
       list.appendChild(h("div", { class: "list-item" },
         h("div", { class: "li-main" },

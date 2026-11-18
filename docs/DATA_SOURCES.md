@@ -34,9 +34,11 @@ archives, including a mounted USB drive. Archives are opened read-only and are
 never modified. Supported: raster PNG/JPEG/WebP tiles, gzip-compressed tile
 blobs, standard MBTiles TMS row order and non-standard `scheme=xyz` archives.
 Vector PBF/MVT archives (OpenMapTiles/MapTiler and similar) render in the
-**3D GL map**; the 2D canvas reports that they need the GL renderer. The
-offline vector style deliberately has no text labels because no glyph pack is
-bundled. The **Find on USB** scanner checks removable-media mounts first, then
+**3D GL map**; the 2D canvas reports that they need the GL renderer.
+OpenMapTiles layers get the dedicated offline style; other schemas
+(tilemaker/tippecanoe/custom, for example a single `osm` layer) get a generic
+fill/line/point style so they are not blank. The offline vector style
+deliberately has no text labels because no glyph pack is bundled. The **Find on USB** scanner checks removable-media mounts first, then
 the data folder, `maps/` and the home folder.
 
 Operators are responsible for the license and attribution of imported map

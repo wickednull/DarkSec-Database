@@ -155,11 +155,22 @@ export async function render(root) {
       btn("REFRESH OVERLAYS", { icon: "refresh", tone:"ghost", onClick: refreshOverlays }),
     ],
   }));
+  const vectorSchema = mapStyle?.metadata?.["darksec:schema"] || "openmaptiles";
   const vectorNote = mbInfo.vector
-    ? `Offline vector basemap: ${(mbInfo.archives || []).map((a) => a.name).filter(Boolean).slice(0, 2).join(", ") || "configured archive"} · water/roads/boundaries/building geometry, no text labels (no glyph pack bundled). `
+    ? `Offline vector basemap: ${(mbInfo.archives || []).map((a) => a.name).filter(Boolean).slice(0, 2).join(", ") || "configured archive"} · ` +
+      (vectorSchema === "generic"
+        ? `generic schema (layers: ${(mbInfo.layers || []).join(", ") || "unknown"}) · `
+        : "OpenMapTiles geometry · ") +
+      "no text labels (no glyph pack bundled). "
     : "";
+  const mapErrorBox = h("div", { class: "callout danger small mt-8", style: { display: "none" } });
+  function showMapError(message) {
+    mapErrorBox.style.display = "";
+    mapErrorBox.textContent = message;
+  }
   root.appendChild(alertStrip(`${vectorNote}Local/offline basemap + cached intel. DEM ${demStatus?.available ? 'available (' + (demStatus.encoding||'terrarium') + ')' : 'not configured/cached'} · overlays cached via operator refresh (online required to fetch). Cables auto-populate from a cached public dataset on feed refresh (online first time; attribution required). CCTV can load nearby OSM surveillance locations via feed refresh when operator position is set. Maritime/AIS works with a configured GeoJSON/JSON source or local file (fielddata/maps/ais.geojson).`, demStatus?.available ? "cyan" : "amber"));
 
+  root.appendChild(mapErrorBox);
   const layout = h("div", { class: "map-layout mt-14" });
   const wrap = h("div", { class: "map-shell", style: { height: "min(72vh, 820px)", minHeight: "460px", position: "relative" } });
   const container = h("div", { style: { position: "absolute", inset: "0" } });
@@ -208,8 +219,12 @@ export async function render(root) {
   const liveCheck = checkbox("Auto-refresh map intel (60s)", !!state.live, (on)=>{ state.live=on; scheduleLive(); });
   const freshText = h("div", { class: "tiny muted", text: "Intel loaded" });
   const statsBox = h("div", { class: "tiny muted", text: "Loading..." });
+  const vectorArchive = (mbInfo.archives || []).find((a) => a.vector) || {};
+  const basemapNote = mbInfo.vector
+    ? h("div", { class: "tiny muted wrap-any", text: `Basemap: vector · ${(mbInfo.layers || []).join(", ") || "layers unknown"} · z${vectorArchive.minzoom ?? "?"}–${vectorArchive.maxzoom ?? "?"}${vectorArchive.indexed ? "" : " · NO TILE INDEX (slow)"}` })
+    : h("div", { class: "tiny muted", text: "Basemap: raster tiles / bundled overview" });
   side.appendChild(panel({ title:"GL Layers", icon:"layers", body: h("div",{class:"col gap-8"},
-    field("INTEL AGE", ageSel), layerBox, liveCheck, freshText,
+    field("INTEL AGE", ageSel), layerBox, basemapNote, liveCheck, freshText,
     h("div", { class: "row wrap gap-6 mt-6" },
       btn("REFRESH DATA", { size:"sm", icon:"refresh", onClick: refreshData }),
       btn("FIT DATA", { size:"sm", tone:"ghost", onClick: fitData }))
@@ -234,7 +249,42 @@ export async function render(root) {
   side.appendChild(panel({ title:"Legend", icon:"info", body: glLegend }));
   side.appendChild(panel({ title:"Inspector", icon:"info", body: inspector }));
 
-  map = new maplibregl.Map({ container, style: mapStyle, center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: hidePosition ? 1.6 : 3.5, pitch:0, bearing:0, attributionControl:true, maxPitch:85 });
+  const mbMinZoom = Number.isFinite(Number(vectorArchive.minzoom)) ? Number(vectorArchive.minzoom) : 0;
+  const mbMaxZoom = Number.isFinite(Number(vectorArchive.maxzoom)) ? Number(vectorArchive.maxzoom) : 22;
+  const initialZoom = hidePosition ? 1.6 : Math.min(mbMaxZoom, Math.max(3.5, mbMinZoom));
+  map = new maplibregl.Map({ container, style: mapStyle, center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: initialZoom, pitch:0, bearing:0, attributionControl:true, maxPitch:85 });
+  if (mbInfo.vector && !hidePosition) {
+    const b = vectorArchive.bounds;
+    if (Array.isArray(b) && b.length === 4 && b.every((v) => Number.isFinite(Number(v)))) {
+      const span = Math.max(Number(b[2]) - Number(b[0]), Number(b[3]) - Number(b[1]));
+      if (span > 0 && span < 350) {
+        try { map.fitBounds([[Number(b[0]), Number(b[1])], [Number(b[2]), Number(b[3])]], { padding: 40, duration: 0 }); } catch {}
+      }
+    }
+  }
+  let vectorTileSeen = false;
+  let watchdogShown = false;
+  map.on("sourcedata", (e) => {
+    if (e.sourceId === "omt" && e.tile) {
+      vectorTileSeen = true;
+      if (watchdogShown) {
+        watchdogShown = false;
+        mapErrorBox.style.display = "none";
+      }
+    }
+  });
+  if (mbInfo.vector) {
+    setTimeout(() => {
+      if (vectorTileSeen || !map) return;
+      watchdogShown = true;
+      showMapError(
+        `No vector tiles loaded for this view (z${map.getZoom().toFixed(1)}). Archive layers: ` +
+        `${(mbInfo.layers || []).join(", ") || "unknown"} · z${vectorArchive.minzoom ?? "?"}–${vectorArchive.maxzoom ?? "?"}` +
+        `${vectorArchive.indexed ? "" : " · no tiles index (queries may be extremely slow)"}. ` +
+        `Open Settings → Offline maps → CHECK, or zoom into the archive's coverage.`
+      );
+    }, 9000);
+  }
   map.addControl(new maplibregl.NavigationControl({ visualizePitch:true, showCompass:true, showZoom:true }), "top-right");
   map.addControl(new maplibregl.ScaleControl({ maxWidth:120, unit: U.isImperial() ? "imperial" : "metric" }), "bottom-left");
   try { if (typeof map.setProjection === 'function') map.setProjection({ type:'globe' }); } catch (e) { console.warn('Initial globe projection failed', e); }
@@ -744,6 +794,9 @@ export async function render(root) {
     console.warn('map-gl error', e?.error || e);
     const msg = e?.error?.message || e?.message || 'tile/source error';
     statusBox.textContent = `Map issue: ${String(msg).slice(0, 120)}`;
+    if (mbInfo.vector && !/Style is not done loading/i.test(String(msg))) {
+      showMapError(`Vector basemap error: ${String(msg).slice(0, 220)}. Archive layers: ${(mbInfo.layers || []).join(", ") || "unknown"}.`);
+    }
   });
   map.on('mousemove', (e) => {
     if (store.settings.opsec_mode) { coordBox.textContent = 'COORDS MASKED (OPSEC)'; return; }

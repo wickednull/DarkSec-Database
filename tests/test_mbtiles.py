@@ -261,3 +261,59 @@ def test_vector_style_light_and_dark():
     assert dark["layers"][0]["paint"]["background-color"] != light["layers"][0]["paint"]["background-color"]
     assert any(layer.get("source-layer") == "water" for layer in dark["layers"])
     assert not any(layer.get("type") == "symbol" for layer in dark["layers"])
+
+
+def test_generic_vector_schema_is_rendered_not_black():
+    from darksec import mapstyle
+
+    style = mapstyle.vector_style(theme="dark", layers=["osm"])
+    assert style["metadata"]["darksec:schema"] == "generic"
+    ids = {(layer.get("source-layer"), layer["type"]) for layer in style["layers"] if layer["id"].startswith("gen-")}
+    assert ("osm", "fill") in ids
+    assert ("osm", "line") in ids
+    assert ("osm", "circle") in ids
+
+
+def test_mvt_layer_name_probe():
+    from darksec import mbtiles
+
+    def varint(n):
+        out = bytearray()
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            if n:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                return bytes(out)
+
+    def field(num, wire, payload):
+        return varint((num << 3) | wire) + payload
+
+    def ld(num, data):
+        return field(num, 2, varint(len(data)) + data)
+
+    layer = ld(1, b"osm") + field(15, 0, varint(2))
+    tile = ld(3, layer)
+    assert mbtiles._mvt_layer_names(tile) == ["osm"]
+
+
+def test_style_endpoint_handles_non_openmaptiles_layers(client, tmp_path, monkeypatch):
+    from darksec import mbtiles
+
+    archive = make_mbtiles(
+        tmp_path / "osm-latest.mbtiles", fmt="pbf", gz=True,
+        tiles={(5, 1, 1): b"\\x1a\\x2bvector"},
+        extra_meta={"json": json.dumps({"vector_layers": [{"id": "osm"}]})},
+    )
+    monkeypatch.setattr(mbtiles, "search_roots", lambda: [tmp_path])
+    try:
+        assert client.put("/api/settings", json={"mbtiles_path": str(archive)}).status_code == 200
+        style = client.get("/api/map/vector/style").json()
+        assert style["metadata"]["darksec:schema"] == "generic"
+        assert any(layer.get("source-layer") == "osm" for layer in style["layers"])
+        layers = client.get("/api/map/layers").json()["mbtiles"]
+        assert layers["layers"] == ["osm"]
+    finally:
+        client.put("/api/settings", json={"mbtiles_path": ""})

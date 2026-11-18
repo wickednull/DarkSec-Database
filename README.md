@@ -281,9 +281,14 @@ non-standard `scheme=xyz` archives.
 Vector PBF/MVT archives (for example an OpenMapTiles/MapTiler
 `planet-latest.planet.mbtiles`) are supported by the **3D GL map**. The 2D
 canvas cannot rasterise PBF tiles, so it tells you to open the 3D map instead.
-The GL style draws land, water, boundaries, roads and buildings; text labels
-are omitted because no glyph pack is bundled. Keep the drive mounted while the
-map is in use; if it is removed the map falls back to bundled and cached tiles.
+OpenMapTiles-schema archives get the full offline style (land, water,
+boundaries, roads, buildings); archives from tilemaker, tippecanoe or custom
+pipelines get a generic fill/line/point style, so a single layer such as `osm`
+is still visible instead of rendering black. Text labels are omitted because
+no glyph pack is bundled. The GL map shows the archive's layer names, zoom
+range and index status, and warns if no tiles render for the current view.
+Keep the drive mounted while the map is in use; if it is removed the map falls
+back to bundled and cached tiles.
 
 To rebuild the bundled overview from a working provider (online, once):
 
