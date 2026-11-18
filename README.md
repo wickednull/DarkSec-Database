@@ -473,13 +473,20 @@ interchange; keep a copy on removable media.
 
 **Settings → Program updates** checks the installation's git remote and
 fast-forwards the program files from `origin`. It requires a real git checkout
-with an `origin` remote and no uncommitted changes to tracked files; local
-changes or a detached HEAD block the update instead of producing a merge.
-Untracked files are kept unless the incoming changes would overwrite one.
-Runtime data in
-`fielddata/` is ignored by git and is not touched. Packaged/frozen builds
-cannot self-update. Restart DarkSec after an update so the running process
-loads the new code.
+with an `origin` remote; a detached HEAD still blocks the update.
+
+Local work is preserved. Before updating, tracked edits are saved to
+`fielddata/backups/pre-update-<timestamp>/` as `local-changes.patch` plus
+copies of the modified files, then reapplied on top of the new code. If a local
+edit conflicts with an upstream change, the updated tree is left clean (so
+DarkSec still starts) and the patch and copies remain in the backup folder for
+manual recovery. Untracked or ignored files that an incoming commit would
+overwrite are moved into the same backup first.
+
+Local commits ahead of the remote are not rewritten; push or reset them before
+updating. Runtime data in `fielddata/` is ignored by git and is not touched.
+Packaged/frozen builds cannot self-update. Restart DarkSec after an update so
+the running process loads the new code.
 
 ## Security model and limits
 

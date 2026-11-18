@@ -863,7 +863,7 @@ export async function render(root) {
       ["Branch", updateInfo.branch || "—"],
       ["Remote", updateInfo.remote_url || "—"],
       ["Working tree", updateInfo.dirty == null ? "unknown"
-        : updateInfo.dirty ? `modified · ${updateInfo.dirty_count} tracked file(s)`
+        : updateInfo.dirty ? `modified · ${updateInfo.dirty_count} tracked file(s) · backed up on update`
         : updateInfo.untracked_count ? `clean · ${updateInfo.untracked_count} untracked file(s)`
         : "clean"],
     ];
@@ -877,13 +877,24 @@ export async function render(root) {
       updateBox.appendChild(h("div", { class: "tiny muted wrap-any", text: `Local changes: ${updateInfo.dirty_files.join(", ")}${more}` }));
     }
     if (updateInfo.untracked_count) {
-      updateBox.appendChild(h("div", { class: "tiny muted", text: `${updateInfo.untracked_count} untracked file(s) will be kept; the update stops only if one would be overwritten.` }));
+      updateBox.appendChild(h("div", { class: "tiny muted", text: `${updateInfo.untracked_count} untracked file(s) will be kept; files the update would create are moved to the backup folder first.` }));
+    }
+    if (updateInfo.backup_dir) {
+      updateBox.appendChild(h("div", { class: "tiny muted wrap-any", text: `Last update backup: ${updateInfo.backup_dir}` }));
+    }
+    if (updateInfo.local_changes) {
+      const label = updateInfo.local_changes === "reapplied" ? "Local changes reapplied"
+        : updateInfo.local_changes === "saved" ? "Local changes saved to backup (not reapplied)"
+        : updateInfo.local_changes === "untracked-moved" ? "Conflicting untracked files moved to backup"
+        : "No local changes";
+      updateBox.appendChild(h("div", { class: "tiny muted", text: label }));
     }
     let text;
     if (updateInfo.error) text = updateInfo.error;
     else if (updateInfo.frozen) text = "Packaged builds cannot self-update. Install a newer release.";
     else if (updateInfo.repo === false) text = "This installation is not a git checkout, so self-update is unavailable.";
-    else if (updateInfo.dirty) text = updateInfo.reason || "Local changes block updates.";
+    else if (updateInfo.dirty && updateInfo.update_available) text = `Update available${updateInfo.latest?.commit ? `: ${updateInfo.latest.commit} · ${updateInfo.latest.subject}` : `: ${updateInfo.behind} commit(s) behind`}. Local changes will be backed up and reapplied.`;
+    else if (updateInfo.dirty) text = updateInfo.reason || "Local changes will be backed up and reapplied when you update.";
     else if (updateInfo.update_available) text = `Update available${updateInfo.latest?.commit ? `: ${updateInfo.latest.commit} · ${updateInfo.latest.subject}` : `: ${updateInfo.behind} commit(s) behind`}.`;
     else if (updateInfo.behind === 0) text = "Already up to date.";
     else text = "Press CHECK FOR UPDATES to contact the configured remote.";
@@ -924,7 +935,9 @@ export async function render(root) {
   async function applyUpdate() {
     const ok = await confirmDialog({
       title: "Update DarkSec",
-      message: `Fetch and fast-forward program files from ${updateInfo?.remote_url || "origin"}? Operator data in fielddata/ is not changed. DarkSec must be restarted afterward.`,
+      message: updateInfo?.dirty
+        ? `Fetch and fast-forward program files from ${updateInfo?.remote_url || "origin"}? Your modified tracked files will be saved to fielddata/backups (patch + copies) and reapplied on top of the new code. If they conflict, the updated tree stays clean and the backup is kept for manual recovery. Operator data in fielddata/ is not changed. DarkSec must be restarted afterward.`
+        : `Fetch and fast-forward program files from ${updateInfo?.remote_url || "origin"}? Operator data in fielddata/ is not changed. DarkSec must be restarted afterward.`,
       confirmText: "UPDATE",
       requireText: "UPDATE",
     });
@@ -937,6 +950,7 @@ export async function render(root) {
       const info = await api.post("/api/update/apply");
       renderUpdate(info);
       if (!info.ok) toast(info.error || "Update failed", "error");
+      else if (info.local_changes === "saved") toast(info.message || "Updated. Local changes saved to backup.", "warn", 9000);
       else if (info.updated) toast("Updated. Restart DarkSec to run the new code.", "ok");
       else toast(info.message || "Already up to date");
     } catch (err) {

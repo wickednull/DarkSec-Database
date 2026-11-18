@@ -3104,6 +3104,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             "UPDATE_APPLY",
             f"ok={result.get('ok')} updated={result.get('updated')} "
             f"{result.get('old_commit') or ''}->{result.get('new_commit') or ''} "
+            f"local={result.get('local_changes') or ''} "
+            f"backup={result.get('backup_dir') or ''} "
             f"error={result.get('error') or ''}"[:800],
             request.client.host if request.client else "",
         )

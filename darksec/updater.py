@@ -1,14 +1,20 @@
 """Program updates from the installation's git remote.
 
-The updater only rolls the program files forward from ``origin`` using a
+The updater rolls the program files forward from ``origin`` using a
 fast-forward-only merge. It refuses to run on a frozen build, outside a git
-checkout, on a detached HEAD, inside a larger repository, without an
-``origin`` remote, or when tracked files have local changes. Untracked files
-are kept unless the incoming changes would overwrite one. Runtime data lives
-in ``fielddata/`` and is ignored by git, so updates never touch operator data.
+checkout, on a detached HEAD, inside a larger repository, or without an
+``origin`` remote. Local work is preserved: tracked edits are saved as a
+binary patch plus file copies under ``fielddata/backups/pre-update-*/`` and
+reapplied after the merge; if they conflict, the updated tree stays clean and
+the patch is kept for manual recovery. Untracked or ignored files that the
+incoming commit would overwrite are moved into the same backup first. Local
+commits ahead of the remote still require a push or reset because the updater
+never rewrites history or creates a merge commit. Runtime data lives in
+``fielddata/`` and is ignored by git, so updates never touch operator data.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -61,6 +67,23 @@ def _git(root: Path, args: list[str], timeout: int = LOCAL_TIMEOUT) -> tuple[int
     except Exception as exc:  # pragma: no cover - defensive
         return 1, "", str(exc)
     return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+
+
+def _git_bytes(root: Path, args: list[str], timeout: int = LOCAL_TIMEOUT) -> tuple[int, bytes, str]:
+    """Run git with raw stdout, for patches that may not be valid UTF-8."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True, timeout=timeout, env=_env(), check=False,
+        )
+    except FileNotFoundError:
+        return 127, b"", "git is not installed"
+    except subprocess.TimeoutExpired:
+        return 124, b"", f"git command timed out after {timeout}s"
+    except Exception as exc:  # pragma: no cover - defensive
+        return 1, b"", str(exc)
+    err = proc.stderr.decode("utf-8", "replace").strip()
+    return proc.returncode, proc.stdout, err
 
 
 def _repo_root() -> Path | None:
@@ -130,6 +153,7 @@ def status() -> dict[str, Any]:
         "dirty": None,
         "dirty_count": 0,
         "dirty_files": [],
+        "preserve_local": True,
         "untracked_count": 0,
         "untracked_files": [],
         "remote": "origin",
@@ -211,14 +235,15 @@ def status() -> dict[str, Any]:
         st["reason"] = "No origin remote is configured for this checkout."
     elif st["dirty"] is None:
         st["reason"] = "Could not read the working tree state; refusing to update."
-    elif st["dirty"]:
-        st["reason"] = (
-            "Local changes are present; commit or discard them before updating."
-        )
     elif not st["upstream"]:
         st["reason"] = "No upstream branch is configured for this checkout."
     else:
         st["can_update"] = True
+    if st["dirty"] and st["can_update"]:
+        # A dirty tree is a warning, not a blocker: apply() snapshots it first.
+        st["reason"] = (
+            "Local changes are present. They will be backed up and reapplied after the update."
+        )
     return st
 
 
@@ -250,6 +275,145 @@ def check() -> dict[str, Any]:
     st["update_available"] = behind > 0
     st["latest"] = _commit_info(root, st["upstream"])
     return st
+
+
+def _backup_path() -> Path:
+    """Create a unique pre-update backup folder under fielddata/backups."""
+    config.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = config.BACKUP_DIR / f"pre-update-{stamp}"
+    counter = 1
+    while path.exists():
+        counter += 1
+        path = config.BACKUP_DIR / f"pre-update-{stamp}-{counter}"
+    path.mkdir(parents=True)
+    return path
+
+
+def _lines(text: str) -> list[str]:
+    return [line.strip() for line in (text or "").splitlines() if line.strip()]
+
+
+def _incoming_added_files(root: Path, upstream: str) -> set[str]:
+    rc, out, _err = _git(
+        root, ["diff", "--name-only", "--diff-filter=A", "HEAD", upstream]
+    )
+    return set(_lines(out)) if rc == 0 else set()
+
+
+def _untracked_conflicts(root: Path, incoming: set[str]) -> list[str]:
+    """Existing local paths the incoming commit would create or overwrite.
+
+    This includes ignored files, which a fast-forward could otherwise replace
+    silently, not just files reported by --exclude-standard.
+    """
+    if not incoming:
+        return []
+    rc, out, _err = _git(root, ["ls-files"])
+    tracked = set(_lines(out)) if rc == 0 else set()
+    conflicts = []
+    for rel in incoming:
+        if rel in tracked:
+            continue
+        try:
+            if (root / rel).exists():
+                conflicts.append(rel)
+        except OSError:
+            continue
+    return sorted(conflicts)
+
+
+def _backup_local_changes(root: Path, backup: Path) -> dict[str, Any]:
+    """Save a binary-safe patch plus copies of every modified tracked file."""
+    patch_path = backup / "local-changes.patch"
+    rc, patch, err = _git_bytes(root, ["diff", "--binary", "HEAD"])
+    if rc != 0:
+        raise RuntimeError(f"could not save local changes: {_clean_error(err)}")
+    # Keep the raw bytes: git apply needs the final newline and local files may
+    # not be valid UTF-8.
+    if patch and not patch.endswith(b"\n"):
+        patch += b"\n"
+    patch_path.write_bytes(patch)
+    rc, names, _err = _git(root, ["diff", "--name-only", "HEAD"])
+    copied: list[str] = []
+    deleted: list[str] = []
+    for rel in _lines(names):
+        src = root / rel
+        dst = backup / "files" / rel
+        try:
+            if src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                copied.append(rel)
+            else:
+                deleted.append(rel)
+        except OSError as exc:
+            raise RuntimeError(f"could not back up {rel}: {exc}") from exc
+    return {
+        "patch": str(patch_path),
+        "patch_empty": not bool(patch.strip()),
+        "files": copied,
+        "deleted": deleted,
+    }
+
+
+def _move_untracked_conflicts(root: Path, backup: Path, conflicts: list[str]) -> list[str]:
+    """Move untracked files that the incoming commit wants to create."""
+    moved: list[str] = []
+    for rel in conflicts:
+        src = root / rel
+        dst = backup / "untracked-conflicts" / rel
+        if not src.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        moved.append(rel)
+    return moved
+
+
+def _restore_untracked(root: Path, backup: Path, moved: list[str]) -> None:
+    for rel in moved:
+        src = backup / "untracked-conflicts" / rel
+        dst = root / rel
+        if src.exists() and not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+
+
+def _prune_backups(keep: int = 10) -> None:
+    """Keep a short rollback history without letting backups fill the disk."""
+    try:
+        folders = sorted(
+            (p for p in config.BACKUP_DIR.glob("pre-update-*") if p.is_dir()),
+            key=lambda p: p.name,
+        )
+    except OSError:
+        return
+    for old in folders[:-keep]:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def _write_manifest(backup: Path, st: dict[str, Any], info: dict[str, Any],
+                    moved: list[str]) -> None:
+    manifest = {
+        "created_at": _now(),
+        "reason": "DarkSec update with local changes",
+        "branch": st.get("branch"),
+        "upstream": st.get("upstream"),
+        "old_commit": st.get("commit_full"),
+        "old_commit_short": st.get("commit"),
+        "modified_files": info.get("files") or [],
+        "deleted_files": info.get("deleted") or [],
+        "untracked_moved": moved,
+        "patch": info.get("patch"),
+        "restore": (
+            "Apply local-changes.patch with: git apply --3way --binary local-changes.patch. "
+            "Copies of the modified files are under files/ and moved untracked files under "
+            "untracked-conflicts/."
+        ),
+    }
+    (backup / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    _prune_backups()
 
 
 def apply() -> dict[str, Any]:
@@ -304,28 +468,123 @@ def apply() -> dict[str, Any]:
         })
         return st
 
+    # Snapshot anything local that the update could disturb. Tracked edits are
+    # stored as a binary-safe patch plus file copies; untracked files that the
+    # incoming commit would create are moved aside first so the fast-forward
+    # cannot fail on them.
+    incoming_added = _incoming_added_files(root, st["upstream"])
+    untracked_conflicts = _untracked_conflicts(root, incoming_added)
+    backup: Path | None = None
+    backup_info: dict[str, Any] = {}
+    moved: list[str] = []
+    if st["dirty"] or untracked_conflicts:
+        try:
+            backup = _backup_path()
+            if st["dirty"]:
+                backup_info = _backup_local_changes(root, backup)
+            if untracked_conflicts:
+                moved = _move_untracked_conflicts(root, backup, untracked_conflicts)
+            _write_manifest(backup, st, backup_info, moved)
+        except Exception as exc:
+            st.update({
+                "ok": False,
+                "error": f"Could not back up local changes, update aborted: {exc}",
+                "updated": False,
+                "restart_required": False,
+            })
+            return st
+
+    if st["dirty"]:
+        rc, out, err = _git(root, ["reset", "--hard", "HEAD"])
+        if rc != 0:
+            st.update({
+                "ok": False,
+                "error": f"Could not prepare the working tree: {_clean_error(err or out)}",
+                "updated": False,
+                "restart_required": False,
+                "backup_dir": str(backup) if backup else None,
+            })
+            return st
+
     rc, out, err = _git(root, ["merge", "--ff-only", st["upstream"]], timeout=PULL_TIMEOUT)
     if rc != 0:
+        error = _clean_error(err or out)
+        restored = None
+        if backup:
+            # Put the old tree and the operator's changes back if the update
+            # itself could not be applied.
+            _git(root, ["reset", "--hard", st["commit_full"] or "HEAD"])
+            _restore_untracked(root, backup, moved)
+            if backup_info.get("patch") and not backup_info.get("patch_empty"):
+                rc2, _out2, _err2 = _git(
+                    root, ["apply", "--3way", "--binary", backup_info["patch"]]
+                )
+                restored = rc2 == 0
+                if not restored:
+                    # Never leave conflict markers in code that must still run.
+                    _git(root, ["reset", "--hard", st["commit_full"] or "HEAD"])
         st.update({
             "ok": False,
-            "error": _clean_error(err or out),
+            "error": error,
             "updated": False,
             "restart_required": False,
+            "backup_dir": str(backup) if backup else None,
+            "local_changes_restored": restored,
         })
         return st
 
+    # Reapply the operator's tracked edits on top of the new code. If they do
+    # not apply cleanly the updated tree is reset to a clean state so DarkSec
+    # still starts; the patch and file copies remain in the backup folder.
+    local_state = "untracked-moved" if moved and not st["dirty"] else "none"
+    if backup and st["dirty"]:
+        patch_path = backup_info.get("patch") or ""
+        if not patch_path or backup_info.get("patch_empty"):
+            local_state = "reapplied"
+        else:
+            rc, out, err = _git(
+                root,
+                ["apply", "--3way", "--binary", "--whitespace=nowarn", patch_path],
+            )
+            unmerged = _lines(_git(root, ["diff", "--name-only", "--diff-filter=U"])[1])
+            if rc == 0 and not unmerged:
+                # Leave the operator's edits unstaged, as they were before.
+                _git(root, ["reset"])
+                local_state = "reapplied"
+            else:
+                _git(root, ["reset", "--hard", "HEAD"])
+                local_state = "saved"
+
     new_st = status()
     updated = bool(old_full and new_st["commit_full"] != old_full)
+    message = (
+        f"Updated {old_commit or '?'} → {new_st['commit'] or '?'}. Restart DarkSec to run the new code."
+        if updated else "Already up to date."
+    )
+    if local_state == "reapplied":
+        message += " Local changes were backed up and reapplied."
+    elif local_state == "saved":
+        message += (
+            f" Local changes could not be reapplied cleanly; the updated tree is clean and "
+            f"the backup is at {backup}. Reapply local-changes.patch manually if needed."
+        )
+    if moved:
+        message += (
+            f" Conflicting untracked file(s) were moved to {backup} before the update."
+        )
     new_st.update({
         "ok": True,
         "updated": updated,
         "old_commit": old_commit,
         "new_commit": new_st["commit"],
-        "message": (
-            f"Updated {old_commit or '?'} → {new_st['commit'] or '?'}. Restart DarkSec to run the new code."
-            if updated else "Already up to date."
-        ),
+        "message": message,
         "restart_required": updated,
         "checked_at": _now(),
+        "backup_dir": str(backup) if backup else None,
+        "backup_patch": backup_info.get("patch"),
+        "local_changes": local_state,
+        "untracked_moved": moved,
+        "local_changes_backed_up": bool(backup),
+        "local_changes_saved": local_state in ("saved", "reapplied", "untracked-moved"),
     })
     return new_st
