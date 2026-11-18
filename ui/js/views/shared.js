@@ -178,13 +178,31 @@ export function openReferenceCard(card) {
   body.innerHTML = renderMarkdown(`## ${card.title}
 
 ${card.body || ""}`);
-  return modal({
+  let fieldCardModal = null;
+  let closedByHistory = false;
+  const onPop = () => {
+    if (!fieldCardModal) return;
+    closedByHistory = true;
+    fieldCardModal.close();
+  };
+  // Make the browser/OS back button close the card instead of leaving the page.
+  try { history.pushState({ darksecFieldCard: true }, "", location.href); } catch {}
+  window.addEventListener("popstate", onPop);
+  fieldCardModal = modal({
     title: card.title,
     sub: `${card.category || "REFERENCE"} // FIELD CARD`,
     wide: true,
     body,
-    actions: [btn("CLOSE", { tone: "ghost", onClick: () => m.close() })],
+    actions: [btn("BACK", { icon: "chevron-left", tone: "ghost", onClick: () => fieldCardModal.close() })],
+    onClose: () => {
+      window.removeEventListener("popstate", onPop);
+      if (!closedByHistory) {
+        // Remove the synthetic entry created above.
+        try { history.back(); } catch {}
+      }
+    },
   });
+  return fieldCardModal;
 }
 
 let referencePromise = null;
