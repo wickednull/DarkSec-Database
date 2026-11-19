@@ -356,3 +356,54 @@ def test_adsb_manager_status_and_stop_are_safe(client):
     r = client.post("/api/sdr/adsb/stop", json={})
     assert r.status_code == 200
     assert r.json()["running"] is False
+
+
+def test_aio_v2_rtl_test_is_recognized_as_connected():
+    from darksec import sdr
+
+    out = """Found 1 device(s):
+  0:  HackerGadgets, AIO_V2 Ext, SN: 25120901
+
+Using device 0: Generic RTL2832U OEM
+Found Rafael Micro R820T tuner
+Supported gain values (29): 0.0 0.9 1.4 2.7 3.7
+Enabled direct sampling mode, input 2
+Sampling at 2048000 S/s.
+No E4000 tuner found, aborting.
+"""
+    parsed = sdr._parse_rtl_test(out)
+    assert parsed["device_count"] == 1
+    assert parsed["device_name"] == "HackerGadgets, AIO_V2 Ext"
+    assert parsed["tuner"] == "Rafael Micro R820T"
+    assert parsed["direct_sampling"] == 2
+    assert parsed["error"] == ""
+    assert parsed["sample_rate"] == 2048000
+
+
+def test_rtl_tcp_direct_sampling_command(monkeypatch):
+    from darksec import sdr
+
+    class FakeSocket:
+        def __init__(self):
+            self.header = b"RTL0" + struct.pack(">II", 5, 29)
+            self.sent = []
+
+        def settimeout(self, _value):
+            pass
+
+        def recv(self, count):
+            data, self.header = self.header[:count], self.header[count:]
+            return data
+
+        def sendall(self, data):
+            self.sent.append(data)
+
+        def close(self):
+            pass
+
+    fake = FakeSocket()
+    monkeypatch.setattr(sdr.socket, "create_connection", lambda *a, **k: fake)
+    client = sdr.RTLTCPClient("127.0.0.1")
+    client.connect()
+    client.set_direct_sampling(2)
+    assert fake.sent[-1] == b"\x09" + struct.pack(">I", 2)
