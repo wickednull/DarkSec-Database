@@ -297,6 +297,14 @@ The 3D globe uses a starfield space background beyond Earth's limb. Toggle
 background. The starfield is local CSS, makes no network requests, and keeps
 Earth's surface opaque.
 
+Aircraft and satellites move continuously between data updates. The client
+dead-reckons positions every second from the last reported speed and heading;
+satellite ground velocity comes from local SGP4 propagation. A lightweight
+`/api/map/moving` snapshot refreshes them every 20 seconds without re-fetching
+the full intel picture. Aircraft stop extrapolating after 15 minutes without a
+new feed snapshot; satellite positions refresh from the cached TLEs every
+minute.
+
 **Cache viewed areas automatically** in Settings → Offline maps is on by
 default: after the map is idle for a few seconds it downloads the missing full
 zoom stack for the current viewport while online. Cached tiles are skipped.

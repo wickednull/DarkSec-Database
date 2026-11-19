@@ -47,6 +47,20 @@ function bearingDeg(a, b) {
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
+function moveLatLon(lat, lon, bearing, distanceKm) {
+  const R = 6371;
+  const br = bearing * Math.PI / 180;
+  const d = distanceKm / R;
+  const p1 = lat * Math.PI / 180, l1 = lon * Math.PI / 180;
+  const p2 = Math.asin(Math.sin(p1) * Math.cos(d) + Math.cos(p1) * Math.sin(d) * Math.cos(br));
+  const l2 = l1 + Math.atan2(Math.sin(br) * Math.sin(d) * Math.cos(p1),
+    Math.cos(d) - Math.sin(p1) * Math.sin(p2));
+  return {
+    lat: Math.max(-85, Math.min(85, p2 * 180 / Math.PI)),
+    lon: ((l2 * 180 / Math.PI + 540) % 360) - 180,
+  };
+}
+
 function niceDistance(m) {
   if (m <= 0) return { m: U.isImperial() ? 3.048 : 10, label: U.distM(10) };
   const units = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000,
@@ -90,6 +104,9 @@ export async function render(root, params = {}) {
   let hudLiveTimer = null;
   let liveEnabled = true;
   let lastIntelRefresh = 0;
+  let movingFetchedAt = Date.now();
+  let movingTimer = null;
+  let movingPollTimer = null;
   let satTrack = null;
   const satTrackCache = new Map();
   try {
@@ -112,6 +129,7 @@ export async function render(root, params = {}) {
     intelCctv = (intel && intel.cctv) || [];
     intelSummaryData = (intel && intel.summary) || null;
     lastIntelRefresh = Date.now();
+    movingFetchedAt = Date.now();
     sunInfo = cel;
     declInfo = dec;
     try { coordNow = await api.get(`/api/map/coords?lat=${homeLat}&lon=${homeLon}`); } catch { coordNow = null; }
@@ -612,6 +630,7 @@ export async function render(root, params = {}) {
       intelCctv = intel.cctv || [];
       intelSummaryData = intel.summary || null;
       lastIntelRefresh = Date.now();
+      movingFetchedAt = Date.now();
       renderIntel();
       updateLiveHud();
       if (!silent) toast("Map intel refreshed");
@@ -633,9 +652,19 @@ export async function render(root, params = {}) {
   function scheduleLive() {
     if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
     if (hudLiveTimer) { clearInterval(hudLiveTimer); hudLiveTimer = null; }
+    if (movingTimer) { clearInterval(movingTimer); movingTimer = null; }
+    if (movingPollTimer) { clearInterval(movingPollTimer); movingPollTimer = null; }
     updateLiveHud();
     hudLiveTimer = setInterval(updateLiveHud, 10_000);
+    // Aircraft and satellites are dead-reckoned every second between snapshots,
+    // so they keep moving instead of jumping once a minute.
+    movingTimer = setInterval(() => {
+      if (disposed || document.hidden) return;
+      if ((visible.intelAircraft && intelAircraft.length)
+          || (visible.intelSats && intelSats.length)) draw();
+    }, 1000);
     if (!liveEnabled) return;
+    movingPollTimer = setInterval(refreshMoving, 20_000);
     liveTimer = setInterval(async () => {
       if (document.hidden) return;
       if (store.settings?.opsec_mode) return;
@@ -1191,9 +1220,42 @@ export async function render(root, params = {}) {
     }
   }
 
+  function animatedTarget(item, kind) {
+    const speed = Number(item.speed_kmh), heading = Number(item.heading_deg);
+    if (!Number.isFinite(speed) || !Number.isFinite(heading) || speed <= 0) return item;
+    const parsed = Date.parse(item.time || "");
+    const base = Number.isFinite(parsed) ? parsed : movingFetchedAt;
+    const age = Math.max(0, (Date.now() - base) / 1000);
+    const maxAge = kind === "sat" ? 300 : 900;
+    if (age > maxAge) return item;
+    const moved = moveLatLon(Number(item.lat), Number(item.lon), heading,
+      speed * age / 3600);
+    return { ...item, lat: moved.lat, lon: moved.lon };
+  }
+
+  function currentAircraft() {
+    return (intelAircraft || []).map((a) => animatedTarget(a, "aircraft"));
+  }
+
+  function currentSatellites() {
+    return (intelSats || []).map((sat) => animatedTarget(sat, "sat"));
+  }
+
+  async function refreshMoving() {
+    if (document.hidden || store.settings?.opsec_mode || store.state.online === false) return;
+    try {
+      const moving = await api.get("/api/map/moving");
+      if (!moving) return;
+      if (Array.isArray(moving.aircraft)) intelAircraft = moving.aircraft;
+      if (Array.isArray(moving.satellites)) intelSats = moving.satellites;
+      movingFetchedAt = Date.now();
+      draw();
+    } catch { /* keep dead-reckoning the last snapshot */ }
+  }
+
   function drawIntelAircraft(ctx, w, hh) {
     const showLabels = view.zoom >= 5;
-    for (const a of (intelAircraft || []).slice(0, 120)) {
+    for (const a of currentAircraft().slice(0, 120)) {
       const s = latLonToScreen(Number(a.lat), Number(a.lon));
       if (s.x < -24 || s.y < -24 || s.x > w + 24 || s.y > hh + 24) continue;
       const hdg = Number(a.heading_deg);
@@ -1237,7 +1299,8 @@ export async function render(root, params = {}) {
   function drawIntelSats(ctx, w, hh) {
     const showLabels = view.zoom >= 6;
     let labelsLeft = 80;
-    const sats = visible.satsOverheadOnly ? (intelSats || []).filter((s) => s && s.visible !== false) : (intelSats || []);
+    const allSats = currentSatellites();
+    const sats = visible.satsOverheadOnly ? allSats.filter((s) => s && s.visible !== false) : allSats;
     for (const sat of sats.slice(0, 250)) {
       const lat = Number(sat.lat), lon = Number(sat.lon);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
@@ -1790,8 +1853,8 @@ export async function render(root, params = {}) {
       const d = (x-px)*(x-px)+(y-py)*(y-py);
       if (d < bestD) { bestD = d; best = { kind, data, feature }; }
     };
-    if (visible.intelAircraft) for (const a of (intelAircraft||[])) { const sp = latLonToScreen(Number(a.lat),Number(a.lon)); test(sp.x,sp.y,'aircraft',a,null); }
-    if (visible.intelSats) for (const sat of (visible.satsOverheadOnly ? (intelSats||[]).filter(s=>s.visible!==false) : (intelSats||[]))) { const sp = latLonToScreen(Number(sat.lat),Number(sat.lon)); test(sp.x,sp.y,'sat',sat,null); }
+    if (visible.intelAircraft) for (const a of currentAircraft()) { const sp = latLonToScreen(Number(a.lat),Number(a.lon)); test(sp.x,sp.y,'aircraft',a,null); }
+    if (visible.intelSats) for (const sat of (visible.satsOverheadOnly ? currentSatellites().filter(s=>s.visible!==false) : currentSatellites())) { const sp = latLonToScreen(Number(sat.lat),Number(sat.lon)); test(sp.x,sp.y,'sat',sat,null); }
     if (visible.intelMaritime) for (const m of (intelMaritime||[])) { const sp = latLonToScreen(Number(m.lat),Number(m.lon)); test(sp.x,sp.y,'maritime',m,null); }
     if (visible.intelCables) for (const c of (intelCables||[])) { const sp = latLonToScreen(Number(c.lat),Number(c.lon)); test(sp.x,sp.y,'cable',c,null); }
     if (visible.intelCctv) for (const c of (intelCctv||[])) { if ((visible.cctvShowAlpr === false && c && c.alpr) || (globalAlprReady() && c && c.alpr)) continue; const sp = latLonToScreen(Number(c.lat),Number(c.lon)); test(sp.x,sp.y,'cctv',c,null); }
@@ -1832,6 +1895,11 @@ export async function render(root, params = {}) {
       if (Array.isArray(c) && Number.isFinite(Number(c[0])) && Number.isFinite(Number(c[1]))) return { lat: Number(c[1]), lon: Number(c[0]) };
       if (Number.isFinite(Number(sel.data?.lat)) && Number.isFinite(Number(sel.data?.lon))) return { lat: Number(sel.data.lat), lon: Number(sel.data.lon) };
       return null;
+    }
+    if (sel.kind === "aircraft" || sel.kind === "sat") {
+      const moved = animatedTarget(sel.data || {}, sel.kind);
+      const mlat = Number(moved.lat), mlon = Number(moved.lon);
+      return (Number.isFinite(mlat) && Number.isFinite(mlon)) ? { lat: mlat, lon: mlon } : null;
     }
     const lat = Number(sel.data?.lat), lon = Number(sel.data?.lon);
     return (Number.isFinite(lat) && Number.isFinite(lon)) ? { lat, lon } : null;
@@ -2374,6 +2442,8 @@ export async function render(root, params = {}) {
     window.removeEventListener("offline", onBrowserOffline);
     if (liveTimer) clearInterval(liveTimer);
     if (hudLiveTimer) clearInterval(hudLiveTimer);
+    if (movingTimer) clearInterval(movingTimer);
+    if (movingPollTimer) clearInterval(movingPollTimer);
     if (alprFetchTimer) clearTimeout(alprFetchTimer);
     clearTimeout(readoutTimer);
     if (resizeObs) resizeObs.disconnect();

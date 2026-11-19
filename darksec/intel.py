@@ -385,7 +385,7 @@ def live_satellites(db: Database, observer_lat: float, observer_lon: float,
             sat = Satrec.twoline2rv(line1, line2)
             epoch = _dt(2000 + int(str(sat.epochyr or "20")), 1, 1, tzinfo=timezone.utc) + _td(days=float(sat.epochdays))
             tsince = (now - epoch).total_seconds() / 60.0
-            r, _v = propagation.sgp4(sat, tsince)
+            r, velocity = propagation.sgp4(sat, tsince)
             if sat.error or not r:
                 continue
             radius = math.sqrt(sum(c * c for c in r))
@@ -406,6 +406,27 @@ def live_satellites(db: Database, observer_lat: float, observer_lon: float,
                                              float(observer_lat), float(observer_lon))
             if visible_only and elev_deg < 5.0:
                 continue
+            speed_kmh = heading_deg = None
+            try:
+                # Rotate the TEME velocity into ECEF, remove Earth's rotation
+                # and project it onto the local east/north frame. This gives the
+                # map enough information to dead-reckon between updates.
+                vx, vy, vz = velocity
+                omega = 7.2921159e-5
+                gx = (vx * math.cos(theta) + vy * math.sin(theta)) + omega * ey
+                gy = (-vx * math.sin(theta) + vy * math.cos(theta)) - omega * ex
+                gz = vz
+                lon_r = math.atan2(ey, ex)
+                lat_r = math.asin(max(-1.0, min(1.0, ez / rr))) if rr else 0.0
+                east = (-math.sin(lon_r), math.cos(lon_r), 0.0)
+                north = (-math.sin(lat_r) * math.cos(lon_r),
+                         -math.sin(lat_r) * math.sin(lon_r), math.cos(lat_r))
+                ve = gx * east[0] + gy * east[1] + gz * east[2]
+                vn = gx * north[0] + gy * north[1] + gz * north[2]
+                speed_kmh = round(math.sqrt(ve * ve + vn * vn) * 3600.0, 1)
+                heading_deg = round((math.degrees(math.atan2(ve, vn)) + 360.0) % 360.0, 1)
+            except Exception:
+                pass
             out.append({
                 "norad": int(it.get("norad") or 0),
                 "name": str(it.get("name") or "UNKNOWN"),
@@ -414,6 +435,7 @@ def live_satellites(db: Database, observer_lat: float, observer_lon: float,
                 "elevation_deg": round(elev_deg, 1),
                 "azimuth_deg": round(az_deg, 1),
                 "visible": elev_deg >= 0.0,
+                "speed_kmh": speed_kmh, "heading_deg": heading_deg,
                 "source": "CelesTrak", "severity": "INFO", "time": utcnow(),
             })
         except Exception:

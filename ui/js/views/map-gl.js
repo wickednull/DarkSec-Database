@@ -177,6 +177,8 @@ export async function render(root, params = {}) {
 
   const state = { maxAgeHours: 0, show: { hazards:true, conflict:true, aircraft:true, sats:true, satsOverheadOnly:false, maritime:true, cables:true, cctv:true, cctvAlpr:true, wind:false, rain:false, cloud:false, terrain: !!demStatus?.available, waypoints:true, tracks:true, daynight:true, home:!hidePosition }, live: true, lastRefresh: Date.now() };
   let map = null, popup = null, daynightTimer = null, glLiveTimer = null, liveTimer = null, freshTimer = null, inspector = null;
+  let movingFetchedAt = Date.now();
+  let movingTimer = null, movingPollTimer = null;
   let mapStyle = null;
   const mbInfo = mapLayers?.mbtiles || {};
   if (mbInfo.vector) {
@@ -405,11 +407,44 @@ export async function render(root, params = {}) {
     if (kind==='hazards') return fc(features.filter(f=>{ const p=f.properties||{}; const c=p.kind==='conflict'||p.feed_id==='gdelt_conflict'||p.feed_id==='ucdp_candidate'; return !c && passAge(p); }));
     return fc(features.filter(f=>{ const p=f.properties||{}; const c=p.kind==='conflict'||p.feed_id==='gdelt_conflict'||p.feed_id==='ucdp_candidate'; return c && passAge(p); }));
   }
+  function animatedTarget(item, kind){
+    const speed = num(item.speed_kmh), heading = num(item.heading_deg);
+    if (speed == null || heading == null || speed <= 0) return item;
+    const parsed = Date.parse(item.time || "");
+    const base = Number.isFinite(parsed) ? parsed : movingFetchedAt;
+    const age = Math.max(0, (Date.now() - base) / 1000);
+    const maxAge = kind === "sat" ? 300 : 900;
+    if (age > maxAge) return item;
+    const d = speed * age / 3600;
+    const br = heading * Math.PI / 180, ang = d / 6371;
+    const p1 = Number(item.lat) * Math.PI / 180, l1 = Number(item.lon) * Math.PI / 180;
+    const p2 = Math.asin(Math.sin(p1) * Math.cos(ang) + Math.cos(p1) * Math.sin(ang) * Math.cos(br));
+    const l2 = l1 + Math.atan2(Math.sin(br) * Math.sin(ang) * Math.cos(p1),
+      Math.cos(ang) - Math.sin(p1) * Math.sin(p2));
+    return { ...item,
+      lat: Math.max(-85, Math.min(85, p2 * 180 / Math.PI)),
+      lon: ((l2 * 180 / Math.PI + 540) % 360) - 180 };
+  }
+  function currentAircraft(){ return (intel?.aircraft || []).map(a => animatedTarget(a, "aircraft")); }
+  function currentSatellites(){ return (intel?.satellites || []).map(s => animatedTarget(s, "sat")); }
+
+  async function refreshMoving(){
+    if (!map || document.hidden || store.settings?.opsec_mode || store.state.online === false) return;
+    try {
+      const moving = await api.get('/api/map/moving');
+      if (!moving) return;
+      if (Array.isArray(moving.aircraft)) intel = { ...(intel || {}), aircraft: moving.aircraft };
+      if (Array.isArray(moving.satellites)) intel = { ...(intel || {}), satellites: moving.satellites };
+      movingFetchedAt = Date.now();
+      refreshIntelSources();
+    } catch { /* keep dead-reckoning the last snapshot */ }
+  }
+
   function aircraftGeo(){
-    return fc((intel?.aircraft||[]).slice(0,250).map(a=>pt(a.lon,a.lat,{ kind:'aircraft', title:a.callsign||'Aircraft', alt_m:a.alt_m, speed_kmh:a.speed_kmh, heading:a.heading_deg, source:a.source||'OpenSky', url:a.url, time:a.time })).filter(Boolean));
+    return fc(currentAircraft().slice(0,250).map(a=>pt(a.lon,a.lat,{ kind:'aircraft', title:a.callsign||'Aircraft', alt_m:a.alt_m, speed_kmh:a.speed_kmh, heading:a.heading_deg, source:a.source||'OpenSky', url:a.url, time:a.time })).filter(Boolean));
   }
   function aircraftHeadingGeo(){
-    return fc((intel?.aircraft||[]).slice(0,250).map(a=>{
+    return fc(currentAircraft().slice(0,250).map(a=>{
       const lo=num(a.lon),la=num(a.lat),hdg=num(a.heading_deg),spd=num(a.speed_kmh);
       if(lo==null||la==null||hdg==null) return null;
       const km = Math.max(8, Math.min(60, (spd||200)*0.08));
@@ -418,7 +453,7 @@ export async function render(root, params = {}) {
     }).filter(Boolean));
   }
   function satsGeo(){
-    let sats = intel?.satellites || [];
+    let sats = currentSatellites();
     if (state.show.satsOverheadOnly) sats = sats.filter(s => s && s.visible !== false);
     return fc(sats.slice(0,250).map(s=>pt(s.lon,s.lat,{ kind:'sat', title:s.name||`NORAD ${s.norad||''}`, norad:s.norad, alt_km:s.alt_km, elevation_deg:s.elevation_deg, azimuth_deg:s.azimuth_deg, visible:s.visible, source:s.source||'CelesTrak/SGP4', time:s.time })).filter(Boolean));
   }
@@ -1050,9 +1085,19 @@ export async function render(root, params = {}) {
     }
 
     daynightTimer = setInterval(()=>{ try { const dn=dayNightGeoJSON(); map.getSource('night')?.setData(dn.night); map.getSource('term')?.setData(dn.term); map.getSource('sunpt')?.setData(dn.sun); } catch {} }, 60000);
+    // Move aircraft/satellites every second between API snapshots; poll the
+    // lightweight moving endpoint without re-fetching the whole intel picture.
+    const animateMoving = () => {
+      if (!map || document.hidden) return;
+      const put = (id, data) => { try { map.getSource(id)?.setData(data); } catch {} };
+      if (state.show.aircraft) { put('aircraft', aircraftGeo()); put('aircraft-hdg', aircraftHeadingGeo()); }
+      if (state.show.sats) put('sats', satsGeo());
+    };
+    movingTimer = setInterval(animateMoving, 1000);
+    movingPollTimer = setInterval(refreshMoving, 20000);
     scheduleLive();
     refreshAlpr(true);
   });
 
-  return () => { try { clearInterval(daynightTimer); clearInterval(glLiveTimer); clearInterval(liveTimer); clearInterval(freshTimer); clearInterval(glRepaintTimer); clearTimeout(alprFetchTimer); glResize?.disconnect(); popup?.remove(); map?.remove(); } catch {} };
+  return () => { try { clearInterval(daynightTimer); clearInterval(glLiveTimer); clearInterval(liveTimer); clearInterval(freshTimer); clearInterval(movingTimer); clearInterval(movingPollTimer); clearInterval(glRepaintTimer); clearTimeout(alprFetchTimer); glResize?.disconnect(); popup?.remove(); map?.remove(); } catch {} };
 }

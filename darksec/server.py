@@ -4971,6 +4971,21 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         autosync.engine.run_now()
         return {"started": True, "sync": autosync.engine.snapshot(db(request))}
 
+    @app.get("/api/map/moving")
+    def map_moving(request: Request):
+        """Lightweight moving-target snapshot for aircraft/satellite animation."""
+        d = db(request)
+        s = d.all_settings()
+        try:
+            lat = float(s.get("lat") or 0); lon = float(s.get("lon") or 0)
+        except (TypeError, ValueError):
+            lat = lon = 0.0
+        return {
+            "generated_at": utcnow(),
+            "aircraft": intel.live_aircraft(d, limit=120),
+            "satellites": intel.live_satellites(d, lat, lon, limit=200, visible_only=False),
+        }
+
     @app.get("/api/map/intel")
     def map_intel(request: Request,
                   bbox: str = Query("", max_length=120),
