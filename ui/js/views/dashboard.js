@@ -2,7 +2,7 @@ import { api, download } from "../api.js";
 import { store } from "../store.js";
 import {
   h, panel, stat, gauge, badge, btn, iconBtn, icon, pageHead, alertStrip,
-  emptyState, loading, fmt, toast, modal, textarea, confirmDialog,
+  emptyState, loading, fmt, toast, modal, textarea, confirmDialog, tabs,
 } from "../components.js";
 import { openRecordForm, deleteRecord, severityTone } from "../records.js";
 import { positionConfidence, opsecActive } from "./shared.js?v=opsec-1";
@@ -10,6 +10,7 @@ import { positionConfidence, opsecActive } from "./shared.js?v=opsec-1";
 const DASH_AUTO_MS = 60_000;
 let dashTimer = null;
 let dashBusy = false;
+let lastTab = "overview";
 
 export async function render(root, params) {
   if (dashTimer) { clearInterval(dashTimer); dashTimer = null; }
@@ -35,6 +36,15 @@ export async function render(root, params) {
     ],
   });
   root.appendChild(head);
+  const tabDefs = [
+    { id: "overview", label: "OVERVIEW" },
+    { id: "ops", label: "OPERATIONS" },
+    { id: "system", label: "SYSTEM" },
+  ];
+  const tab = tabDefs.some((t) => t.id === params?.tab) ? params.tab : lastTab;
+  lastTab = tab;
+  params = { ...(params || {}), tab };
+  root.appendChild(tabs(tabDefs, tab, (id) => { lastTab = id; render(root, { ...params, tab: id }); }));
 
   const alerts = h("div", { class: "col" });
   const r = dash.readiness || {};
@@ -70,7 +80,7 @@ export async function render(root, params) {
   if (!dash.vault?.configured) {
     alerts.appendChild(alertStrip("Encrypted vault is not configured. Sensitive notes and plans should be protected before field use.", ""));
   }
-  if (alerts.children.length) root.appendChild(alerts);
+  if (tab === "overview" && alerts.children.length) root.appendChild(alerts);
 
   const sync = dash.sync || {};
   const positionInfo = positionConfidence(dash.settings || store.settings || {});
@@ -86,7 +96,7 @@ export async function render(root, params) {
     ? badge(`DEFCON ${dc.level}${dc.codename ? ` · ${dc.codename}` : ""}`,
         dc.level <= 2 ? "red" : dc.level === 3 ? "amber" : "green")
     : null;
-  root.appendChild(h("div", { class: "row gap-8 wrap mt-10" },
+  if (tab === "overview") root.appendChild(h("div", { class: "row gap-8 wrap mt-10" },
     badge(syncText, syncTone),
     dcBadge,
     h("span", { class: "tiny muted", text: `Last refresh ${fmt.ago(sync.last_success)} · ${sync.feed_ok ?? "?"}/${sync.feed_total ?? "?"} feeds cached · dashboard refreshes every 60 s` })));
@@ -160,7 +170,7 @@ export async function render(root, params) {
   }
   copy.appendChild(quick);
   hero.append(gaugeWrap, copy);
-  root.appendChild(hero);
+  if (tab === "overview") root.appendChild(hero);
 
   /* --------------------------------------------------- recommended actions */
   const sit = dash.sitrep || {};
@@ -174,7 +184,7 @@ export async function render(root, params) {
       row.appendChild(main);
       actList.appendChild(row);
     }
-    root.appendChild(panel({
+    if (tab === "overview") root.appendChild(panel({
       title: "RECOMMENDED ACTIONS",
       sub: `SITREP SYNTHESIS · STANCE ${sit.stance || "UNKNOWN"}`,
       icon: "target",
@@ -194,11 +204,13 @@ export async function render(root, params) {
   stats.appendChild(stat("Vault", dash.vault?.unlocked ? "OPEN" : dash.vault?.configured ? "LOCKED" : "NOT SET", dash.vault?.configured ? "encrypted notes" : "configure it in SECURITY", dash.vault?.unlocked ? "acc" : ""));
   stats.appendChild(stat("SDR", dash.hardware?.hackrf?.connected ? "CONNECTED" : dash.hardware?.hackrf?.present ? "NO RADIO" : "NO TOOLS", "HackRF / receive first"));
   stats.appendChild(stat("Intel cache", fmt.ago(sync.last_success), `${sync.feed_ok ?? 0}/${sync.feed_total ?? 0} feeds · ${sync.critical_count ?? 0} critical`));
-  root.appendChild(stats);
+  if (tab === "system") root.appendChild(stats);
 
   /* ------------------------------------------------------------- grid */
-  const grid = h("div", { class: "panel-grid grid-2 mt-14" });
-  root.appendChild(grid);
+  const opsGrid = h("div", { class: "panel-grid grid-2 mt-14" });
+  const sysGrid = h("div", { class: "panel-grid grid-2 mt-14" });
+  if (tab === "ops") root.appendChild(opsGrid);
+  if (tab === "system") root.appendChild(sysGrid);
 
   /* tasks */
   const taskList = h("div", { class: "list" });
@@ -226,7 +238,7 @@ export async function render(root, params) {
     tools: [btn("ADD", { size: "sm", onClick: () => openRecordForm({ table: "tasks", onSaved: () => render(root, params) }) })],
     body: taskList,
   });
-  grid.appendChild(taskPanel);
+  opsGrid.appendChild(taskPanel);
 
   /* incidents */
   const incList = h("div", { class: "list" });
@@ -244,7 +256,7 @@ export async function render(root, params) {
     } }));
     incList.appendChild(item);
   }
-  grid.appendChild(panel({
+  opsGrid.appendChild(panel({
     title: "Open incidents", icon: "warning",
     tools: [btn("LOG", { size: "sm", onClick: () => openRecordForm({ table: "incidents", onSaved: () => render(root, params) }) })],
     body: incList,
@@ -263,7 +275,7 @@ export async function render(root, params) {
     item.appendChild(h("span", { class: "li-time", text: fmt.time(l.ts) }));
     logList.appendChild(item);
   }
-  grid.appendChild(panel({
+  opsGrid.appendChild(panel({
     title: "Operations log", icon: "note",
     tools: [btn("NEW", { size: "sm", onClick: () => openRecordForm({ table: "log_entries", onSaved: () => render(root, params) }) })],
     body: logList,
@@ -287,7 +299,7 @@ export async function render(root, params) {
   } else {
     almanac.appendChild(h("div", { class: "small muted", text: "Astronomical almanac unavailable." }));
   }
-  grid.appendChild(panel({
+  sysGrid.appendChild(panel({
     title: "Almanac", sub: "Local times", icon: "sun",
     tools: [btn("NAV", { size: "sm", onClick: () => { location.hash = "#/nav"; } })],
     body: almanac,
@@ -321,7 +333,7 @@ export async function render(root, params) {
       feedWrap.appendChild(h("div", { class: "small muted mt-10", text: "No cached items. Use REFRESH when a network is available." }));
     }
   }
-  grid.appendChild(panel({
+  sysGrid.appendChild(panel({
     title: "Intelligence feeds", sub: "Cached · verify with official sources", icon: "globe",
     tools: [btn("REFRESH", { size: "sm", icon: "refresh", onClick: () => refreshFeeds(root, params) })],
     body: feedWrap,
@@ -338,7 +350,7 @@ export async function render(root, params) {
     row.appendChild(main);
     lowList.appendChild(row);
   }
-  grid.appendChild(panel({
+  opsGrid.appendChild(panel({
     title: "Sustainment warnings", icon: "box",
     tools: [btn("LOGISTICS", { size: "sm", onClick: () => { location.hash = "#/logistics"; } })],
     body: lowList,
@@ -353,7 +365,7 @@ export async function render(root, params) {
     btn("OPEN LIBRARY", { size: "sm", onClick: () => { location.hash = "#/library"; } }),
     btn("SEARCH", { size: "sm", tone: "ghost", onClick: () => { location.hash = "#/library"; } }));
   libRows.appendChild(h("div", { class: "wide" }, libAction));
-  grid.appendChild(panel({ title: "Document library", icon: "library", body: libRows }));
+  sysGrid.appendChild(panel({ title: "Document library", icon: "library", body: libRows }));
 
   const sys = dash.system || {};
   const sysKv = h("div", { class: "kv" });
@@ -366,7 +378,7 @@ export async function render(root, params) {
     sysKv.appendChild(h("span", { class: "k", text: k }));
     sysKv.appendChild(h("span", { class: "v", text: String(v) }));
   }
-  grid.appendChild(panel({ title: "Platform", icon: "cpu", body: sysKv }));
+  sysGrid.appendChild(panel({ title: "Platform", icon: "cpu", body: sysKv }));
 
   // Delegated refresh helper
   function position() {
