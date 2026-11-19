@@ -434,16 +434,24 @@ export async function render(root, params = {}) {
   });
   if (mbInfo.vector) {
     setTimeout(() => {
-      if (vectorTileSeen || !map) return;
+      if (!map) return;
+      let rendered = 0;
+      try {
+        const baseLayers = (map.getStyle()?.layers || [])
+          .filter((layer) => ["fill", "line", "raster", "fill-extrusion"].includes(layer.type))
+          .map((layer) => layer.id);
+        rendered = baseLayers.length ? map.queryRenderedFeatures({ layers: baseLayers }).length : 0;
+      } catch {}
+      if (rendered > 0) return;
       // A glyph/style failure can leave the source loaded but nothing painted.
       // Remove text layers and give geometry a chance before reporting an error.
-      dropVectorLabels("no vector tiles painted");
+      dropVectorLabels("no vector features painted");
       watchdogShown = true;
       showMapError(
-        `No vector tiles loaded for this view (z${map.getZoom().toFixed(1)}). Archive layers: ` +
+        `No vector map features painted for this view (z${map.getZoom().toFixed(1)}). Archive layers: ` +
         `${(mbInfo.layers || []).join(", ") || "unknown"} · z${mbArchive.minzoom ?? "?"}–${mbArchive.maxzoom ?? "?"}` +
         `${mbArchive.indexed ? "" : " · no tiles index (queries may be extremely slow)"}. ` +
-        `Open Settings → Offline maps → CHECK, or zoom into the archive's coverage.`
+        `Open Settings → Offline maps → DIAGNOSE if this persists.`
       );
     }, 9000);
   }

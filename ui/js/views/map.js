@@ -3,7 +3,7 @@
    local files or an operator-supplied MBTiles archive. No tile server is
    contacted. Everything else is waypoints and tracks in the local database. */
 import { api, download } from "../api.js";
-import * as mapGl from "./map-gl.js?v=glyph-1";
+import * as mapGl from "./map-gl.js?v=glyph-2";
 import { store } from "../store.js";
 import {
   h, panel, pageHead, btn, iconBtn, icon, badge, toast, modal, field, input, select,

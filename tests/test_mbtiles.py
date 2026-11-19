@@ -691,3 +691,25 @@ def test_style_endpoint_omits_glyphs_when_pack_is_missing(tmp_path, monkeypatch,
 
     client.put("/api/settings", json={"mbtiles_path": ""})
     mbtiles.invalidate()
+
+
+def test_style_endpoint_rejects_a_fake_glyph_file(tmp_path, monkeypatch, client):
+    from darksec import config, mbtiles
+
+    archive = make_mbtiles(tmp_path / "vector2.mbtiles", fmt="pbf",
+                           tiles={(5, 3, 4): VECTOR_TILE},
+                           extra_meta={"json": '{"vector_layers":[{"id":"water"}]}'})
+    mbtiles.invalidate()
+    assert client.put("/api/settings", json={"mbtiles_path": str(archive)}).status_code == 200
+
+    ui = tmp_path / "ui"
+    glyph_dir = ui / "fonts" / "Open Sans Regular"
+    glyph_dir.mkdir(parents=True)
+    (glyph_dir / "0-255.pbf").write_bytes(b"<html>login</html>" * 20)
+    monkeypatch.setattr(config, "UI_DIR", ui)
+    style = client.get("/api/map/vector/style").json()
+    assert "glyphs" not in style
+    assert not any(layer.get("type") == "symbol" for layer in style["layers"])
+
+    client.put("/api/settings", json={"mbtiles_path": ""})
+    mbtiles.invalidate()
