@@ -88,7 +88,7 @@ def hardware(force: bool = False) -> dict:
     now = time.time()
     if not force and _hw_cache["data"] and now - _hw_cache["ts"] < 60:
         return _hw_cache["data"]
-    data = sdr.detect()
+    data = sdr.detect(force=force)
     _hw_cache.update(ts=now, data=data)
     return data
 

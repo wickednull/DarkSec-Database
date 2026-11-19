@@ -133,22 +133,22 @@ if [ -n "$PM" ]; then
     apt)
       BASE_PKGS=(python3 python3-venv python3-pip poppler-utils tesseract-ocr
                  tesseract-ocr-eng djvulibre-bin ffmpeg sox git nodejs npm)
-      SDR_PKGS=(rtl-sdr hackrf gpsd-clients multimon-ng direwolf)
+      SDR_PKGS=(rtl-sdr hackrf soapysdr-tools soapysdr-module-rtlsdr soapysdr-module-hackrf gpsd-clients multimon-ng direwolf)
       ;;
     dnf)
       BASE_PKGS=(python3 python3-pip poppler-utils tesseract tesseract-langpack-eng
                  djvulibre ffmpeg sox git nodejs npm)
-      SDR_PKGS=(rtl-sdr hackrf gpsd-clients multimon-ng direwolf)
+      SDR_PKGS=(rtl-sdr hackrf SoapySDR SoapyRTLSDR SoapyHackRF gpsd-clients multimon-ng direwolf)
       ;;
     pacman)
       BASE_PKGS=(python python-pip poppler tesseract tesseract-data-eng djvulibre
                  ffmpeg sox git nodejs npm)
-      SDR_PKGS=(rtl-sdr hackrf gpsd multimon-ng direwolf)
+      SDR_PKGS=(rtl-sdr hackrf soapysdr soapyrtlsdr soapyhackrf gpsd multimon-ng direwolf)
       ;;
     zypper)
       BASE_PKGS=(python3 python3-pip poppler-tools tesseract-ocr
                  tesseract-ocr-traineddata-english djvulibre ffmpeg sox git nodejs npm)
-      SDR_PKGS=(rtl-sdr hackrf gpsd multimon-ng direwolf)
+      SDR_PKGS=(rtl-sdr hackrf SoapySDR SoapyRTLSDR SoapyHackRF gpsd multimon-ng direwolf)
       ;;
     apk)
       BASE_PKGS=(python3 py3-pip poppler-utils tesseract-ocr tesseract-ocr-data-eng

@@ -43,7 +43,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTe
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, assistant, astro, autosync, config, feeds, geo, geocoding, intel, library, mapstyle, mbtiles, phonegps, sdr, sitrep, tilecache
+from . import __version__, assistant, astro, autosync, config, feeds, geo, geocoding, intel, library, mapstyle, mbtiles, phonegps, sdr, sitrep, tilecache, websdr
 from .config import APP_NAME
 from .brief import build_brief, to_markdown
 from .calc_catalog import CALC_CATALOG, CALC_FUNCS
@@ -3842,6 +3842,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 raise HTTPException(status_code=400, detail=f'Transmit acknowledgement required: send tx_ack="{TX_ACK}"')
         numeric = {"lat": (-90, 90), "lon": (-180, 180), "elevation_m": (-500, 9000),
                    "declination": (-180, 180), "sdr_rx_gain": (0, 62), "sdr_lna_gain": (0, 40),
+                   "sdr_ppm": (-1000, 1000), "sdr_rtl_gain": (0, 62),
+                   "sdr_rtl_tcp_port": (1, 65535), "sdr_server_port": (1, 65535),
+                   "sdr_live_squelch": (0, 100), "sdr_live_rate": (0.25, 3.2),
                    "position_accuracy_m": (0, 100000),
                    "position_mode": (0, 3), "font_scale": (0.8, 1.5),
                    "critical_radius_km": (100, 10000), "lan_port": (1, 65535)}
@@ -3858,13 +3861,15 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 if not lo <= f <= hi:
                     raise HTTPException(status_code=400, detail=f"{key} out of range")
                 value = f
-            if key in ("sdr_tx_enabled", "sdr_tx_attested", "sdr_amp", "scanlines", "sound",
+            if key in ("sdr_tx_enabled", "sdr_tx_attested", "sdr_amp", "sdr_bias_tee",
+                       "sdr_server_enabled", "scanlines", "sound",
                        "map_vector", "map_auto_pack", "map_space_background", "map_labels_overlay", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter", "assistant_system_tools", "assistant_medical_tools", "assistant_history_encrypted", "lan_easy_access", "lan_tls"):
                 value = bool(value)
-            if key == "lan_port":
+            if key in ("lan_port", "sdr_rtl_tcp_port", "sdr_server_port"):
                 value = int(float(value))
             if key in ("callsign", "team", "operator", "timezone", "units", "date_format",
                        "grid_format", "accent", "tile_source", "mbtiles_path", "map_cache_path", "dem_mbtiles_path",
+                       "sdr_backend", "sdr_rtl_tcp_host", "sdr_server_bind",
                        "dem_encoding", "epoch", "position_source", "position_updated_at", "position_fix_at",
                        "ollama_base_url", "ollama_model", "assistant_keep_alive"):
                 value = str(value)[:500]
@@ -6268,9 +6273,120 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     def sdr_devices(force: bool = False):
         return hardware(force=force)
 
+    @app.post("/api/sdr/platform/uconsole-sdr")
+    def sdr_uconsole_sdr(request: Request):
+        try:
+            out = sdr.enable_uconsole_sdr(7)
+            db(request).audit("SDR_UCONSOLE_GPIO", "GPIO 7 SDR rail enabled")
+            return out
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.get("/api/sdr/network/probe")
+    def sdr_network_probe(host: str = "", port: int = 1234):
+        require(bool(host.strip()), "host is required")
+        return sdr.probe_rtl_tcp(host.strip(), port)
+
+    @app.get("/api/sdr/live")
+    def sdr_live(request: Request, freq_mhz: float = 100.0, mode: str = "nfm",
+                 backend: str = "auto", rate: float = 1.024, gain: float = 40,
+                 squelch: float = 0, host: str = "", port: int = 1234,
+                 lna: int = 32, vga: int = 40, amp: bool = False):
+        require(1.0 <= freq_mhz <= 6000.0, "Frequency must be 1-6000 MHz")
+        require(0.25 <= rate <= 3.2, "Live sample rate must be 0.25-3.2 Msps")
+        settings = db(request).all_settings()
+        host = (host or str(settings.get("sdr_rtl_tcp_host") or "")).strip()
+        port = int(port or settings.get("sdr_rtl_tcp_port") or 1234)
+        backend = str(backend or settings.get("sdr_backend") or "auto")
+        rate_hz = float(rate) * 1e6
+        pre = sdr.live_preflight(backend, host, port)
+        chosen = pre["backend"]
+        if chosen == "hackrf":
+            rate_hz = max(2_000_000.0, min(20_000_000.0, rate_hz))
+        else:
+            rate_hz = max(900_000.0, min(3_200_000.0, rate_hz))
+        out_rate = sdr.live_audio_rate(rate_hz)
+        import secrets as _secrets
+
+        sessions = getattr(request.app.state, "sdr_live_sessions", None)
+        if sessions is None:
+            sessions = {}
+            request.app.state.sdr_live_sessions = sessions
+        session_id = _secrets.token_hex(8)
+        stop_event = threading.Event()
+        sessions[session_id] = stop_event
+
+        def generate():
+            try:
+                yield from sdr.live_audio_stream(
+                    freq_hz=float(freq_mhz) * 1e6, mode=mode, backend=chosen,
+                    rate=rate_hz, gain=float(gain or settings.get("sdr_rtl_gain") or 40),
+                    ppm=int(settings.get("sdr_ppm") or 0), squelch=float(squelch or 0),
+                    host=host, port=port, lna=int(lna), vga=int(vga), amp=bool(amp),
+                    stop_event=stop_event,
+                )
+            finally:
+                sessions.pop(session_id, None)
+                stop_event.set()
+
+        return StreamingResponse(
+            generate(), media_type="application/octet-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no",
+                     "X-Audio-Rate": str(out_rate), "X-SDR-Backend": chosen,
+                     "X-SDR-Session": session_id,
+                     "X-Audio-Channels": "1", "X-Audio-Format": "s16le"},
+        )
+
+    @app.post("/api/sdr/live/stop")
+    def sdr_live_stop(request: Request, session: str = ""):
+        sessions = getattr(request.app.state, "sdr_live_sessions", {})
+        stop_event = sessions.get(str(session or ""))
+        if stop_event is not None:
+            stop_event.set()
+        return {"ok": stop_event is not None, "session": session}
+
+    @app.get("/api/sdr/websdr")
+    def sdr_websdr(refresh: bool = False, q: str = "", band: str = ""):
+        return websdr.receivers(refresh_now=refresh, query=q, band=band)
+
+    @app.get("/api/sdr/websdr/tune")
+    def sdr_websdr_tune(url: str = "", freq_hz: float = 0, mode: str = "am"):
+        require(bool(url.strip()), "url is required")
+        require(1_000_000 <= freq_hz <= 6_000_000_000, "Frequency must be 1 MHz - 6 GHz")
+        return {"url": websdr.tune_url({"url": url.strip()}, freq_hz, mode)}
+
+    @app.get("/api/sdr/server")
+    def sdr_server_status():
+        return sdr.rtl_tcp_server_status()
+
+    @app.post("/api/sdr/server/start")
+    def sdr_server_start(request: Request, payload: dict = Body(...)):
+        try:
+            out = sdr.start_rtl_tcp_server(
+                bind=str(payload.get("bind") or "0.0.0.0"),
+                port=int(payload.get("port") or 1234),
+                freq_hz=float(payload.get("freq_hz") or 100e6),
+                rate=float(payload.get("rate") or 2_400_000),
+                gain=float(payload.get("gain") or 40),
+                ppm=int(payload.get("ppm") or 0),
+                bias=bool(payload.get("bias", False)),
+            )
+            db(request).audit("SDR_SERVER_START", f"port={out.get('port')} bind={out.get('bind')}")
+            return out
+        except (TypeError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/sdr/server/stop")
+    def sdr_server_stop(request: Request):
+        out = sdr.stop_rtl_tcp_server()
+        db(request).audit("SDR_SERVER_STOP", "rtl_tcp stopped")
+        return out
+
     @app.get("/api/sdr/sweep")
     def sdr_sweep_stream(request: Request, start_mhz: float = 88.0, end_mhz: float = 108.0,
-                         bin_khz: float = 100.0, lna: int = 32, vga: int = 40, amp: bool = False):
+                         bin_khz: float = 100.0, lna: int = 32, vga: int = 40, amp: bool = False,
+                         backend: str = "auto", gain: int = 40, ppm: int = 0,
+                         device: int = 0):
         require(0.1 <= start_mhz < end_mhz <= 6000, "Sweep range must be 0.1-6000 MHz")
         require(10 <= bin_khz <= 5000, "Bin width must be 10-5000 kHz")
         require(0 <= lna <= 40 and 0 <= vga <= 62, "Gain out of range")
@@ -6281,7 +6397,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         def generate():
             try:
                 for frame in sdr.sweep_stream(int(start_mhz * 1e6), int(end_mhz * 1e6),
-                                              int(bin_khz * 1e3), lna, vga, amp):
+                                              int(bin_khz * 1e3), lna, vga, amp,
+                                              backend=backend, gain=gain, ppm=ppm,
+                                              device=device):
                     yield json.dumps(frame) + "\n"
             finally:
                 request.app.state.sweep_active = False
@@ -6301,6 +6419,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 lna=int(payload.get("lna", 32)), vga=int(payload.get("vga", 40)),
                 amp=bool(payload.get("amp", False)), keep_iq=bool(payload.get("keep_iq", False)),
                 name=str(payload.get("name", ""))[:120],
+                backend=str(payload.get("backend", "auto")).lower(),
+                host=str(payload.get("sdr_rtl_tcp_host") or payload.get("host") or ""),
+                port=int(payload.get("sdr_rtl_tcp_port") or payload.get("port") or 0),
             )
             db(request).audit("SDR_CAPTURE", f"job={job['id']} freq={freq}")
             return job
@@ -6386,6 +6507,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             row = d.one("SELECT * FROM sdr_recordings WHERE id=?", (int(rec_id),))
             require(bool(row), "Recording not found", 404)
             require(bool(row["iq_path"]), "That recording has no retained IQ file")
+            if "format=u8" in str(row["note"] or ""):
+                raise HTTPException(status_code=400,
+                                    detail="RTL-SDR uint8 IQ cannot be replayed as HackRF int8. Capture with a HackRF to transmit.")
             iq_path = row["iq_path"]; freq = row["freq_hz"]; rate = row["rate"]
         require(bool(iq_path), "recording_id or iq_path required")
         p = Path(str(iq_path)).expanduser().resolve()

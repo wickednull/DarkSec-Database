@@ -335,6 +335,17 @@ log, and a **Cancel** button for manual or automatic packs. Cache clearing and
 verification are blocked while a download is active; cancel it first. Finished
 jobs stay in the panel briefly with their logs.
 
+### Software-defined radio
+
+DarkSec drives HackRF, RTL-SDR and network `rtl_tcp` receivers directly, with
+wideband sweep, live audio, IQ capture, demodulation, recordings and a gated
+HackRF transmit path. A WebSDR/KiwiSDR panel gives operators without a radio a
+curated public receiver list and tuned links. The SDR screen reports the board,
+tuner, gain steps, CPU temperature, Raspberry Pi throttling flags and
+uConsole/AIO V2 setup steps. See [docs/SDR.md](docs/SDR.md) for hardware
+setup, uConsole USB-A/GPIO details, Raspberry Pi power advice, `rtl_tcp`
+sharing and WebSDR etiquette.
+
 #### MBTiles from a USB drive
 
 Operator-supplied MBTiles archives are read **in place and read-only**, so a

@@ -1,4 +1,4 @@
-/* SDR / spectrum: real HackRF tooling only. No synthetic spectrum is drawn. */
+/* SDR / spectrum: HackRF, RTL-SDR, network rtl_tcp and WebSDR. No synthetic spectrum is drawn. */
 import { api } from "../api.js";
 import { store } from "../store.js";
 import {
@@ -34,6 +34,27 @@ function mhz(hz) {
   return hz == null ? "—" : `${fmt.num(Number(hz) / 1e6, 4)} MHz`;
 }
 
+function backendName(id) {
+  return ({ hackrf: "HackRF", rtl: "RTL-SDR", rtl_tcp: "rtl_tcp", soapy: "SoapySDR",
+    websdr: "WebSDR", none: "none", auto: "AUTO" })[id] || String(id || "auto").toUpperCase();
+}
+
+function noteFields(note) {
+  const out = {};
+  for (const part of String(note || "").split(";")) {
+    const [k, v] = part.split("=");
+    if (k && v) out[k.trim()] = v.trim();
+  }
+  return out;
+}
+
+function platformLabel(p) {
+  if (!p) return "UNKNOWN";
+  if (p.uconsole) return "UCONSOLE";
+  if (p.raspberry_pi) return "RASPBERRY PI";
+  return String(p.arch || p.system || "LINUX").toUpperCase();
+}
+
 export async function render(root, params = {}) {
   root.replaceChildren(loading("INITIALISING SDR CHAIN"));
   let devices, jobs, recordings, adsb, presetData;
@@ -52,7 +73,12 @@ export async function render(root, params = {}) {
 
   const txEnabled = !!store.state.status?.tx_enabled;
   const hackrf = devices.hackrf || {};
+  const rtl = devices.rtl || {};
+  const soapy = devices.soapy || {};
+  const platform = devices.platform || {};
+  const network = devices.rtl_tcp || {};
   const tools = devices.tools || {};
+  const activeBackend = devices.active_backend || "none";
   const recs = recordings.items || [];
   const recentJobs = jobs.items || [];
   const paramFreq = Number(params.freq || 0);
@@ -62,7 +88,7 @@ export async function render(root, params = {}) {
   root.appendChild(pageHead({
     kicker: "OPERATIONS // RADIO SPECTRUM",
     title: "SDR / Spectrum",
-    desc: "HackRF receive chain, IQ capture, demodulation, recordings and gated transmit. Every value comes from the radio or the local filesystem.",
+    desc: "HackRF, RTL-SDR, network rtl_tcp and public WebSDR/KiwiSDR receive. Live audio, wideband sweep, IQ capture, demodulation, recordings and gated transmit. Every local value comes from the radio or the filesystem.",
     actions: [
       btn("CHECK HARDWARE", { icon: "refresh", onClick: () => rescan() }),
       btn("FIELD MANUAL", { icon: "book", onClick: () => { location.hash = "#/manual?doc=sdr"; } }),
@@ -77,12 +103,18 @@ export async function render(root, params = {}) {
   ));
 
   const stats = h("div", { class: "grid grid-4 mt-14" });
-  stats.appendChild(stat("HackRF", hackrf.connected ? "CONNECTED" : "NO DEVICE",
-    hackrf.connected ? (hackrf.board_id || "HackRF One") : "connect radio + check USB permissions",
-    hackrf.connected ? "acc" : "warn"));
+  const activeLabel = activeBackend === "hackrf" ? (hackrf.board_id || "HACKRF")
+    : activeBackend === "rtl" ? (rtl.tuner || "RTL-SDR")
+    : activeBackend === "rtl_tcp" ? `${network.host || "network"}:${network.port || 1234}`
+    : "NO LOCAL RADIO";
+  stats.appendChild(stat("Active RX", activeBackend === "none" ? "WEB ONLY" : backendName(activeBackend).toUpperCase(),
+    activeBackend === "none" ? "WebSDR works without hardware" : activeLabel,
+    activeBackend === "none" ? "warn" : "acc"));
+  stats.appendChild(stat("Platform", platformLabel(platform),
+    `${platform.model || "unknown board"} · ${platform.thermal_c != null ? platform.thermal_c + " °C" : "thermal n/a"}`,
+    (platform.throttled_flags || []).length ? "warn" : ""));
   stats.appendChild(stat("Tools", String(Object.values(tools).filter(Boolean).length).padStart(2, "0"),
-    "hackrf_sweep / transfer / sox / dump1090"));
-  stats.appendChild(stat("Recordings", String(recs.length).padStart(2, "0"), "local captures retained"));
+    "rtl_sdr / rtl_power / hackrf / SoapySDR"));
   stats.appendChild(stat("Transmit", txEnabled ? "ARMED" : "HARD LOCK",
     txEnabled ? "legal attestation recorded" : "settings gate closed", txEnabled ? "warn" : ""));
   root.appendChild(stats);
@@ -277,29 +309,65 @@ export async function render(root, params = {}) {
 
   /* ------------------------------------------------------------- hardware */
   const devWrap = h("div", { class: "col" });
-  const dev = h("div", { class: "device-card" });
-  dev.appendChild(h("div", { class: "row between" },
-    h("div", { class: "dev-name", text: hackrf.connected ? (hackrf.board_id || "HACKRF") : "HACKRF NOT DETECTED" }),
-    badge(hackrf.connected ? "ONLINE" : "OFFLINE", hackrf.connected ? "green" : "red")));
-  dev.appendChild(kv([
-    ["Firmware", hackrf.firmware || "—"],
-    ["Serial", hackrf.serial || "—"],
-    ["Part ID", hackrf.part_id || "—"],
-    ["RTL-SDR", devices.rtl?.connected ? "connected" : devices.rtl?.present ? "present / not detected" : "not installed"],
-    ["ADS-B", tools.dump1090 ? "dump1090 installed" : "dump1090 missing"],
-    ["GPS", tools.gpspipe ? "gpspipe installed" : "gpspipe missing"],
+  const platformRow = h("div", { class: "device-card" });
+  platformRow.appendChild(h("div", { class: "row between" },
+    h("div", { class: "dev-name", text: platformLabel(platform) }),
+    badge(platform.uconsole ? "HANDHELD" : platform.raspberry_pi ? "SBC" : "DESKTOP",
+      platform.uconsole ? "cyan" : platform.raspberry_pi ? "amber" : "")));
+  platformRow.appendChild(kv([
+    ["Board", platform.model || "unknown"],
+    ["Arch", platform.arch || "—"],
+    ["Memory", platform.memory_mb ? `${fmt.num(platform.memory_mb / 1024, 1)} GB` : "—"],
+    ["CPU temp", platform.thermal_c != null ? `${platform.thermal_c} °C` : "—"],
+    ["Power flags", (platform.throttled_flags || []).length ? platform.throttled_flags.join(", ") : "none"],
   ]));
-  devWrap.appendChild(dev);
+  devWrap.appendChild(platformRow);
+  if (platform.uconsole) {
+    devWrap.appendChild(h("div", { class: "row wrap gap-6 mt-8" },
+      btn("ENABLE AIO V2 SDR (GPIO 7)", { size: "sm", icon: "power", onClick: async () => {
+        try {
+          const out = await api.post("/api/sdr/platform/uconsole-sdr", {});
+          toast(out.note || "AIO V2 SDR rail enabled");
+          setTimeout(() => rescan(true), 1200);
+        } catch (err) { toast(err.message, "error"); }
+      } }),
+      h("span", { class: "tiny muted", text: "Requires pinctrl permission (often root)." })));
+  }
+
+  const deviceGrid = h("div", { class: "col gap-6 mt-10" });
+  const rf = h("div", { class: "device-card" });
+  rf.appendChild(h("div", { class: "row between" },
+    h("div", { class: "dev-name", text: "RECEIVERS" }),
+    badge(`${(devices.backends || []).filter((b) => b.connected && b.rx).length} RX`, "green")));
+  rf.appendChild(kv([
+    ["HackRF", hackrf.connected ? (hackrf.board_id || "connected") : tools.hackrf_info ? "tools installed / no device" : "not installed"],
+    ["RTL-SDR", rtl.connected ? (rtl.tuner || "connected") : rtl.present || tools.rtl_test ? "tools installed / no device" : "not installed"],
+    ["RTL gains", (rtl.gains || []).length ? `${rtl.gains.length} steps` : "—"],
+    ["SoapySDR", soapy.connected ? `${(soapy.devices || []).length} device(s)` : soapy.present ? "no device" : "not installed"],
+    ["Network", network.configured ? `${network.host}:${network.port}` : "not configured"],
+  ]));
+  deviceGrid.appendChild(rf);
+  devWrap.appendChild(deviceGrid);
+
+  if ((devices.guidance || []).length) {
+    const guide = h("details", { class: "mt-10", open: !hackrf.connected && !rtl.connected });
+    guide.appendChild(h("summary", { class: "tiny muted", text: "SETUP / FIXES" }));
+    for (const item of devices.guidance) {
+      guide.appendChild(h("div", { class: `tiny ${item.level === "warn" ? "danger-text" : "muted"} mt-6`, text: `• ${item.text}` }));
+    }
+    devWrap.appendChild(guide);
+  }
   if (hackrf.raw) {
     const raw = h("details", { class: "mt-10" });
     raw.appendChild(h("summary", { class: "tiny muted", text: "hackrf_info output" }));
     raw.appendChild(h("pre", { class: "tiny mono wrap-any", text: hackrf.raw }));
     devWrap.appendChild(raw);
   }
-  if (!hackrf.connected) {
-    devWrap.appendChild(h("div", { class: "callout warn small mt-10",
-      text: "No HackRF detected. Spectrum and capture controls will fail honestly instead of showing invented data. "
-        + "Check the USB cable, use a powered hub, and verify udev permissions for the HackRF." }));
+  if (rtl.raw) {
+    const raw = h("details", { class: "mt-10" });
+    raw.appendChild(h("summary", { class: "tiny muted", text: "rtl_test output" }));
+    raw.appendChild(h("pre", { class: "tiny mono wrap-any", text: rtl.raw }));
+    devWrap.appendChild(raw);
   }
   const toolWrap = h("div", { class: "col gap-4 mt-10" });
   for (const [name, path] of Object.entries(tools)) {
@@ -311,7 +379,7 @@ export async function render(root, params = {}) {
   devWrap.appendChild(toolWrap);
   const hardwarePanel = panel({
     title: "Radio hardware",
-    sub: "Local device inventory",
+    sub: "Local inventory, board health and fixes",
     icon: "antenna",
     tools: [btn("RESCAN", { size: "sm", icon: "refresh", onClick: () => rescan(true) })],
     body: devWrap,
@@ -335,12 +403,22 @@ export async function render(root, params = {}) {
   const lnaInput = input({ type: "number", value: String(store.settings?.sdr_lna_gain ?? 32), min: "0", max: "40" });
   const vgaInput = input({ type: "number", value: String(store.settings?.sdr_rx_gain ?? 40), min: "0", max: "62" });
   const ampInput = checkbox("RF amp +14 dB", !!store.settings?.sdr_amp);
+  const sweepBackend = select([
+    { value: "auto", label: "Auto" },
+    { value: "hackrf", label: "HackRF" },
+    { value: "rtl", label: "RTL-SDR" },
+  ], String(store.settings?.sdr_backend || "auto"));
+  const sweepGain = input({ type: "number", value: String(store.settings?.sdr_rtl_gain ?? 40), min: "0", max: "62" });
+  const sweepPpm = input({ type: "number", value: String(store.settings?.sdr_ppm ?? 0), min: "-1000", max: "1000" });
   controls.append(
     field("START (MHz)", startInput),
     field("END (MHz)", endInput),
     field("BIN (kHz)", binInput),
+    field("BACKEND", sweepBackend),
     field("LNA (0-40)", lnaInput),
     field("VGA (0-62)", vgaInput),
+    field("RTL GAIN", sweepGain),
+    field("PPM", sweepPpm),
     h("div", { class: "field" }, h("label", { text: "AMP" }), ampInput),
   );
   const sweepBtn = btn("START SWEEP", { tone: "primary", icon: "play" });
@@ -351,7 +429,7 @@ export async function render(root, params = {}) {
     spectrumReadout,
     controls,
     h("div", { class: "row wrap mt-10" }, sweepBtn, stopSweepBtn,
-      h("span", { class: "tiny muted", text: "Sweep requires hackrf_sweep. A full 1–6000 MHz sweep can take time and congest USB." })),
+      h("span", { class: "tiny muted", text: "Sweep uses hackrf_sweep or rtl_power. A full 1–6000 MHz sweep can take time and congest USB." })),
   );
   topGrid.appendChild(panel({
     title: "Wideband spectrum",
@@ -361,6 +439,207 @@ export async function render(root, params = {}) {
     body: spectrumBody,
   }));
   topGrid.appendChild(hardwarePanel);
+
+  /* ----------------------------------------------------------- live audio */
+  const liveFreq = input({ type: "number", value: paramFreq ? String(paramFreq) : "100.0", step: "0.0001", min: "0.1", max: "6000" });
+  const liveMode = select([
+    { value: "nfm", label: "NFM — voice" },
+    { value: "wfm", label: "WFM — broadcast" },
+    { value: "am", label: "AM — aviation/broadcast" },
+    { value: "usb", label: "USB" },
+    { value: "lsb", label: "LSB" },
+  ], DEMODS.some((d) => d.value === paramMode) && ["nfm", "wfm", "am", "usb", "lsb"].includes(paramMode) ? paramMode : "nfm");
+  const liveBackend = select([
+    { value: "auto", label: "Auto" },
+    { value: "hackrf", label: "HackRF" },
+    { value: "rtl", label: "RTL-SDR" },
+    { value: "rtl_tcp", label: "Network rtl_tcp" },
+  ], String(store.settings?.sdr_backend || "auto"));
+  const liveRate = input({ type: "number", value: String(store.settings?.sdr_live_rate ?? 1.024), step: "0.025", min: "0.25", max: "3.2" });
+  const liveGain = input({ type: "number", value: String(store.settings?.sdr_rtl_gain ?? 40), min: "0", max: "62" });
+  const liveSquelch = input({ type: "number", value: String(store.settings?.sdr_live_squelch ?? 0), min: "0", max: "100" });
+  const liveVolume = input({ type: "range", value: "0.8", min: "0", max: "1", step: "0.01" });
+  const livePlay = btn("LISTEN", { tone: "primary", icon: "play" });
+  const liveStopBtn = btn("STOP", { icon: "stop", tone: "danger", disabled: true });
+  const liveStatus = h("span", { class: "tiny muted", text: "IDLE // no stream" });
+  const liveLevelBar = h("i", { style: { width: "0%" } });
+  const liveLevel = h("div", { class: "sdr-level", title: "audio level" }, liveLevelBar);
+  const liveBody = h("div", { class: "col" },
+    h("div", { class: "form-grid" },
+      field("FREQUENCY (MHz)", liveFreq),
+      field("MODE", liveMode),
+      field("BACKEND", liveBackend),
+      field("SAMPLE RATE (Msps)", liveRate, "Lower is easier on a Pi/uConsole"),
+      field("RTL GAIN", liveGain),
+      field("SQUELCH (0=off)", liveSquelch),
+    ),
+    h("div", { class: "row between mt-8" },
+      h("div", { class: "row gap-8" }, livePlay, liveStopBtn, liveStatus),
+      h("div", { class: "row gap-8 wrap" },
+        btn("SAVE DEFAULTS", { size: "sm", tone: "ghost", icon: "check", onClick: async () => {
+          try {
+            await store.saveSettings({
+              sdr_backend: liveBackend.value,
+              sdr_ppm: Number(sweepPpm.value) || 0,
+              sdr_rtl_gain: Number(liveGain.value) || 40,
+              sdr_live_rate: Number(liveRate.value) || 1.024,
+              sdr_live_squelch: Number(liveSquelch.value) || 0,
+              sdr_server_port: Number(srvPort.value) || 1234,
+              sdr_server_bind: srvBind.value.trim() || "0.0.0.0",
+            });
+            toast("SDR defaults saved");
+          } catch (err) { toast(err.message, "error"); }
+        } }),
+        h("span", { class: "tiny muted", text: "VOL" }), liveVolume)),
+    liveLevel,
+    h("div", { class: "tiny muted mt-6" },
+      "Live audio is demodulated on the server and streamed as 16-bit PCM. On a uConsole, use USB-A and keep the sample rate at 1.024–2.4 Msps. Public WebSDR receivers do not use this stream — see the WebSDR panel."),
+  );
+  topGrid.appendChild(panel({
+    title: "Live audio",
+    sub: "HackRF / RTL-SDR / rtl_tcp · server-side DSP",
+    icon: "signal",
+    cls: "span-2",
+    body: liveBody,
+  }));
+
+  let liveCtx = null;
+  let liveGainNode = null;
+  let liveSession = "";
+  let liveAbort = null;
+  let liveSources = [];
+  let liveNext = 0;
+  let liveRunning = false;
+
+  function setLiveRunning(running) {
+    liveRunning = running;
+    livePlay.disabled = running;
+    liveStopBtn.disabled = !running;
+    livePlay.replaceChildren(h("span", { text: running ? "LIVE…" : "LISTEN" }));
+  }
+
+  function stopLive() {
+    if (liveSession) {
+      const sid = liveSession;
+      liveSession = "";
+      api.post(`/api/sdr/live/stop?session=${encodeURIComponent(sid)}`, {}).catch(() => {});
+    }
+    if (liveAbort) { try { liveAbort.abort(); } catch {} liveAbort = null; }
+    for (const src of liveSources) { try { src.stop(); } catch {} }
+    liveSources = [];
+    if (liveCtx) {
+      try { liveCtx.close(); } catch {}
+      liveCtx = null;
+    }
+    liveGainNode = null;
+    liveNext = 0;
+    liveLevelBar.style.width = "0%";
+    if (liveRunning) liveStatus.textContent = "STOPPED // operator";
+    setLiveRunning(false);
+  }
+
+  async function startLive() {
+    if (liveRunning) return;
+    const freq = Number(liveFreq.value);
+    if (!(freq >= 1 && freq <= 6000)) { toast("Frequency must be 1–6000 MHz", "warn"); return; }
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) { toast("This browser has no Web Audio support", "error"); return; }
+    let ctx;
+    try { ctx = new AudioCtor(); } catch (err) { toast(`Audio unavailable: ${err.message || err}`, "error"); return; }
+    liveCtx = ctx;
+    liveGainNode = ctx.createGain();
+    liveGainNode.gain.value = Number(liveVolume.value) || 0.8;
+    liveGainNode.connect(ctx.destination);
+    const playThrough = (buffer) => {
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(liveGainNode);
+      return src;
+    };
+    await ctx.resume();
+    const controller = new AbortController();
+    liveAbort = controller;
+    setLiveRunning(true);
+    liveStatus.textContent = "CONNECTING // waiting for audio";
+    const qs = new URLSearchParams({
+      freq_mhz: String(freq), mode: liveMode.value, backend: liveBackend.value,
+      rate: String(Number(liveRate.value) || 1.024),
+      gain: String(Number(liveGain.value) || 40),
+      squelch: String(Number(liveSquelch.value) || 0),
+      host: String(netHost?.value || "").trim(),
+      port: String(Number(netPort?.value) || 1234),
+    });
+    try {
+      const res = await fetch(`/api/sdr/live?${qs}`, { credentials: "same-origin", signal: controller.signal });
+      if (!res.ok) {
+        let detail = `Live audio failed (${res.status})`;
+        try { const data = await res.json(); detail = data.detail || data.error || detail; } catch {}
+        throw new Error(detail);
+      }
+      liveSession = res.headers.get("x-sdr-session") || "";
+      const rate = Number(res.headers.get("x-audio-rate")) || 48000;
+      const backendUsed = res.headers.get("x-sdr-backend") || liveBackend.value;
+      liveStatus.textContent = `LIVE // ${String(backendUsed).toUpperCase()} · ${Math.round(rate / 1000)} kHz`;
+      if (!res.body) throw new Error("Streaming response is unavailable in this browser");
+      const reader = res.body.getReader();
+      let carry = new Uint8Array(0);
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        const merged = new Uint8Array(carry.length + value.length);
+        merged.set(carry); merged.set(value, carry.length);
+        carry = merged;
+        while (carry.length >= 4096) {
+          const chunk = carry.slice(0, 4096);
+          carry = carry.slice(4096);
+          const int16 = new Int16Array(chunk.buffer, 0, chunk.length / 2);
+          const buffer = ctx.createBuffer(1, int16.length, rate);
+          const channel = buffer.getChannelData(0);
+          let sum = 0;
+          for (let i = 0; i < int16.length; i++) {
+            const v = int16[i] / 32768;
+            channel[i] = v; sum += v * v;
+          }
+          liveLevelBar.style.width = `${Math.min(100, Math.sqrt(sum / Math.max(1, int16.length)) * 420)}%`;
+          const src = playThrough(buffer);
+          const now = ctx.currentTime;
+          if (liveNext < now + 0.05) liveNext = now + 0.05;
+          if (liveNext > now + 0.7) liveNext = now + 0.1;
+          src.start(liveNext);
+          liveNext += buffer.duration;
+          liveSources.push(src);
+          src.onended = () => { liveSources = liveSources.filter((item) => item !== src); };
+        }
+      }
+      if (liveRunning) liveStatus.textContent = "STREAM ENDED // restart to listen";
+      liveSession = "";
+    } catch (err) {
+      if (err.name !== "AbortError") {
+        liveStatus.textContent = `ERROR // ${err.message}`;
+        toast(err.message || "Live audio failed", "error");
+      }
+    } finally {
+      if (liveAbort === controller) liveAbort = null;
+      if (!controller.signal.aborted && liveCtx === ctx) {
+        try { ctx.close(); } catch {}
+        liveCtx = null;
+        liveGainNode = null;
+      }
+      setLiveRunning(false);
+    }
+  }
+
+  livePlay.addEventListener("click", startLive);
+  liveStopBtn.addEventListener("click", stopLive);
+  liveVolume.addEventListener("input", () => {
+    if (liveGainNode) {
+      try { liveGainNode.gain.value = Number(liveVolume.value) || 0.8; } catch {}
+    }
+  });
+  liveMode.addEventListener("change", () => {
+    if (["wfm", "nfm"].includes(liveMode.value)) liveRate.value = liveMode.value === "wfm" ? "2.4" : "1.024";
+  });
 
   let sweepAbort = null;
   let sweepHistory = [];
@@ -388,6 +667,8 @@ export async function render(root, params = {}) {
         start_mhz: String(start), end_mhz: String(end), bin_khz: String(Number(binInput.value) || 100),
         lna: String(Number(lnaInput.value) || 32), vga: String(Number(vgaInput.value) || 40),
         amp: ampInput.querySelector("input")?.checked ? "true" : "false",
+        backend: sweepBackend.value, gain: String(Number(sweepGain.value) || 40),
+        ppm: String(Number(sweepPpm.value) || 0),
       });
       const res = await fetch(`/api/sdr/sweep?${qs}`, {
         credentials: "same-origin", signal: controller.signal,
@@ -457,7 +738,13 @@ export async function render(root, params = {}) {
   const captureBody = h("div", { class: "col" });
   const capFreq = input({ type: "number", value: paramFreq ? String(paramFreq) : "146.520", step: "0.0001", min: "0.1", max: "6000" });
   const capSeconds = input({ type: "number", value: "5", step: "0.5", min: "0.2", max: "180" });
-  const capRate = input({ type: "number", value: "2.4", step: "0.1", min: "2", max: "20" });
+  const capRate = input({ type: "number", value: "2.4", step: "0.05", min: "0.9", max: "3.2" });
+  const capBackend = select([
+    { value: "auto", label: "Auto" },
+    { value: "hackrf", label: "HackRF (2–20 Msps)" },
+    { value: "rtl", label: "RTL-SDR (0.9–3.2 Msps)" },
+    { value: "rtl_tcp", label: "Network rtl_tcp" },
+  ], String(store.settings?.sdr_backend || "auto"));
   const capDemod = select(DEMODS, DEMODS.some((d) => d.value === paramMode) ? paramMode : "nfm");
   const capName = input({ type: "text", placeholder: "optional label", maxlength: "120" });
   const capKeepIq = checkbox("Keep IQ file (large; enables TX replay)", false);
@@ -493,7 +780,8 @@ export async function render(root, params = {}) {
   capGrid.append(
     field("FREQUENCY (MHz)", capFreq),
     field("DURATION (s)", capSeconds),
-    field("SAMPLE RATE (Msps)", capRate, "2–20 Msps; 2.4 is a safe default"),
+    field("BACKEND", capBackend),
+    field("SAMPLE RATE (Msps)", capRate, "HackRF 2–20; RTL-SDR 0.9–3.2"),
     field("DEMOD", capDemod),
     field("LABEL", capName),
     h("div", { class: "wide" }, capKeepIq),
@@ -507,10 +795,178 @@ export async function render(root, params = {}) {
   }
   topGrid.appendChild(panel({
     title: "Capture & demodulate",
-    sub: "hackrf_transfer → local DSP",
+    sub: "HackRF / RTL-SDR / rtl_tcp → local DSP",
     icon: "radio",
     body: captureBody,
   }));
+
+  /* --------------------------------------------------------- network SDR */
+  const netHost = input({ type: "text", value: network.host || "", placeholder: "192.168.1.50" });
+  const netPort = input({ type: "number", value: String(network.port || 1234), min: "1", max: "65535" });
+  const netStatus = h("div", { class: "tiny muted", text: network.configured ? "Configured; press PROBE to verify." : "Not configured." });
+  const netProbe = btn("PROBE", { size: "sm", icon: "search", onClick: async () => {
+    netStatus.textContent = "Probing…";
+    try {
+      const out = await api.get(`/api/sdr/network/probe?host=${encodeURIComponent(netHost.value.trim())}&port=${Number(netPort.value) || 1234}`);
+      netStatus.className = `tiny ${out.ok ? "muted" : "danger-text"}`;
+      netStatus.textContent = out.ok ? `OK · RTL0 tuner ${out.tuner_type} · ${out.gain_count} gain steps` : out.error || "No rtl_tcp server answered";
+    } catch (err) { netStatus.className = "tiny danger-text"; netStatus.textContent = err.message; }
+  } });
+  const netSave = btn("SAVE AS DEFAULT", { size: "sm", icon: "check", onClick: async () => {
+    try {
+      await store.saveSettings({ sdr_rtl_tcp_host: netHost.value.trim(), sdr_rtl_tcp_port: Number(netPort.value) || 1234 });
+      toast("rtl_tcp address saved");
+    } catch (err) { toast(err.message, "error"); }
+  } });
+  const netBody = h("div", { class: "col" },
+    h("div", { class: "form-grid" }, field("HOST", netHost), field("PORT", netPort)),
+    h("div", { class: "row wrap mt-8" }, netProbe, netSave),
+    netStatus,
+    h("div", { class: "tiny muted mt-6", text: "Connect DarkSec to a Raspberry Pi/uConsole or another host running rtl_tcp. Select “Network rtl_tcp” in Live audio or Capture after probing." }),
+  );
+  topGrid.appendChild(panel({ title: "Network SDR", sub: "rtl_tcp client", icon: "network", body: netBody }));
+
+  const srvPort = input({ type: "number", value: String(store.settings?.sdr_server_port || 1234), min: "1", max: "65535" });
+  const srvBind = input({ type: "text", value: store.settings?.sdr_server_bind || "0.0.0.0" });
+  const srvFreq = input({ type: "number", value: "100.0", step: "0.0001", min: "0.1", max: "6000" });
+  const srvRate = input({ type: "number", value: "2.4", step: "0.05", min: "0.9", max: "3.2" });
+  const srvGain = input({ type: "number", value: String(store.settings?.sdr_rtl_gain ?? 40), min: "0", max: "62" });
+  const srvStatus = h("div", { class: "tiny muted", text: "Not running." });
+  const srvStart = btn("SHARE RTL-SDR", { size: "sm", tone: "primary", icon: "play", onClick: async () => {
+    try {
+      const out = await api.post("/api/sdr/server/start", {
+        bind: srvBind.value.trim() || "0.0.0.0", port: Number(srvPort.value) || 1234,
+        freq_hz: Number(srvFreq.value) * 1e6, rate: Number(srvRate.value) * 1e6,
+        gain: Number(srvGain.value) || 40, ppm: Number(store.settings?.sdr_ppm) || 0,
+        bias: !!store.settings?.sdr_bias_tee,
+      });
+      paintServer(out);
+    } catch (err) { toast(err.message, "error"); }
+  } });
+  const srvStop = btn("STOP", { size: "sm", tone: "danger", icon: "stop", onClick: async () => {
+    try { paintServer(await api.post("/api/sdr/server/stop", {})); } catch (err) { toast(err.message, "error"); }
+  } });
+  const srvBody = h("div", { class: "col" },
+    h("div", { class: "form-grid" },
+      field("BIND", srvBind, "Use the LAN IP to limit exposure"),
+      field("PORT", srvPort),
+      field("FREQ (MHz)", srvFreq),
+      field("RATE (Msps)", srvRate),
+      field("GAIN", srvGain)),
+    h("div", { class: "row wrap mt-8" }, srvStart, srvStop),
+    srvStatus,
+    h("div", { class: "tiny muted mt-6", text: "rtl_tcp has no authentication. Use only a trusted private LAN. Another DarkSec instance can connect from the Network SDR panel." }),
+  );
+  topGrid.appendChild(panel({ title: "Share this SDR", sub: "rtl_tcp server", icon: "upload", body: srvBody }));
+
+  function paintServer(out) {
+    srvStatus.className = `tiny ${out?.running ? "muted" : "muted"}`;
+    if (!out?.running) { srvStatus.textContent = "Not running."; return; }
+    srvStatus.replaceChildren(
+      h("span", { text: `RUNNING · ${out.bind}:${out.port}` }),
+      ...(out.urls || []).map((url) => h("div", { class: "row between tiny mono mt-4" },
+        h("span", { text: url }),
+        btn("COPY", { size: "sm", tone: "ghost", onClick: () => navigator.clipboard?.writeText(url).then(() => toast("Copied")) }))),
+    );
+  }
+  api.get("/api/sdr/server").then(paintServer).catch(() => {});
+
+  /* --------------------------------------------------------------- WebSDR */
+  const wsFreq = input({ type: "number", value: "7.100", step: "0.0001", min: "0.1", max: "6000" });
+  const wsMode = select([
+    { value: "lsb", label: "LSB" }, { value: "usb", label: "USB" },
+    { value: "am", label: "AM" }, { value: "nfm", label: "NFM" }, { value: "wfm", label: "WFM" },
+  ], "lsb");
+  const wsBand = select([
+    { value: "ALL", label: "All bands" }, { value: "HF", label: "HF" },
+    { value: "VHF", label: "VHF" }, { value: "UHF", label: "UHF" },
+  ], "ALL");
+  const wsSearch = input({ type: "search", placeholder: "Filter receiver, location or host…" });
+  const wsList = h("div", { class: "col gap-6" }, loading("LOADING PUBLIC RECEIVERS"));
+  const wsStatus = h("div", { class: "tiny muted", text: "Public WebSDR/KiwiSDR directory" });
+  const wsCustom = input({ type: "text", placeholder: "https://receiver.example:8073/" });
+  let wsData = { receivers: [] };
+
+  async function openWebsdr(rec) {
+    const freq = Number(wsFreq.value);
+    if (!(freq >= 0.1 && freq <= 6000)) { toast("Enter a frequency within 0.1–6000 MHz", "warn"); return; }
+    const win = window.open("about:blank", "_blank");
+    try {
+      const out = await api.get(`/api/sdr/websdr/tune?url=${encodeURIComponent(rec.url)}&freq_hz=${encodeURIComponent(freq * 1e6)}&mode=${encodeURIComponent(wsMode.value)}`);
+      if (win) {
+        try { win.opener = null; } catch {}
+        win.location.href = out.url;
+      } else {
+        window.open(out.url, "_blank", "noopener,noreferrer");
+      }
+    } catch (err) {
+      try { win?.close(); } catch {}
+      toast(err.message || "Could not build receiver URL", "error");
+    }
+  }
+
+  function paintWebsdr(out) {
+    wsData = out || { receivers: [] };
+    const q = wsSearch.value.trim().toLowerCase();
+    const band = wsBand.value;
+    const items = (wsData.receivers || []).filter((r) => {
+      if (band !== "ALL" && r.band !== band) return false;
+      if (!q) return true;
+      return `${r.name} ${r.loc} ${r.url}`.toLowerCase().includes(q);
+    }).slice(0, 80);
+    wsStatus.className = "tiny muted";
+    wsStatus.textContent = `${wsData.count ?? items.length} receiver(s) · ${wsData.source === "curated" ? "curated fallback" : "KiwiSDR mirror"}${wsData.stale ? " · cached" : ""}${wsData.error ? ` · ${wsData.error}` : ""}`;
+    wsList.replaceChildren();
+    if (!items.length) {
+      wsList.appendChild(emptyState("No receivers match", "Clear the filter, change band, or refresh the directory.", "radio"));
+      return;
+    }
+    for (const rec of items) {
+      const users = rec.users != null ? `${rec.users}/${rec.users_max ?? "?"} users` : "users n/a";
+      wsList.appendChild(h("div", { class: "list-item" },
+        h("div", { class: "li-main" },
+          h("div", { class: "li-title truncate", text: rec.name }),
+          h("div", { class: "li-sub", text: `${rec.loc || "unknown"} · ${rec.band} · ${users}${rec.ext_api === 0 ? " · web only" : ""}` }),
+          h("div", { class: "li-sub mono truncate", text: rec.url, title: rec.url })),
+        badge(rec.kind === "kiwi" ? "KIWI" : "WEBSDR", rec.kind === "kiwi" ? "cyan" : "green"),
+        btn("LISTEN", { size: "sm", tone: "primary", icon: "play", onClick: () => openWebsdr(rec) }),
+        btn("COPY", { size: "sm", tone: "ghost", onClick: async () => {
+          try {
+            const out = await api.get(`/api/sdr/websdr/tune?url=${encodeURIComponent(rec.url)}&freq_hz=${encodeURIComponent(Number(wsFreq.value) * 1e6)}&mode=${encodeURIComponent(wsMode.value)}`);
+            await navigator.clipboard?.writeText(out.url); toast("Tuned URL copied");
+          } catch (err) { toast(err.message, "error"); }
+        } })));
+    }
+  }
+
+  async function loadWebsdr(refresh = false) {
+    wsStatus.textContent = refresh ? "Refreshing public directory…" : "Loading public receivers…";
+    try {
+      const out = await api.get(`/api/sdr/websdr?refresh=${refresh ? "true" : "false"}`);
+      paintWebsdr(out);
+    } catch (err) {
+      wsStatus.className = "tiny danger-text";
+      wsStatus.textContent = err.message || "WebSDR directory unavailable";
+    }
+  }
+  wsSearch.addEventListener("input", () => paintWebsdr(wsData));
+  wsBand.addEventListener("change", () => paintWebsdr(wsData));
+  const wsBody = h("div", { class: "col" },
+    h("div", { class: "form-grid" },
+      field("FREQUENCY (MHz)", wsFreq),
+      field("MODE", wsMode),
+      field("BAND", wsBand),
+      field("FILTER", wsSearch)),
+    h("div", { class: "row wrap mt-8" },
+      btn("REFRESH DIRECTORY", { size: "sm", icon: "refresh", onClick: () => loadWebsdr(true) }),
+      h("div", { class: "row gap-6 grow" }, h("div", { class: "grow" }, wsCustom),
+        btn("OPEN URL", { size: "sm", icon: "upload", onClick: () => openWebsdr({ url: wsCustom.value.trim() }) }))),
+    wsStatus,
+    h("div", { class: "scroll-y mt-8", style: { maxHeight: "46vh" } }, wsList),
+    h("div", { class: "tiny muted mt-8", text: "LISTEN opens the receiver's own web interface tuned to this frequency. DarkSec does not proxy or record public receivers; respect operator limits and terms." }),
+  );
+  root.appendChild(panel({ title: "WebSDR / remote receivers", sub: "No local radio required", icon: "globe", cls: "mt-14", body: wsBody }));
+  loadWebsdr(false);
 
   let pollTimer = null;
   let activeJob = null;
@@ -526,6 +982,7 @@ export async function render(root, params = {}) {
       ["Rate", job.rate ? `${fmt.num(Number(job.rate) / 1e6, 2)} Msps` : "—"],
       ["Duration", job.seconds != null ? `${fmt.num(job.seconds, 1)} s` : "—"],
       ["Mode", String(job.demod || job.kind || "—").toUpperCase()],
+      ["Backend", backendName(job.backend || "hackrf")],
       ["Job ID", job.id],
     ]));
     const pct = Math.round((Number(job.progress) || 0) * 100);
@@ -574,6 +1031,8 @@ export async function render(root, params = {}) {
         amp: !!ampInput.querySelector("input")?.checked,
         keep_iq: !!capKeepIq.querySelector("input")?.checked,
         name: capName.value.trim(),
+        backend: capBackend.value,
+        host: netHost.value.trim(), port: Number(netPort.value) || 1234,
       });
       showJob(job);
       clearInterval(pollTimer);
@@ -632,8 +1091,9 @@ export async function render(root, params = {}) {
       const wrap = h("div", { class: "rec-item" });
       const info = h("div", { class: "grow" });
       info.appendChild(h("div", { class: "rec-name", text: rec.name || `Recording #${rec.id}` }));
+      const meta = noteFields(rec.note);
       info.appendChild(h("div", { class: "rec-sub",
-        text: `${mhz(rec.freq_hz)} · ${String(rec.kind || "").toUpperCase()} · ${fmt.bytes(rec.size || 0)} · ${fmt.ago(rec.ts)}` }));
+        text: `${mhz(rec.freq_hz)} · ${String(rec.kind || "").toUpperCase()} · ${backendName(meta.backend || "hackrf")} · ${fmt.bytes(rec.size || 0)} · ${fmt.ago(rec.ts)}` }));
       wrap.appendChild(info);
       if (rec.audio_path) {
         const audio = h("audio", { controls: true, preload: "none", src: `/api/sdr/recordings/${rec.id}/audio` });
@@ -648,8 +1108,11 @@ export async function render(root, params = {}) {
       if (rec.iq_path) {
         wrap.appendChild(btn("IQ", { size: "sm", tone: "ghost", icon: "download", title: "Download IQ",
           onClick: () => { location.href = `/api/sdr/recordings/${rec.id}/iq?download=true`; } }));
-        wrap.appendChild(btn("TX", { size: "sm", tone: "danger", title: "Replay this IQ",
-          onClick: () => openTx(rec) }));
+        const fmt = noteFields(rec.note).format;
+        if (!fmt || fmt === "i8") {
+          wrap.appendChild(btn("TX", { size: "sm", tone: "danger", title: "Replay this IQ",
+            onClick: () => openTx(rec) }));
+        }
       }
       wrap.appendChild(btn("DEL", { size: "sm", tone: "ghost", onClick: async () => {
         const ok = await confirmDialog({
@@ -797,7 +1260,9 @@ export async function render(root, params = {}) {
   async function rescan(force = false) {
     try {
       const d = await api.get(`/api/sdr/devices?force=${force ? "true" : "false"}`);
-      toast(d.hackrf?.connected ? "HackRF detected" : "No HackRF detected", d.hackrf?.connected ? "" : "warn");
+      const found = d.active_backend && d.active_backend !== "none";
+      toast(found ? `${backendName(d.active_backend)} detected` : "No local SDR detected",
+        found ? "" : "warn");
       render(root, params);
     } catch (err) { toast(err.message, "error"); }
   }

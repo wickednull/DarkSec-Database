@@ -813,6 +813,9 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 .waterfall-shell { height: 120px; border: 1px solid var(--line); border-top: 0; background: #020604; overflow: hidden; }
 .waterfall-shell canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
 .sdr-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 9px; align-items: end; }
+.sdr-level { height: 10px; border: 1px solid var(--line); background: #020604; margin-top: 8px; overflow: hidden; }
+.sdr-level i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #5dff9a, #ffd166 70%, #ff5c5c); transition: width .08s linear; }
+.scroll-y { overflow-y: auto; }
 
 /* SDR quick presets — compact, scannable, no clutter */
 .sdr-presets-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
