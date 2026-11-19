@@ -250,7 +250,13 @@ export async function render(root, params = {}) {
         .map((a) => a.error)
         .filter(Boolean).join("; ")
       || "archive cannot be opened";
-    root.appendChild(alertStrip(`Configured MBTiles source is not usable — ${why}. Check Settings → Offline maps.`, "red"));
+    const found = (mbtilesInfo.suggestions || []).find((a) => a.path);
+    const hint = found
+      ? ` Found “${found.file || found.name}” on a mounted drive at ${found.path} — use FIND ON USB in Settings → Offline maps.`
+      : "";
+    root.appendChild(alertStrip(`Configured MBTiles source is not usable — ${why}.${hint}`, "red"));
+  } else if (mbtilesInfo.configured && mbtilesInfo.resolved && mbtilesInfo.resolved_path) {
+    root.appendChild(alertStrip(`MBTiles drive moved; using ${mbtilesInfo.resolved_path}. Open Settings → Offline maps to save the new path.`, "amber"));
   }
 
   const layout = h("div", { class: "map-layout mt-14" });

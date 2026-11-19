@@ -343,10 +343,31 @@ multi-gigabyte regional map does not have to be copied into the app folder:
 1. Plug in the drive and wait for it to mount.
 2. Open **Settings → Offline maps → MBTiles path**.
 3. Press **FIND ON USB**. The scanner looks in the data folder, `maps/`, your
-   home folder and common mount points (`/media`, `/run/media`, `/mnt`,
-   `/Volumes`, and `D:`–`Z:` on Windows).
+   home folder and every real mount point from the kernel (including
+   `/media`, `/run/media`, `/mnt`, `/Volumes`, GVFS mounts and drives mounted
+   under your home folder), and on Windows `D:`–`Z:`.
 4. Pick an archive, or point the path at a folder containing several
-   `.mbtiles` files. Press **CHECK** to verify it.
+   `.mbtiles` files — nested up to three subfolders. Press **CHECK** to verify
+   it. **DIAGNOSE** produces a copyable report (process user, mounts,
+   permissions, archive metadata and a sample tile read) if the drive is not
+   visible.
+
+Archives whose extension is `.pbf` or `.mvt` but whose contents begin with
+`SQLite format 3` are treated as MBTiles too, because some tools export vector
+packs under those names.
+
+A folder of **loose vector tiles** in `{z}/{x}/{y}.pbf` (or `.mvt`) form is
+also accepted, either directly or under a `tiles/` subfolder. These render in
+the 3D GL map and are served through the same vector tile endpoint as an
+archive. Loose `{z}/{x}/{y}.png|jpg|webp` trees work as raster basemaps on both
+renderers. Details are probed from the tree: zoom range, layer names, format
+and approximate bounds, so the map opens over the pack instead of an empty
+area.
+
+If the drive is re-plugged under a different label or user path, DarkSec looks
+for an archive or tile folder with the same name on the current mounts and
+uses it automatically; the map shows where it found it. Save the new path in
+Settings to make it permanent.
 
 Raster PNG/JPEG/WebP archives are supported on both map renderers, including
 gzip-compressed tile blobs and both the standard MBTiles TMS row order and

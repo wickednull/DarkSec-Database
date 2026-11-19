@@ -387,3 +387,245 @@ def test_mbtiles_bounds_are_derived_from_tiles(tmp_path):
     assert -101 < west < -98
     assert 38 < south < 40
     assert west < east and south < north
+
+
+def test_archives_are_found_in_deep_usb_subfolders(tmp_path):
+    from darksec import mbtiles
+
+    archive = make_mbtiles(tmp_path / "maps" / "osm" / "north" / "region.mbtiles",
+                           tiles={(6, 1, 1): PNG})
+    mbtiles.invalidate()
+    found = mbtiles.resolve_sources(str(tmp_path))
+    assert archive in found
+    assert mbtiles.lookup_tile(6, 1, 1, raw=str(tmp_path))
+
+
+def test_missing_usb_path_is_resolved_by_archive_name(tmp_path, monkeypatch):
+    from darksec import mbtiles
+
+    archive = make_mbtiles(tmp_path / "PNY512" / "region.mbtiles",
+                           tiles={(7, 3, 5): PNG})
+    monkeypatch.setattr(mbtiles, "search_roots", lambda: [tmp_path])
+    mbtiles.invalidate()
+    configured = "/media/admin/PNY512_9/region.mbtiles"
+
+    found = mbtiles.resolve_sources(configured)
+    assert found == [archive]
+    source = mbtiles.describe_source(configured)
+    assert source["usable"] is True
+    assert source["resolved"] is True
+    assert source["resolved_path"] == str(archive)
+
+
+def test_empty_archive_reports_a_clear_error(tmp_path):
+    from darksec import mbtiles
+
+    archive = make_mbtiles(tmp_path / "empty.mbtiles", tiles={})
+    info = mbtiles.describe_path(str(archive))
+    assert info["ok"] is False
+    assert info["usable"] is False
+    assert "no tile rows" in (info["error"] or "")
+
+
+def test_mislabelled_png_archive_with_vector_bytes_is_detected(tmp_path):
+    from darksec import mbtiles
+
+    vector = bytes([0x1a, 0x05, 0x0a, 0x03]) + b"osm"
+    archive = make_mbtiles(tmp_path / "mislabelled.mbtiles", fmt="png",
+                           tiles={(8, 2, 3): vector})
+    info = mbtiles.describe_path(str(archive))
+    assert info["ok"] is True
+    assert info["vector"] is True
+    assert info["format"] == "pbf"
+
+
+def test_diagnose_reports_mounts_and_sample_tile(tmp_path, monkeypatch, client):
+    from darksec import mbtiles
+
+    archive = make_mbtiles(tmp_path / "usb" / "region.mbtiles",
+                           tiles={(8, 57, 97): PNG})
+    monkeypatch.setattr(mbtiles, "search_roots", lambda: [tmp_path])
+    monkeypatch.setattr(mbtiles, "mount_entries", lambda: [{
+        "path": str(tmp_path), "device": "/dev/sdb1", "fstype": "exfat",
+        "exists": True, "readable": True,
+    }])
+    mbtiles.invalidate()
+    r = client.get(f"/api/map/mbtiles/diagnose?path={archive}")
+    assert r.status_code == 200
+    out = r.json()
+    assert out["ok"] is True
+    assert out["samples"] and out["samples"][0]["ok"] is True
+    assert "mount points visible" in out["report"]
+    assert "READY" in out["report"]
+
+
+VECTOR_TILE = bytes([0x1a, 0x05, 0x0a, 0x03]) + b"osm"
+
+
+def make_loose_tree(root: Path, *, ext: str, data: bytes, z: int, x: int, y: int,
+                    nested: str = "") -> Path:
+    folder = root / nested / str(z) / str(x) if nested else root / str(z) / str(x)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{y}{ext}").write_bytes(data)
+    return root
+
+
+def test_loose_pbf_tile_tree_is_a_vector_source(tmp_path, client):
+    from darksec import mbtiles
+
+    root = make_loose_tree(tmp_path / "USBVEC", ext=".pbf", data=VECTOR_TILE,
+                           z=8, x=57, y=97, nested="tiles")
+    mbtiles.invalidate()
+
+    info = mbtiles.describe_path(str(root))
+    assert info["ok"] is True
+    assert info["vector"] is True
+    assert info["raster"] is False
+    assert info["format"] == "pbf"
+    assert info["minzoom"] == 8 and info["maxzoom"] == 8
+    assert info["vector_layers"] == ["osm"]
+    assert info["bounds"][0] < -99 < info["bounds"][2]
+    assert mbtiles.lookup_vector_tile(8, 57, 97, raw=str(root))[0] == VECTOR_TILE
+    assert mbtiles.lookup_tile(8, 57, 97, raw=str(root)) is None
+
+    assert client.put("/api/settings", json={"mbtiles_path": str(root)}).status_code == 200
+    layers = client.get("/api/map/layers").json()["mbtiles"]
+    assert layers["vector"] is True and layers["usable"] is True
+    style = client.get("/api/map/vector/style")
+    assert style.status_code == 200
+    tile = client.get("/api/map/vector/tiles/8/57/97.pbf")
+    assert tile.status_code == 200
+    assert tile.content == VECTOR_TILE
+    assert tile.headers["content-type"].startswith("application/vnd.mapbox-vector-tile")
+
+    client.put("/api/settings", json={"mbtiles_path": ""})
+    mbtiles.invalidate()
+
+
+def test_loose_raster_tile_tree_is_a_raster_source(tmp_path, client):
+    from darksec import mbtiles
+
+    root = make_loose_tree(tmp_path / "USBRAS", ext=".png", data=PNG, z=8, x=57, y=97)
+    mbtiles.invalidate()
+    info = mbtiles.describe_path(str(root))
+    assert info["ok"] is True and info["raster"] is True and info["format"] == "png"
+    hit = mbtiles.lookup_tile(8, 57, 97, raw=str(root))
+    assert hit and hit[0] == PNG
+    assert mbtiles.lookup_tile_ancestor(10, 0, 0, raw=str(root)) is None
+
+    assert client.put("/api/settings", json={"mbtiles_path": str(root)}).status_code == 200
+    r = client.get("/api/map/tiles/8/57/97.png")
+    assert r.status_code == 200 and r.content == PNG
+    assert r.headers.get("x-tile-source")
+
+    client.put("/api/settings", json={"mbtiles_path": ""})
+    mbtiles.invalidate()
+
+
+def test_gzipped_loose_pbf_tile_is_decompressed(tmp_path):
+    from darksec import mbtiles
+
+    root = make_loose_tree(tmp_path / "USBZIP", ext=".pbf",
+                           data=gzip.compress(VECTOR_TILE), z=5, x=3, y=4)
+    mbtiles.invalidate()
+    hit = mbtiles.lookup_vector_tile(5, 3, 4, raw=str(root))
+    assert hit and hit[0] == VECTOR_TILE
+
+
+def test_pbf_named_sqlite_archive_is_accepted(tmp_path, client):
+    from darksec import mbtiles
+
+    archive = make_mbtiles(tmp_path / "vector-pack.pbf", fmt="pbf",
+                           tiles={(5, 3, 4): VECTOR_TILE})
+    mbtiles.invalidate()
+    info = mbtiles.describe_path(str(archive))
+    assert info["ok"] is True
+    assert info["vector"] is True
+    assert mbtiles.lookup_vector_tile(5, 3, 4, raw=str(archive))[0] == VECTOR_TILE
+    assert client.put("/api/settings", json={"mbtiles_path": str(archive)}).status_code == 200
+    assert client.get("/api/map/layers").json()["mbtiles"]["vector"] is True
+    client.put("/api/settings", json={"mbtiles_path": ""})
+    mbtiles.invalidate()
+
+
+def test_scan_finds_loose_tile_folders(tmp_path, monkeypatch):
+    from darksec import mbtiles
+
+    root = make_loose_tree(tmp_path / "USBSCAN", ext=".pbf", data=VECTOR_TILE,
+                           z=6, x=1, y=2, nested="tiles")
+    monkeypatch.setattr(mbtiles, "search_roots", lambda: [root.parent])
+    mbtiles.invalidate()
+    items = mbtiles.scan(extra_roots=[root.parent], budget=5.0)
+    assert any(item.get("path") in (str(root), str(root / "tiles"))
+               and item.get("vector") for item in items)
+    mbtiles.invalidate()
+
+
+def test_legacy_mbtiles_1_map_images_schema(tmp_path):
+    from darksec import mbtiles
+
+    archive = tmp_path / "legacy.mbtiles"
+    conn = sqlite3.connect(archive)
+    conn.executescript(
+        "CREATE TABLE metadata (name TEXT, value TEXT);"
+        "CREATE TABLE map (zoom_level INTEGER, tile_column INTEGER, "
+        "tile_row INTEGER, tile_id TEXT);"
+        "CREATE TABLE images (tile_id TEXT, tile_data BLOB);"
+    )
+    conn.executemany("INSERT INTO metadata VALUES (?,?)", [
+        ("name", "Legacy pack"), ("format", "png"), ("minzoom", "8"), ("maxzoom", "8"),
+    ])
+    conn.execute("INSERT INTO map VALUES (8, 57, 158, 't1')")
+    conn.execute("INSERT INTO images VALUES ('t1', ?)", (PNG,))
+    conn.commit()
+    conn.close()
+
+    mbtiles.invalidate()
+    info = mbtiles.describe_path(str(archive))
+    assert info["ok"] is True
+    assert info["legacy"] is True
+    assert info["raster"] is True
+    assert info["format"] == "png"
+    # TMS row 158 is XYZ row 97 at z8.
+    assert mbtiles.lookup_tile(8, 57, 97, raw=str(archive))[0] == PNG
+
+
+def test_world_metadata_bounds_are_replaced_by_real_tile_bounds(tmp_path):
+    from darksec import mbtiles
+
+    archive = make_mbtiles(
+        tmp_path / "regional-bad-bounds.mbtiles",
+        tiles={(8, 57, 97): PNG},
+        extra_meta={"bounds": "-180,-85.0511,180,85.0511"},
+    )
+    mbtiles.invalidate()
+    info = mbtiles.describe_path(str(archive))
+    west, south, east, north = info["bounds"]
+    assert -101 < west < -98
+    assert 38 < south < 41
+    assert east < -97 and north < 42
+
+
+def test_loose_tree_under_a_mount_root_is_not_mistaken_for_an_archive(tmp_path, monkeypatch):
+    from darksec import mbtiles
+
+    root = make_loose_tree(tmp_path / "media" / "USB", ext=".pbf",
+                           data=VECTOR_TILE, z=8, x=57, y=97)
+    monkeypatch.setattr(mbtiles, "search_roots", lambda: [tmp_path])
+    mbtiles.invalidate()
+    assert mbtiles.resolve_sources(str(root)) == []
+    source = mbtiles.describe_source(str(root))
+    assert source["usable"] is True and source["vector"] is True
+    assert source["count"] == 1
+    assert source["archives"][0]["loose"] is True
+
+
+def test_existing_empty_folder_does_not_resolve_to_itself(tmp_path, monkeypatch):
+    from darksec import mbtiles
+
+    empty = tmp_path / "not-maps-yet"
+    empty.mkdir()
+    monkeypatch.setattr(mbtiles, "search_roots", lambda: [tmp_path])
+    mbtiles.invalidate()
+    assert mbtiles.resolve_sources(str(empty)) == []
+    assert mbtiles.describe_path(str(empty))["ok"] is False

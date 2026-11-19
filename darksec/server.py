@@ -3895,13 +3895,27 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 value = v.rstrip("/")
             if key == "mbtiles_path" and value:
                 # Operators point this at a single archive or at a USB folder
-                # holding several archives; both must be accepted.
-                if not mbtiles.valid_source_path(str(value)):
+                # holding several archives; both must be accepted. A path that
+                # is temporarily absent (drive not mounted, label changed) is
+                # still saved so it can be diagnosed and re-resolved later;
+                # only a clearly relative path is rejected.
+                text = str(value).strip()
+                expanded = Path(text).expanduser()
+                if not expanded.is_absolute():
                     raise HTTPException(
                         status_code=400,
-                        detail="mbtiles_path must be an .mbtiles file or a folder containing .mbtiles archives",
+                        detail="mbtiles_path must be an absolute path, e.g. /media/USER/DRIVE/maps.mbtiles",
                     )
-                value = str(Path(str(value)).expanduser())
+                try:
+                    exists = expanded.exists()
+                except OSError:
+                    exists = False
+                if exists and not expanded.is_dir() and expanded.suffix.lower() not in (".mbtiles", ".pbf", ".mvt"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="mbtiles_path must be an .mbtiles archive, a .pbf/.mvt archive or a folder of map tiles",
+                    )
+                value = str(expanded)
             if key == "map_cache_path":
                 from . import tilecache as _tilecache
                 text = str(value or "").strip()
@@ -5243,6 +5257,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 "vector": mb["vector"],
                 "count": mb["count"],
                 "error": mb["error"],
+                "resolved": mb.get("resolved", False),
+                "resolved_path": mb.get("resolved_path"),
+                "suggestions": mb.get("suggestions", [])[:5],
                 "revision": mbtiles.revision(),
                 "layers": sorted({
                     str(layer)
@@ -5351,6 +5368,11 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         if str(path or "").strip():
             return mbtiles.describe_path(path)
         return mbtiles.describe_source()
+
+    @app.get("/api/map/mbtiles/diagnose")
+    def map_mbtiles_diagnose(path: str = ""):
+        """Copyable report: mounts, permissions, archive open, sample tile."""
+        return mbtiles.diagnose(path if str(path or "").strip() else None)
 
     def _mbtiles_tile(z: int, x: int, y: int) -> bytes | None:
         """Read from the configured archive or USB folder of archives.

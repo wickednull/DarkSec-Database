@@ -197,7 +197,8 @@ export async function render(root, params = {}) {
   let movingTimer = null, movingPollTimer = null;
   let mapStyle = null;
   const mbInfo = mapLayers?.mbtiles || {};
-  if (mbInfo.vector) {
+  const mbUsable = !mbInfo.configured || mbInfo.usable;
+  if (mbInfo.vector && mbUsable) {
     try {
       mapStyle = await vectorStyle(mbInfo.revision || "");
     } catch (err) {
@@ -225,7 +226,7 @@ export async function render(root, params = {}) {
     ],
   }));
   const vectorSchema = mapStyle?.metadata?.["darksec:schema"] || "openmaptiles";
-  const vectorNote = mbInfo.vector
+  const vectorNote = mbInfo.vector && mbUsable
     ? `Offline vector basemap: ${(mbInfo.archives || []).map((a) => a.name).filter(Boolean).slice(0, 2).join(", ") || "configured archive"} · ` +
       (vectorSchema === "generic"
         ? `generic schema (layers: ${(mbInfo.layers || []).join(", ") || "unknown"}) · `
@@ -238,6 +239,20 @@ export async function render(root, params = {}) {
     mapErrorBox.textContent = message;
   }
   root.appendChild(alertStrip(`${vectorNote}Local/offline basemap + cached intel. DEM ${demStatus?.available ? 'available (' + (demStatus.encoding||'terrarium') + ')' : 'not configured/cached'} · overlays cached via operator refresh (online required to fetch). Cables auto-populate from a cached public dataset on feed refresh (online first time; attribution required). CCTV can load nearby OSM surveillance locations via feed refresh when operator position is set. Maritime/AIS works with a configured GeoJSON/JSON source or local file (fielddata/maps/ais.geojson).`, demStatus?.available ? "cyan" : "amber"));
+
+  if (mbInfo.configured && !mbInfo.usable) {
+    const why = mbInfo.error
+      || (mbInfo.archives || []).map((a) => a.error).filter(Boolean).join("; ")
+      || "archive cannot be opened";
+    const found = (mbInfo.suggestions || []).find((a) => a.path);
+    const hint = found
+      ? ` Found “${found.file || found.name}” at ${found.path} — use FIND ON USB in Settings → Offline maps.`
+      : "";
+    root.appendChild(alertStrip(`Configured MBTiles source is not usable — ${why}.${hint}`, "red"));
+  } else if (mbInfo.configured && mbInfo.resolved && mbInfo.resolved_path) {
+    root.appendChild(alertStrip(`MBTiles drive moved; using ${mbInfo.resolved_path}. Save the new path in Settings → Offline maps.`, "amber"));
+  }
+
 
   root.appendChild(mapErrorBox);
   const layout = h("div", { class: "map-layout mt-14" });
@@ -333,7 +348,20 @@ export async function render(root, params = {}) {
     if (Array.isArray(b) && b.length === 4 && b.every((v) => Number.isFinite(Number(v)))) {
       const span = Math.max(Number(b[2]) - Number(b[0]), Number(b[3]) - Number(b[1]));
       if (span > 0 && span < 350) {
-        try { map.fitBounds([[Number(b[0]), Number(b[1])], [Number(b[2]), Number(b[3])]], { padding: 40, duration: 0 }); } catch {}
+        // Fit the pack, but never below its own minzoom: a regional z5+ pack
+        // fitted at z4 would request tiles that do not exist and render black.
+        try {
+          const cam = map.cameraForBounds(
+            [[Number(b[0]), Number(b[1])], [Number(b[2]), Number(b[3])]],
+            { padding: 40 },
+          );
+          if (cam && Number.isFinite(cam.zoom)) {
+            map.jumpTo({
+              center: cam.center,
+              zoom: Math.max(mbMinZoom, Math.min(mbMaxZoom, cam.zoom)),
+            });
+          }
+        } catch {}
       }
     }
   }

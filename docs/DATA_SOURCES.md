@@ -29,17 +29,25 @@ redistributing any data.
 
 ## Offline MBTiles
 
-`Settings → Offline maps` accepts either one `.mbtiles` archive or a folder of
-archives, including a mounted USB drive. Archives are opened read-only and are
+`Settings → Offline maps` accepts one `.mbtiles` archive, a folder of
+archives, or a folder of loose `{z}/{x}/{y}.pbf` vector tiles (also
+`.mvt`), including a mounted USB drive. Archives are opened read-only and are
 never modified. Supported: raster PNG/JPEG/WebP tiles, gzip-compressed tile
 blobs, standard MBTiles TMS row order and non-standard `scheme=xyz` archives.
-Vector PBF/MVT archives (OpenMapTiles/MapTiler and similar) render in the
+An archive may be named `.pbf` or `.mvt` when its contents are a SQLite
+database. Vector PBF/MVT archives and loose vector tile trees render in the
 **3D GL map**; the 2D canvas reports that they need the GL renderer.
+Loose `{z}/{x}/{y}.png|jpg|webp` trees work as raster sources on both maps.
 OpenMapTiles layers get the dedicated offline style; other schemas
 (tilemaker/tippecanoe/custom, for example a single `osm` layer) get a generic
 fill/line/point style so they are not blank. Vector labels use the bundled
-Open Sans glyph pack (place, street, water and generic `name` fields). The **Find on USB** scanner checks removable-media mounts first, then
-the data folder, `maps/` and the home folder.
+Open Sans glyph pack (place, street, water and generic `name` fields). The
+**Find on USB** scanner checks kernel mount points (including GVFS and drives
+mounted under the home folder) first, then the data folder, `maps/` and the
+home folder. **Diagnose** prints a copyable report of mounts, permissions,
+archive metadata and a sample tile read. If a drive returns under a different
+mount path, an archive or tile folder with the same name is re-used
+automatically.
 
 Operators are responsible for the license and attribution of imported map
 imagery.

@@ -2,7 +2,7 @@ import { api, download } from "../api.js";
 import { store } from "../store.js";
 import {
   h, panel, pageHead, btn, field, input, select, checkbox, badge, toast,
-  modal, fmt, loading, emptyState, confirmDialog, icon,
+  modal, fmt, loading, emptyState, confirmDialog, icon, copyText,
 } from "../components.js";
 import {
   kv, progressBar, statusTone, positionConfidence, manualPositionMetadata, gpsPositionMetadata,
@@ -503,10 +503,13 @@ export async function render(root) {
     tileSource.value = opts.some((o) => o.value === current) ? current : opts[0].value;
   }).catch(() => {});
   const mbtiles = input({ value: settings.mbtiles_path || "", placeholder: "/path/to/region.mbtiles or /media/USB/maps" });
-  const mbStatus = h("div", { class: "tiny muted", text: settings.mbtiles_path ? "Checking archive…" : "No local archive configured." });
+  const mbStatusText = h("div", { class: "tiny muted", text: settings.mbtiles_path ? "Checking archive…" : "No local archive configured." });
+  const mbSuggest = h("div", { class: "col gap-4 mt-6" });
+  const mbStatus = h("div", {}, mbStatusText, mbSuggest);
   const mbScan = btn("FIND ON USB", { size: "sm", icon: "search", onClick: () => scanMbtiles() });
   const mbCheck = btn("CHECK", { size: "sm", icon: "check", onClick: () => checkMbtiles() });
-  const mbRow = h("div", { class: "row gap-6 wrap" }, h("div", { class: "grow" }, mbtiles), mbScan, mbCheck);
+  const mbDiag = btn("DIAGNOSE", { size: "sm", icon: "info", onClick: () => diagnoseMbtiles() });
+  const mbRow = h("div", { class: "row gap-6 wrap" }, h("div", { class: "grow" }, mbtiles), mbScan, mbCheck, mbDiag);
   const mapCache = input({ value: settings.map_cache_path || "", placeholder: "/media/USB/DarkSec-Tiles (empty = app folder)" });
   const cacheStatus = h("div", { class: "tiny muted", text: "Checking tile cache…" });
   const cacheScan = btn("FIND USB", { size: "sm", icon: "search", onClick: () => scanCacheLocations() });
@@ -530,7 +533,7 @@ export async function render(root) {
       h("div", { class: "settings-subhead", text: "Tile source" }),
       h("div", { class: "form-grid" },
         field("Tile source", tileSource, "Used for live view and for new offline downloads. Bundled and cached tiles are always preferred."),
-        field("MBTiles path", mbRow, "A single .mbtiles file or a folder of archives, including a mounted USB drive. Raster archives draw on both maps; vector PBF archives draw in the 3D GL map. Read in place, read-only — keep the drive mounted while using it.")),
+        field("MBTiles / tile path", mbRow, "A single .mbtiles archive (or a .pbf/.mvt file that is really an SQLite archive), a folder of archives, or a folder of loose {z}/{x}/{y}.pbf vector tiles — including a mounted USB drive. Raster tiles draw on both maps; vector PBF tiles draw in the 3D GL map. Read in place, read-only — keep the drive mounted while using it.")),
       mbStatus,
       field("Tile cache location", cacheRow, "Where downloaded raster tiles are stored. Point this at a USB folder for large offline packs. Empty uses the app's maps/tiles/cache. Existing tiles can be copied when you switch."),
       cacheStatus,
@@ -1664,7 +1667,7 @@ export async function render(root) {
     if (info.directory) {
       const archives = info.archives || [];
       const usable = archives.filter((a) => a.usable);
-      if (!usable.length) return { text: info.error || "No readable .mbtiles archives in this folder", ok: false };
+      if (!usable.length) return { text: info.error || "No readable map archives or tile folders in this folder", ok: false };
       const names = usable.slice(0, 4).map((a) => `${a.file} (${(a.format || "?").toUpperCase()} ${mbZoom(a)})`).join(", ");
       const more = usable.length > 4 ? ` +${usable.length - 4} more` : "";
       const vectorNote = usable.some((a) => a.vector) ? " · vector archives render in the 3D GL map" : "";
@@ -1689,26 +1692,76 @@ export async function render(root) {
 
   function showMbStatus(info) {
     const summary = mbSummary(info || {});
-    mbStatus.className = `tiny ${summary.ok ? "muted" : "danger-text"}`;
-    mbStatus.textContent = summary.text;
+    mbStatusText.className = `tiny ${summary.ok ? "muted" : "danger-text"}`;
+    mbStatusText.textContent = summary.text;
+    mbSuggest.replaceChildren();
+    const suggestions = (info && info.suggestions) || [];
+    if (!suggestions.length) return;
+    mbSuggest.appendChild(h("div", { class: "tiny muted", text: "Found on a mounted drive with the same name:" }));
+    for (const item of suggestions.slice(0, 4)) {
+      const use = btn("USE THIS", {
+        size: "sm", tone: item.usable ? "primary" : "",
+        icon: item.usable ? "check" : "warning",
+        disabled: !item.usable,
+        onClick: async () => {
+          mbtiles.value = item.path;
+          await saveSimple({ mbtiles_path: item.path }, "MBTiles archive re-linked");
+          showMbStatus(item);
+        },
+      });
+      mbSuggest.appendChild(h("div", { class: "row gap-6 wrap" },
+        h("div", { class: "grow mono tiny truncate", text: item.path, title: item.path }),
+        badge(item.vector ? "VECTOR" : item.usable ? "READY" : "UNUSABLE",
+          item.usable ? (item.vector ? "cyan" : "green") : "red"),
+        use));
+    }
   }
 
   async function checkMbtiles(pathText) {
     const path = String(pathText ?? mbtiles.value ?? "").trim();
     if (!path) {
-      mbStatus.className = "tiny muted";
-      mbStatus.textContent = "No local archive configured.";
+      mbStatusText.className = "tiny muted";
+      mbStatusText.textContent = "No local archive configured.";
+      mbSuggest.replaceChildren();
       return;
     }
-    mbStatus.className = "tiny muted";
-    mbStatus.textContent = "Checking archive…";
+    mbStatusText.className = "tiny muted";
+    mbStatusText.textContent = "Checking archive…";
+    mbSuggest.replaceChildren();
     try {
       const info = await api.get(`/api/map/mbtiles/info?path=${encodeURIComponent(path)}`);
       showMbStatus(info);
     } catch (err) {
-      mbStatus.className = "tiny danger-text";
-      mbStatus.textContent = err.message || "Could not check archive";
+      mbStatusText.className = "tiny danger-text";
+      mbStatusText.textContent = err.message || "Could not check archive";
     }
+  }
+
+  async function diagnoseMbtiles() {
+    const typed = String(mbtiles.value || "").trim();
+    const body = h("div", { class: "col gap-8" }, loading("READING USB AND ARCHIVE STATE"));
+    const m = modal({
+      title: "MBTiles diagnosis",
+      sub: "Copy this report when asking for help. It contains paths, mounts and permissions only.",
+      wide: true,
+      body,
+      actions: [btn("CLOSE", { tone: "ghost", onClick: () => m.close() })],
+    });
+    let out;
+    try {
+      out = await api.get(`/api/map/mbtiles/diagnose${typed ? `?path=${encodeURIComponent(typed)}` : ""}`);
+    } catch (err) {
+      body.replaceChildren(h("div", { class: "callout danger", text: err.message || "Diagnosis failed" }));
+      return;
+    }
+    const report = out.report || "No report returned.";
+    const pre = h("pre", { class: "mono tiny", style: { whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: "52vh", overflow: "auto" }, text: report });
+    body.replaceChildren(
+      h("div", { class: "row gap-6 wrap" },
+        btn("COPY REPORT", { size: "sm", icon: "copy", tone: "primary", onClick: () => copyText(report) }),
+        btn("FIND ON USB", { size: "sm", icon: "search", onClick: () => { m.close(); scanMbtiles(); } })),
+      pre,
+    );
   }
 
   async function scanMbtiles() {
@@ -1741,12 +1794,12 @@ export async function render(root) {
         }
       }
       body.appendChild(emptyState(
-        "No MBTiles archives found",
+        "No map packs found",
         reason || `Plug in the drive and scan again. Searched: ${(out.roots || []).slice(0, 6).join(", ")}`,
       ));
       return;
     }
-    body.appendChild(h("div", { class: "tiny muted", text: `${items.length} archive(s) found. Files are used in place — keep the drive mounted.` }));
+    body.appendChild(h("div", { class: "tiny muted", text: `${items.length} map source(s) found. Files are used in place — keep the drive mounted.` }));
     const list = h("div", { class: "list mt-8" });
     for (const it of items) {
       const use = btn("USE", {
