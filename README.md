@@ -322,8 +322,12 @@ instead of failing, and downloads report the write error.
 
 The same panel includes **cache maintenance**: total/per-source tile counts,
 free space, **Verify & repair** (removes corrupt or HTML error tiles),
-per-source or **Clear all tiles**, and a shortcut to **Download offline pack**.
-MBTiles archives are read-only and are never deleted by cache clearing.
+per-source or **Clear all tiles**, a shortcut to **Download offline pack**, and
+**Transfer to USB**. Transfer copies the existing raster cache to a chosen USB
+folder, size-checks it, removes the old copies, and switches the active cache
+to that folder so future tiles stay on the USB drive. It refuses while a
+download or another transfer is running. MBTiles archives are read-only and are
+never deleted by cache clearing or transfer.
 
 Starting a pack closes the selection dialog and continues in the background, so
 the map stays usable. **Map → Downloads** shows live progress, counts, per-tile

@@ -5536,7 +5536,11 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         destination = str(body.get("destination") or "").strip()
         require(bool(destination), "Destination folder is required", 400)
         try:
-            job = tilecache.start_relocate(destination, remove_source=bool(body.get("remove_source")))
+            job = tilecache.start_relocate(
+                destination,
+                remove_source=bool(body.get("remove_source")),
+                switch_cache=bool(body.get("switch_cache")),
+            )
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         db(request).audit("MAP_CACHE_RELOCATE", f"{job['source']} -> {job['destination']} "
@@ -5635,8 +5639,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         source = body.get("source") or None
         if source and source not in tilecache.TILE_SOURCES:
             raise HTTPException(status_code=400, detail="Unknown tile source")
-        if any(job.get("state") == "running" for job in tilecache.list_jobs()):
-            raise HTTPException(status_code=409, detail="Cancel active tile downloads before verifying the cache")
+        if (any(job.get("state") == "running" for job in tilecache.list_jobs())
+                or tilecache.relocations_running()):
+            raise HTTPException(status_code=409, detail="Cancel active tile downloads/transfers before verifying the cache")
         result = tilecache.verify_cache(source, fix=True)
         if result.get("removed"):
             result["generation"] = _bump_cache_generation(db(request))
@@ -5648,8 +5653,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         source = body.get("source") or None
         if source and source not in tilecache.TILE_SOURCES:
             raise HTTPException(status_code=400, detail="Unknown tile source")
-        if any(job.get("state") == "running" for job in tilecache.list_jobs()):
-            raise HTTPException(status_code=409, detail="Cancel active tile downloads before clearing the cache")
+        if (any(job.get("state") == "running" for job in tilecache.list_jobs())
+                or tilecache.relocations_running()):
+            raise HTTPException(status_code=409, detail="Cancel active tile downloads/transfers before clearing the cache")
         result = tilecache.clear_cache(source)
         result["generation"] = _bump_cache_generation(db(request))
         return result

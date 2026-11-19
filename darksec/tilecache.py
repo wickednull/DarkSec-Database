@@ -647,8 +647,14 @@ def _downloads_running() -> bool:
         return any(job.get("state") == "running" for job in _jobs.values())
 
 
-def start_relocate(destination: str, remove_source: bool = False) -> dict:
-    """Copy current cache files to destination, optionally deleting source."""
+def start_relocate(destination: str, remove_source: bool = False,
+                   switch_cache: bool = False) -> dict:
+    """Copy current cache files to destination, optionally deleting source.
+
+    ``switch_cache`` updates ``map_cache_path`` after a fully successful
+    copy/move, so closing the progress dialog cannot leave the app pointing at
+    an empty old folder.
+    """
     if _downloads_running():
         raise RuntimeError("Wait for the running tile download to finish first")
     dest = validate_cache_path(destination)
@@ -678,6 +684,7 @@ def start_relocate(destination: str, remove_source: bool = False) -> dict:
         "copied": 0, "skipped": 0, "failed": 0,
         "total_bytes": total_bytes, "done_bytes": 0,
         "remove_source": bool(remove_source),
+        "switch_cache": bool(switch_cache),
         "error": None, "started": time.time(), "finished": None if files else time.time(),
     }
     with _reloc_lock:
@@ -723,6 +730,19 @@ def _run_relocate(job: dict, files: list[Path]) -> None:
                 except OSError:
                     pass
         job["state"] = "done" if job["failed"] == 0 else "partial"
+        if job["state"] == "done" and job.get("switch_cache"):
+            try:
+                from .db import Database
+
+                d = Database()
+                try:
+                    d.set_setting("map_cache_path", str(dest))
+                finally:
+                    d.close()
+                invalidate_cache_path(str(dest))
+            except Exception as exc:
+                job["state"] = "partial"
+                job["error"] = f"tiles moved but cache path switch failed: {exc}"[:300]
     except Exception as exc:
         job["state"] = "error"
         job["error"] = str(exc)[:300]
@@ -734,6 +754,11 @@ def relocate_status(job_id: str) -> Optional[dict]:
     with _reloc_lock:
         job = _relocations.get(job_id)
         return dict(job) if job else None
+
+
+def relocations_running() -> bool:
+    with _reloc_lock:
+        return any(job.get("state") == "running" for job in _relocations.values())
 
 
 def candidate_cache_locations() -> list[dict]:

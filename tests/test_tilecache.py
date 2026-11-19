@@ -245,3 +245,31 @@ def test_download_job_logs_progress_and_can_be_cancelled(tmp_path, monkeypatch):
     cancelled = tilecache.job_status(job2["id"])
     assert cancelled["state"] == "cancelled"
     assert any("Cancel" in line["message"] for line in cancelled["log"])
+
+
+def test_relocate_to_usb_moves_tiles_and_switches_cache(tmp_path, monkeypatch, client):
+    from darksec import config, tilecache
+    from darksec.db import Database
+
+    src = tmp_path / "internal"
+    old = src / "esri_imagery" / "9" / "1" / "2.jpg"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(JPEG)
+    dest = tmp_path / "usb" / "DarkSec-Tiles"
+    monkeypatch.setattr(tilecache, "cache_root", lambda: src)
+    monkeypatch.setattr(tilecache, "_downloads_running", lambda: False)
+    try:
+        job = tilecache.start_relocate(str(dest), remove_source=True, switch_cache=True)
+        for _ in range(100):
+            state = tilecache.relocate_status(job["id"])
+            if state["state"] != "running":
+                break
+            import time
+            time.sleep(0.02)
+        assert state["state"] == "done", state
+        assert (dest / "esri_imagery" / "9" / "1" / "2.jpg").read_bytes() == JPEG
+        assert not old.exists()
+        assert Database(config.DB_PATH).get_setting("map_cache_path") == str(dest.resolve())
+    finally:
+        client.put("/api/settings", json={"map_cache_path": ""})
+        tilecache.invalidate_cache_path("")

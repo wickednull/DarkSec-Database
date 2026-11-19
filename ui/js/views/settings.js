@@ -518,6 +518,7 @@ export async function render(root) {
   const cacheSummary = h("div", { class: "col gap-4" }, loading("Loading cache…"));
   const cacheRefresh = btn("REFRESH CACHE INFO", { size: "sm", icon: "refresh", onClick: () => loadCacheSummary() });
   const cacheVerify = btn("VERIFY & REPAIR", { size: "sm", icon: "check", onClick: verifyTileCache });
+  const cacheTransfer = btn("TRANSFER TO USB", { size: "sm", icon: "upload", onClick: transferCacheToUsb });
   const cacheClear = btn("CLEAR ALL TILES", { size: "sm", tone: "danger", icon: "trash", onClick: clearAllTiles });
   const cacheDownload = btn("DOWNLOAD OFFLINE PACK", { size: "sm", icon: "download", onClick: () => { location.hash = "#/map?download=1"; } });
   const layersBox = h("div", { class: "col gap-4" }, h("div", { class: "tiny muted", text: "Loading layers…" }));
@@ -534,7 +535,7 @@ export async function render(root) {
       cacheStatus,
       h("div", { class: "settings-subhead", text: "Cache maintenance" }),
       cacheSummary,
-      h("div", { class: "settings-actions" }, cacheRefresh, cacheVerify, cacheClear, cacheDownload),
+      h("div", { class: "settings-actions" }, cacheRefresh, cacheTransfer, cacheVerify, cacheClear, cacheDownload),
       h("div", { class: "tiny muted", text: "Download progress, per-tile logs and cancel controls are in the Map → Downloads panel." }),
       mapVector,
       mapAutoPack,
@@ -1840,25 +1841,93 @@ export async function render(root) {
     body.appendChild(list);
   }
 
-  function copyCacheTo(destination) {
+  async function transferCacheToUsb() {
+    let st = null;
+    try { st = await api.get("/api/map/cache/status"); }
+    catch (err) { toast(err.message || "Could not read tile cache", "error"); return; }
+    if (!Number(st?.tile_count)) {
+      toast("No cached tiles to transfer", "warn");
+      return;
+    }
+    let out = null;
+    try { out = await api.get("/api/map/cache/locations"); }
+    catch (err) { toast(err.message || "Could not scan USB folders", "error"); return; }
+    const current = String(st.path || "");
+    const items = (out.items || []).filter((item) =>
+      item.writable && !item.default && String(item.path) !== current);
+    const body = h("div", { class: "col gap-8" });
+    body.appendChild(h("div", { class: "small", text:
+      `Current cache: ${Number(st.tile_count).toLocaleString()} tiles · ${st.total_mb || 0} MB at ${current}. ` +
+      "Move it to a USB folder to free the internal drive. Files are copied, size-checked, then removed from the old cache." }));
+    const list = h("div", { class: "list" });
+    if (!items.length) {
+      body.appendChild(emptyState("No writable USB folder found",
+        "Plug in the drive, wait for it to mount, then try again. The current cache is unchanged."));
+    } else {
+      for (const item of items) {
+        const free = item.free_gb != null ? `${item.free_gb} GB free` : "free space unknown";
+        list.appendChild(h("div", { class: "list-item" },
+          h("div", { class: "li-main" },
+            h("div", { class: "li-title truncate", text: item.path }),
+            h("div", { class: "li-sub", text: `${free}${item.exists ? " · existing folder" : " · will be created"}` })),
+          btn("MOVE HERE", { size: "sm", tone: "primary", icon: "upload", onClick: async () => {
+            const ok = await confirmDialog({
+              title: "Move tile cache to USB",
+              message: `Move ${Number(st.tile_count).toLocaleString()} tiles (${st.total_mb || 0} MB) from ${current} to ${item.path}? ` +
+                "The active cache switches only after every file copies successfully.",
+              confirmText: "MOVE", danger: true,
+            });
+            if (!ok) return;
+            m.close();
+            try {
+              await copyCacheTo(item.path, true, true);
+              await store.loadStatus({ force: true }).catch(() => null);
+              settings.map_cache_path = item.path;
+              mapCache.value = item.path;
+              toast("Tile cache moved to USB", "success");
+              await refreshCacheStatus(true);
+              await loadCacheSummary();
+              loadLayers(layersBox);
+            } catch (err) {
+              toast(err.message || "Transfer failed", "error", 9000);
+            }
+          } })));
+      }
+      body.appendChild(list);
+    }
+    const m = modal({
+      title: "Transfer tile cache to USB",
+      sub: "Move cached raster tiles off the internal drive",
+      wide: true,
+      body,
+      actions: [btn("CLOSE", { tone: "ghost", onClick: () => m.close() })],
+    });
+  }
+
+  function copyCacheTo(destination, removeSource = false, switchCache = false) {
     return new Promise(async (resolve, reject) => {
       const bar = h("div", { class: "bar", style: { width: "0%" } });
-      const text = h("div", { class: "tiny muted", text: "Starting copy…" });
+      const verb = removeSource ? "Moving" : "Copying";
+      const text = h("div", { class: "tiny muted", text: `Starting ${verb.toLowerCase()}…` });
       let done = false;
       const m = modal({
-        title: "Copying offline tiles",
+        title: `${verb} offline tiles`,
         sub: destination,
         body: h("div", { class: "col gap-8" },
           h("div", { class: "progress-track" }, bar),
           text,
-          h("div", { class: "tiny muted", text: "Keep the USB drive connected. The current cache stays active until the copy finishes." })),
+          h("div", { class: "tiny muted", text: removeSource
+            ? "Keep the USB drive connected. Files are copied and size-checked, then removed from the current cache. The active cache switches only if every file succeeds."
+            : "Keep the USB drive connected. The current cache stays active until the copy finishes." })),
         actions: [],
         onClose: () => {
-          if (!done) reject(new Error("Copy dialog closed; the server copy may still be running"));
+          if (!done) reject(new Error("Dialog closed; the server operation may still be running"));
         },
       });
       try {
-        const job = await api.post("/api/map/cache/relocate", { destination, remove_source: false });
+        const job = await api.post("/api/map/cache/relocate", {
+          destination, remove_source: removeSource, switch_cache: switchCache,
+        });
         const tick = async () => {
           let state;
           try { state = await api.get(`/api/map/cache/relocate/${job.id}`); }
