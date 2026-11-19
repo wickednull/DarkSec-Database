@@ -5298,7 +5298,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         # without glyphs, emit geometry-only layers and no glyphs URL.
         glyph_file = Path(config.UI_DIR) / "fonts" / "Open Sans Regular" / "0-255.pbf"
         try:
-            glyphs_ok = glyph_file.is_file()
+            glyphs_ok = False
+            if glyph_file.is_file() and glyph_file.stat().st_size > 100:
+                with glyph_file.open("rb") as fh:
+                    glyphs_ok = fh.read(1) == b"\x0a"
         except OSError:
             glyphs_ok = False
         return mapstyle.vector_style(

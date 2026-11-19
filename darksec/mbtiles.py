@@ -1818,6 +1818,24 @@ def diagnose(raw: str | None = None) -> dict[str, Any]:
         f"configured path: {text or '(empty)'}",
         f"resolved path:   {str(path) if path else '(none)'}",
     ]
+    # Vector labels need the bundled Open Sans glyph ranges. Report this here
+    # because a missing glyph pack used to blank the whole vector map.
+    try:
+        from . import config as _config
+        glyph_dir = Path(_config.UI_DIR) / "fonts" / "Open Sans Regular"
+        base_glyph = glyph_dir / "0-255.pbf"
+        glyph_size = base_glyph.stat().st_size if base_glyph.is_file() else 0
+        glyph_valid = False
+        if glyph_size:
+            with base_glyph.open("rb") as fh:
+                glyph_valid = fh.read(1) == b"\x0a"
+        lines.append(f"vector labels: {'available' if glyph_valid else 'UNAVAILABLE'}")
+        lines.append(f"  glyph dir: {glyph_dir}")
+        lines.append(f"  0-255.pbf: {'%.0f bytes' % glyph_size if glyph_size else 'missing'}"
+                     f"{'' if glyph_valid or not glyph_size else ' · not a valid PBF'}")
+    except Exception as exc:
+        lines.append(f"vector labels: could not check glyph pack ({exc})")
+    lines.append("")
     for key in ("exists", "is_file", "is_dir", "size_bytes", "mode", "readable", "executable",
                 "missing_component", "error"):
         if key in path_state:

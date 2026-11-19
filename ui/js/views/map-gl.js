@@ -88,6 +88,10 @@ async function ensureVectorGlyphs(style) {
     if (!response.ok || /text\/html/i.test(type)) {
       throw new Error(`glyph pack returned ${response.status}`);
     }
+    const body = new Uint8Array(await response.arrayBuffer());
+    if (body.length < 100 || body[0] !== 0x0a) {
+      throw new Error("glyph pack is not a valid PBF");
+    }
     return style;
   } catch (err) {
     console.warn("Vector labels disabled — glyph pack unavailable:", err?.message || err);

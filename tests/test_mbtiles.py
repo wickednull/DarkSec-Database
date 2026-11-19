@@ -456,6 +456,7 @@ def test_diagnose_reports_mounts_and_sample_tile(tmp_path, monkeypatch, client):
     assert out["ok"] is True
     assert out["samples"] and out["samples"][0]["ok"] is True
     assert "mount points visible" in out["report"]
+    assert "vector labels:" in out["report"]
     assert "READY" in out["report"]
 
 
