@@ -2412,6 +2412,9 @@ export async function render(root, params = {}) {
   resizeObs.observe(shell);
   setTimeout(() => { draw(); updateReadout({ lat: view.lat, lon: view.lon }); }, 40);
   scheduleLive();
+  if (params.download && !hidePosition) {
+    setTimeout(() => { if (!disposed) openDownloadDialog(); }, 400);
+  }
 
   function onKey(e) {
     if (e.key === "Escape" && (measureMode || placeMode)) {

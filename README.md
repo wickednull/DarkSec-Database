@@ -320,6 +320,11 @@ copy runs in the background and the old cache is left in place until you
 delete it. If the drive is unplugged the map falls back to other sources
 instead of failing, and downloads report the write error.
 
+The same panel includes **cache maintenance**: total/per-source tile counts,
+free space, **Verify & repair** (removes corrupt or HTML error tiles),
+per-source or **Clear all tiles**, and a shortcut to **Download offline pack**.
+MBTiles archives are read-only and are never deleted by cache clearing.
+
 #### MBTiles from a USB drive
 
 Operator-supplied MBTiles archives are read **in place and read-only**, so a

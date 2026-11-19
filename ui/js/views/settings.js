@@ -488,7 +488,7 @@ export async function render(root) {
     { value: "esri_street", label: "Street map (Esri)" },
     { value: "carto_dark", label: "Dark tactical (CARTO)" },
     { value: "usgs_topo", label: "USGS topo (US, public domain)" },
-    { value: "usgs_imagery", label: "USGS imagery topo (US)" },
+    { value: "usgs_imagery", label: "USGS imagery (US)" },
     { value: "opentopomap", label: "OpenTopoMap" },
   ], settings.tile_source || "esri_imagery");
   api.get("/api/map/cache/sources").then((r) => {
@@ -515,6 +515,11 @@ export async function render(root) {
   const mapVector = checkbox("Render offline vector basemap", settings.map_vector !== false);
   const mapAutoPack = checkbox("Cache viewed map areas automatically while online", settings.map_auto_pack !== false);
   const mapSpace = checkbox("Starfield space background in the 3D globe", settings.map_space_background !== false);
+  const cacheSummary = h("div", { class: "col gap-4" }, loading("Loading cache…"));
+  const cacheRefresh = btn("REFRESH CACHE INFO", { size: "sm", icon: "refresh", onClick: () => loadCacheSummary() });
+  const cacheVerify = btn("VERIFY & REPAIR", { size: "sm", icon: "check", onClick: verifyTileCache });
+  const cacheClear = btn("CLEAR ALL TILES", { size: "sm", tone: "danger", icon: "trash", onClick: clearAllTiles });
+  const cacheDownload = btn("DOWNLOAD OFFLINE PACK", { size: "sm", icon: "download", onClick: () => { location.hash = "#/map?download=1"; } });
   const layersBox = h("div", { class: "col gap-4" }, h("div", { class: "tiny muted", text: "Loading layers…" }));
   const mapPanel = panel({
     title: "Offline maps",
@@ -527,6 +532,9 @@ export async function render(root) {
       mbStatus,
       field("Tile cache location", cacheRow, "Where downloaded raster tiles are stored. Point this at a USB folder for large offline packs. Empty uses the app's maps/tiles/cache. Existing tiles can be copied when you switch."),
       cacheStatus,
+      h("div", { class: "settings-subhead", text: "Cache maintenance" }),
+      cacheSummary,
+      h("div", { class: "settings-actions" }, cacheRefresh, cacheVerify, cacheClear, cacheDownload),
       mapVector,
       mapAutoPack,
       mapSpace,
@@ -541,6 +549,7 @@ export async function render(root) {
   loadLayers(layersBox);
   if (settings.mbtiles_path) checkMbtiles(settings.mbtiles_path);
   refreshCacheStatus(true);
+  loadCacheSummary();
 
   /* ------------------------------------------------------------ library */
   const autoDeep = checkbox("Extract full text automatically when indexing", settings.auto_deep_index !== false);
@@ -1890,6 +1899,83 @@ export async function render(root) {
         onClose: () => resolve("cancel"),
       });
     });
+  }
+
+  async function loadCacheSummary() {
+    cacheSummary.replaceChildren(loading("Loading cache…"));
+    try {
+      const st = await api.get("/api/map/cache/status");
+      cacheSummary.replaceChildren();
+      const free = st.free_gb != null ? `${st.free_gb} GB free` : "free space unknown";
+      cacheSummary.appendChild(h("div", { class: "tiny muted wrap-any", text:
+        `${Number(st.tile_count || 0).toLocaleString()} tiles · ${st.total_mb || 0} MB · ${free} · ${st.path || "unknown path"}` }));
+      const cached = (st.sources || []).filter((src) => Number(src.tile_count) > 0);
+      if (!cached.length) {
+        cacheSummary.appendChild(h("div", { class: "tiny muted", text: "No downloaded raster tiles yet." }));
+        return;
+      }
+      const list = h("div", { class: "list" });
+      for (const src of cached) {
+        const zoom = Array.isArray(src.zoom_range) && src.zoom_range.length
+          ? ` · z${src.zoom_range[0]}–${src.zoom_range[1]}` : "";
+        const clear = btn("CLEAR", {
+          size: "sm", tone: "ghost", icon: "trash",
+          onClick: () => clearCachedSource(src),
+        });
+        list.appendChild(h("div", { class: "list-item" },
+          h("div", { class: "li-main" },
+            h("div", { class: "li-title", text: src.name || src.source }),
+            h("div", { class: "li-sub", text: `${Number(src.tile_count).toLocaleString()} tiles · ${src.total_mb || 0} MB${zoom}` })),
+          clear));
+      }
+      cacheSummary.appendChild(list);
+    } catch (err) {
+      cacheSummary.replaceChildren(h("div", { class: "tiny danger-text", text: err.message || "Could not read tile cache" }));
+    }
+  }
+
+  async function clearCachedSource(src) {
+    const ok = await confirmDialog({
+      title: `Clear ${src.name || src.source} tiles`,
+      message: `Delete ${Number(src.tile_count).toLocaleString()} cached tiles (${src.total_mb || 0} MB) for ${src.name || src.source}? You will need a connection to download them again.`,
+      confirmText: "DELETE", danger: true,
+    });
+    if (!ok) return;
+    try {
+      const r = await api.post("/api/map/cache/clear", { source: src.source });
+      toast(`Cleared ${r.removed} tiles (${r.freed_mb} MB)`, "success");
+      await refreshCacheStatus(true);
+      await loadCacheSummary();
+      loadLayers(layersBox);
+    } catch (err) { toast(err.message || "Clear failed", "error"); }
+  }
+
+  async function clearAllTiles() {
+    const ok = await confirmDialog({
+      title: "Clear every cached map tile",
+      message: "Delete all downloaded raster tiles from the current cache folder? MBTiles archives are read-only and are not affected. You will need a connection to download tiles again.",
+      confirmText: "DELETE", danger: true,
+    });
+    if (!ok) return;
+    try {
+      const r = await api.post("/api/map/cache/clear", {});
+      toast(`Cleared ${r.removed} tiles (${r.freed_mb} MB)`, "success");
+      await refreshCacheStatus(true);
+      await loadCacheSummary();
+      loadLayers(layersBox);
+    } catch (err) { toast(err.message || "Clear failed", "error"); }
+  }
+
+  async function verifyTileCache() {
+    try {
+      const r = await api.post("/api/map/cache/verify", {});
+      toast(r.removed
+        ? `Verified ${r.checked} tiles · removed ${r.removed} corrupt file(s) (${r.freed_mb} MB)`
+        : `Verified ${r.checked} cached tiles · all valid`, r.removed ? "warn" : "success");
+      await refreshCacheStatus(true);
+      await loadCacheSummary();
+      loadLayers(layersBox);
+    } catch (err) { toast(err.message || "Cache verification failed", "error"); }
   }
 
   async function loadAudit(target) {
