@@ -317,3 +317,17 @@ def test_style_endpoint_handles_non_openmaptiles_layers(client, tmp_path, monkey
         assert layers["layers"] == ["osm"]
     finally:
         client.put("/api/settings", json={"mbtiles_path": ""})
+
+
+def test_dark_vector_style_has_visible_land_water_and_roads():
+    from darksec import mapstyle
+
+    style = mapstyle.vector_style(theme="dark")
+    paint = {layer["id"]: layer.get("paint", {}) for layer in style["layers"]}
+    bg = paint["background"]["background-color"].lstrip("#")
+    water = paint["water"]["fill-color"].lstrip("#")
+    road = paint["transportation"]["line-color"].lstrip("#")
+    brightness = lambda h: sum(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    assert brightness(bg) > 24, "dark background must not collapse into pure black"
+    assert brightness(water) > brightness(bg) + 40
+    assert brightness(road) > brightness(bg) + 80

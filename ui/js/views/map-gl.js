@@ -275,6 +275,9 @@ export async function render(root) {
         watchdogShown = false;
         mapErrorBox.style.display = "none";
       }
+      // Ensure vector tiles are painted even when the first style load raced
+      // the container layout (a known blank-map failure in embedded views).
+      try { map.triggerRepaint(); } catch {}
     }
   });
   if (mbInfo.vector) {
@@ -289,6 +292,19 @@ export async function render(root) {
       );
     }, 9000);
   }
+  const glResize = new ResizeObserver(() => {
+    try { map.resize(); map.triggerRepaint(); } catch {}
+  });
+  glResize.observe(container);
+  // Some embedded/headless Chromium builds paint the style background but not
+  // the first vector tiles until the map is resized/repainted after layout.
+  // Nudge it for the first ~12 seconds, then stop.
+  let glRepaintTicks = 0;
+  const glRepaintTimer = setInterval(() => {
+    glRepaintTicks += 1;
+    try { map.resize(); map.triggerRepaint(); } catch {}
+    if (glRepaintTicks >= 6) clearInterval(glRepaintTimer);
+  }, 2000);
   map.addControl(new maplibregl.NavigationControl({ visualizePitch:true, showCompass:true, showZoom:true }), "top-right");
   map.addControl(new maplibregl.ScaleControl({ maxWidth:120, unit: U.isImperial() ? "imperial" : "metric" }), "bottom-left");
   try { if (typeof map.setProjection === 'function') map.setProjection({ type:'globe' }); } catch (e) { console.warn('Initial globe projection failed', e); }
@@ -812,6 +828,10 @@ export async function render(root) {
   updateStats();
   map.on('load', () => {
     try { if (typeof map.setProjection === 'function') map.setProjection({ type:'globe' }); } catch (e) { console.warn('Initial globe projection failed', e); }
+    // The layout can settle after the style's first frame; resize/repaint so
+    // vector geometry is not left unpainted (black map) until user movement.
+    try { map.resize(); map.triggerRepaint(); } catch {}
+    setTimeout(() => { try { map.resize(); map.triggerRepaint(); } catch {} }, 600);
     statusBox.textContent = `GL map loaded · globe projection (toggle available) · local raster tiles /api/map/tiles · DEM ${demStatus?.available ? 'ready (' + (demStatus.encoding||'terrarium') + ')' : 'not configured/cached'}. Refresh feeds for cables/CCTV/maritime, then enable/inspect layers.`;
     // DEM terrain/hillshade hooks (offline local raster-dem tiles only)
     if (demStatus?.available && demStatus.tile_url) {
@@ -980,5 +1000,5 @@ export async function render(root) {
     refreshAlpr(true);
   });
 
-  return () => { try { clearInterval(daynightTimer); clearInterval(glLiveTimer); clearInterval(liveTimer); clearInterval(freshTimer); clearTimeout(alprFetchTimer); popup?.remove(); map?.remove(); } catch {} };
+  return () => { try { clearInterval(daynightTimer); clearInterval(glLiveTimer); clearInterval(liveTimer); clearInterval(freshTimer); clearInterval(glRepaintTimer); clearTimeout(alprFetchTimer); glResize?.disconnect(); popup?.remove(); map?.remove(); } catch {} };
 }

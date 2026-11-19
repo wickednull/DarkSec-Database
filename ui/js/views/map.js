@@ -120,12 +120,20 @@ export async function render(root, params = {}) {
     return;
   }
 
-  const startLat = hidePosition ? 20 : homeLat;
-  const startLon = hidePosition ? 0 : homeLon;
+  // Optional deep link: #/map?lat=..&lon=..&z=.. (z accepts fractional zoom).
+  const linkLat = Number(params.lat), linkLon = Number(params.lon);
+  const linkZoom = Number(params.z ?? params.zoom);
+  const hasLinkPosition = Number.isFinite(linkLat) && Number.isFinite(linkLon)
+    && Math.abs(linkLat) <= 85 && Math.abs(linkLon) <= 180;
+  const startLat = hidePosition ? 20 : (hasLinkPosition ? linkLat : homeLat);
+  const startLon = hidePosition ? 0 : (hasLinkPosition ? linkLon : homeLon);
+  const startZoom = hidePosition ? 1.6
+    : (Number.isFinite(linkZoom) ? Math.max(1, Math.min(19, linkZoom))
+      : (hasLinkPosition ? 11 : 5));
   const view = {
     lat: Number.isFinite(startLat) ? startLat : 39.8283,
     lon: Number.isFinite(startLon) ? startLon : -98.5795,
-    zoom: hidePosition ? 1.6 : 5,
+    zoom: startZoom,
   };
   const visible = {
     countries: true, states: true, land: true, lakes: true, rivers: true,
@@ -2326,14 +2334,7 @@ export async function render(root, params = {}) {
   if (params.wp) {
     const wp = waypoints.find((w) => String(w.id) === String(params.wp));
     if (wp) { selected = wp; view.lat = Number(wp.lat); view.lon = Number(wp.lon); view.zoom = 12; }
-  } else if (Number.isFinite(startLat) && Number.isFinite(startLon)) {
-    view.lat = startLat; view.lon = startLon; view.zoom = 5;
   }
-  if (params.lat && params.lon) {
-    const la = Number(params.lat), lo = Number(params.lon);
-    if (Number.isFinite(la) && Number.isFinite(lo)) { view.lat = la; view.lon = lo; view.zoom = Number(params.zoom) || 11; }
-  }
-
   renderWaypoints();
   renderIntel();
   updateModeHud();

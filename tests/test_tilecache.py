@@ -200,3 +200,11 @@ def test_relocate_copies_existing_tiles(tmp_path, monkeypatch):
     assert state["state"] == "done"
     assert (dest / "esri_imagery" / "9" / "1" / "2.jpg").read_bytes() == JPEG
     assert not (dest / "esri_imagery" / "9" / "1" / "2.jpg.part").exists()
+
+
+def test_usgs_imagery_uses_the_live_service():
+    from darksec import tilecache
+
+    url = tilecache.TILE_SOURCES["usgs_imagery"]["url_template"]
+    assert "USGSImageryOnly" in url
+    assert "USGSImageryTopo" not in url

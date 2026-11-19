@@ -22,6 +22,7 @@ and is kept only as a fallback.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import math
 import os
@@ -74,12 +75,13 @@ TILE_SOURCES: dict[str, dict] = {
         "note": "Contours, hydrography and land cover. United States only.",
     },
     "usgs_imagery": {
-        "name": "USGS imagery topo (US)",
-        "url_template": "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}",
+        "name": "USGS imagery (US)",
+        # USGSImageryTopo is retired; USGSImageryOnly remains available.
+        "url_template": "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}",
         "attribution": "USGS The National Map (public domain)",
         "max_zoom": 16,
         "ext": "jpg",
-        "note": "Satellite imagery with topo overlay. United States only.",
+        "note": "USGS satellite imagery. United States only.",
     },
     "opentopomap": {
         "name": "OpenTopoMap",
@@ -147,6 +149,7 @@ def configured_cache_path() -> str:
 def invalidate_cache_path(raw: str | None = None) -> None:
     with _cache_root_lock:
         _cache_root_cache.update({"at": time.monotonic(), "raw": raw})
+    _invalidate_stats()
 
 
 def cache_root() -> Path:
@@ -542,6 +545,7 @@ def _run_job(job: dict) -> None:
         job["finished"] = time.time()
         if job["state"] == "running":
             job["state"] = "done"
+        _invalidate_stats()
 
 
 def job_status(job_id: str) -> Optional[dict]:
@@ -731,8 +735,24 @@ def candidate_cache_locations() -> list[dict]:
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
+_stats_cache: dict[tuple, tuple[float, dict]] = {}
+_stats_lock = threading.Lock()
+STATS_TTL = 5.0
+
+
+def _invalidate_stats() -> None:
+    with _stats_lock:
+        _stats_cache.clear()
+
+
 def cache_stats(source: Optional[str] = None) -> dict:
     """Count cached tiles and total size. source=None aggregates every source."""
+    key = (source or "*", str(cache_root()))
+    now = time.monotonic()
+    with _stats_lock:
+        cached = _stats_cache.get(key)
+        if cached and now - cached[0] < STATS_TTL:
+            return copy.deepcopy(cached[1])
     sources = [source] if source else list(TILE_SOURCES)
     out = []
     total_tiles = 0
@@ -784,6 +804,8 @@ def cache_stats(source: Optional[str] = None) -> dict:
         match = next((s for s in out if s["source"] == source), None)
         if match:
             result.update(match)
+    with _stats_lock:
+        _stats_cache[key] = (now, copy.deepcopy(result))
     return result
 
 
@@ -811,6 +833,7 @@ def clear_cache(source: Optional[str] = None) -> dict:
                     d.rmdir()
                 except OSError:
                     pass
+    _invalidate_stats()
     return {"removed": removed, "freed_bytes": freed,
             "freed_mb": round(freed / (1024 * 1024), 2),
             "source": source or "all"}
@@ -857,6 +880,8 @@ def verify_cache(source: Optional[str] = None, fix: bool = True) -> dict:
                     removed += 1
                 except OSError:
                     pass
+    if removed:
+        _invalidate_stats()
     return {
         "checked": checked, "invalid": invalid, "removed": removed,
         "freed_bytes": freed, "freed_mb": round(freed / (1024 * 1024), 2),
