@@ -139,7 +139,7 @@ export async function render(root, params) {
     filterBar.appendChild(chip);
   }
   const channelOut = h("div");
-  const channelCount = h("span", { class: "tiny muted mono" });
+  const channelCount = h("span", { class: "tiny muted mono comms-count" });
   const channelsPanel = panel({
     title: "Channels",
     sub: "Calling, weather, aviation, marine and utility frequencies.",

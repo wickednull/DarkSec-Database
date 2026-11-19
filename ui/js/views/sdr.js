@@ -34,6 +34,27 @@ function mhz(hz) {
   return hz == null ? "—" : `${fmt.num(Number(hz) / 1e6, 4)} MHz`;
 }
 
+function accentColor() {
+  try {
+    return getComputedStyle(document.documentElement).getPropertyValue("--acc").trim() || "#5fe0a0";
+  } catch { return "#5fe0a0"; }
+}
+function accentRgb() {
+  try {
+    return getComputedStyle(document.documentElement).getPropertyValue("--acc-rgb").trim() || "95,224,160";
+  } catch { return "95,224,160"; }
+}
+function cssColor(name, fallback) {
+  try {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  } catch { return fallback; }
+}
+function cssRgb(name, fallback) {
+  try {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  } catch { return fallback; }
+}
+
 function backendName(id) {
   return ({ hackrf: "HackRF", rtl: "RTL-SDR", rtl_tcp: "rtl_tcp", soapy: "SoapySDR",
     websdr: "WebSDR", none: "none", auto: "AUTO" })[id] || String(id || "auto").toUpperCase();
@@ -708,7 +729,7 @@ export async function render(root, params = {}) {
     ctx.clearRect(0, 0, w, hh);
     ctx.fillStyle = "#020604";
     ctx.fillRect(0, 0, w, hh);
-    ctx.strokeStyle = "rgba(72,215,255,.09)";
+    ctx.strokeStyle = `rgba(${accentRgb()},.09)`;
     for (let i = 1; i < 10; i++) {
       ctx.beginPath(); ctx.moveTo((w / 10) * i, 0); ctx.lineTo((w / 10) * i, hh); ctx.stroke();
     }
@@ -732,8 +753,8 @@ export async function render(root, params = {}) {
     }
     ctx.lineTo(w - 4, hh - 18); ctx.lineTo(4, hh - 18); ctx.closePath();
     const grad = ctx.createLinearGradient(0, 0, 0, hh);
-    grad.addColorStop(0, "rgba(72,215,255,.24)");
-    grad.addColorStop(1, "rgba(93,255,154,.015)");
+    grad.addColorStop(0, `rgba(${accentRgb()},.24)`);
+    grad.addColorStop(1, `rgba(${accentRgb()},.015)`);
     ctx.fillStyle = grad; ctx.fill();
     ctx.beginPath();
     for (let i = 0; i < bins.length; i++) {
@@ -741,14 +762,14 @@ export async function render(root, params = {}) {
       const y = hh - 18 - ((bins[i] - lo) / Math.max(0.001, hi - lo)) * (hh - 30);
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
-    ctx.strokeStyle = "#7dffe0"; ctx.lineWidth = 1.3; ctx.stroke();
+    ctx.strokeStyle = accentColor(); ctx.lineWidth = 1.3; ctx.stroke();
     if (liveSpec.peak_hz) {
       const px = 4 + ((liveSpec.peak_hz - liveSpec.start_hz) / Math.max(1, liveSpec.end_hz - liveSpec.start_hz)) * (w - 8);
-      ctx.strokeStyle = "rgba(255,209,102,.8)";
+      ctx.strokeStyle = `rgba(${cssRgb("--amber-rgb","234,180,95")},.8)`;
       ctx.setLineDash([3, 3]);
       ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, hh - 18); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = "#ffd166";
+      ctx.fillStyle = cssColor("--amber", "#eab45f");
       ctx.font = "9px 'JetBrains Mono', monospace";
       ctx.fillText(`${fmt.num(liveSpec.peak_hz / 1e6, 4)}`, Math.min(w - 60, px + 4), 12);
     }
@@ -1606,7 +1627,7 @@ function drawSpectrum(canvas, frame, bounds) {
   ctx.clearRect(0, 0, w, hh);
   ctx.fillStyle = "#020604";
   ctx.fillRect(0, 0, w, hh);
-  ctx.strokeStyle = "rgba(93,255,154,.09)";
+  ctx.strokeStyle = `rgba(${accentRgb()},.09)`;
   ctx.lineWidth = 1;
   for (let i = 1; i < 8; i++) {
     const x = (w / 8) * i;
@@ -1634,8 +1655,8 @@ function drawSpectrum(canvas, frame, bounds) {
   ctx.lineTo(4, hh - 18);
   ctx.closePath();
   const grad = ctx.createLinearGradient(0, 0, 0, hh);
-  grad.addColorStop(0, "rgba(93,255,154,.24)");
-  grad.addColorStop(1, "rgba(93,255,154,.015)");
+  grad.addColorStop(0, `rgba(${accentRgb()},.24)`);
+  grad.addColorStop(1, `rgba(${accentRgb()},.015)`);
   ctx.fillStyle = grad;
   ctx.fill();
   ctx.beginPath();
@@ -1644,7 +1665,7 @@ function drawSpectrum(canvas, frame, bounds) {
     const y = hh - 18 - ((db[i] - lo) / Math.max(0.001, hi - lo)) * (hh - 30);
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
-  ctx.strokeStyle = "#5dff9a";
+  ctx.strokeStyle = accentColor();
   ctx.lineWidth = 1.4;
   ctx.stroke();
   ctx.fillStyle = "rgba(205,236,218,.72)";
@@ -1684,9 +1705,10 @@ function drawWaterfall(canvas, history, bounds) {
       let t = (frame[idx] - lo) / Math.max(0.001, hi - lo);
       t = Math.max(0, Math.min(1, t));
       let r, g, b;
-      if (t < .45) { const k = t / .45; r = 2 + 10 * k; g = 8 + 80 * k; b = 6 + 24 * k; }
-      else if (t < .8) { const k = (t - .45) / .35; r = 12 + 80 * k; g = 88 + 167 * k; b = 30 + 40 * k; }
-      else { const k = (t - .8) / .2; r = 92 + 163 * k; g = 255; b = 70 + 150 * k; }
+      if (t < .25) { const k = t / .25; r = 2 + 4 * k; g = 10 + 30 * k; b = 18 + 44 * k; }
+      else if (t < .5) { const k = (t - .25) / .25; r = 6 + 20 * k; g = 40 + 100 * k; b = 62 + 46 * k; }
+      else if (t < .75) { const k = (t - .5) / .25; r = 26 + 110 * k; g = 140 + 80 * k; b = 108 - 40 * k; }
+      else { const k = (t - .75) / .25; r = 136 + 119 * k; g = 220 + 35 * k; b = 68 + 120 * k; }
       const p = (y * width + x) * 4;
       img.data[p] = r; img.data[p + 1] = g; img.data[p + 2] = b; img.data[p + 3] = 255;
     }
