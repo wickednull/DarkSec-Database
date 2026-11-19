@@ -3,7 +3,7 @@ import { api } from "../api.js";
 import { store } from "../store.js";
 import {
   h, panel, stat, btn, badge, pageHead, alertStrip, emptyState, loading, fmt, toast,
-  field, input, select, checkbox, modal, confirmDialog,
+  field, input, select, checkbox, modal, confirmDialog, icon,
 } from "../components.js";
 import { kv, progressBar, referenceSection, statusTone } from "./shared.js?v=opsec-1";
 
@@ -88,7 +88,7 @@ export async function render(root, params = {}) {
   root.appendChild(pageHead({
     kicker: "OPERATIONS // RADIO SPECTRUM",
     title: "SDR / Spectrum",
-    desc: "HackRF, RTL-SDR, network rtl_tcp and public WebSDR/KiwiSDR receive. Live audio, wideband sweep, IQ capture, demodulation, recordings and gated transmit. Every local value comes from the radio or the filesystem.",
+    desc: "Live receiver, wideband scan, IQ capture and public WebSDR. Click the spectrum to tune; every local value comes from the radio.",
     actions: [
       btn("CHECK HARDWARE", { icon: "refresh", onClick: () => rescan() }),
       btn("FIELD MANUAL", { icon: "book", onClick: () => { location.hash = "#/manual?doc=sdr"; } }),
@@ -96,11 +96,11 @@ export async function render(root, params = {}) {
     ],
   }));
 
-  root.appendChild(alertStrip(
+  const legalNote = alertStrip(
     "Receive first. Transmitting without a licence, on the wrong frequency, or near sensitive systems can be illegal and dangerous. "
     + "HackRF is not a calibrated instrument. Use the spectrum display to find signals, then verify with a dedicated receiver.",
     "",
-  ));
+  );
 
   const stats = h("div", { class: "grid grid-4 mt-14" });
   const activeLabel = activeBackend === "hackrf" ? (hackrf.board_id || "HACKRF")
@@ -117,7 +117,6 @@ export async function render(root, params = {}) {
     "rtl_sdr / rtl_power / hackrf / SoapySDR"));
   stats.appendChild(stat("Transmit", txEnabled ? "ARMED" : "HARD LOCK",
     txEnabled ? "legal attestation recorded" : "settings gate closed", txEnabled ? "warn" : ""));
-  root.appendChild(stats);
 
   // ---------------------------------------------------------- presets
   const presetCtl = { tune: null, sweep: null };
@@ -286,7 +285,7 @@ export async function render(root, params = {}) {
   regionSel.addEventListener("change", () => { presetState.region = regionSel.value; paintPresets(); });
   paintPresets();
 
-  root.appendChild(panel({
+  const presetsPanel = panel({
     title: "Quick signal presets",
     sub: "Tune capture or set a sweep range — no auto-transmit",
     icon: "antenna",
@@ -302,10 +301,55 @@ export async function render(root, params = {}) {
         presetData?.note ? "" : ""),
       presetList,
     ),
-  }));
+  });
 
-  const topGrid = h("div", { class: "panel-grid grid-2 mt-14" });
-  root.appendChild(topGrid);
+  // ------------------------------------------------------------- tabs
+  const tabDefs = [
+    ["receiver", "RECEIVER", "signal"],
+    ["scan", "SCAN", "search"],
+    ["capture", "CAPTURE", "radio"],
+    ["network", "NETWORK", "network"],
+    ["websdr", "WEBSDR", "globe"],
+    ["system", "SYSTEM", "settings"],
+  ];
+  const tabBar = h("div", { class: "sdr-tabs", role: "tablist" });
+  const tabButtons = {};
+  const paneReceiver = h("div", { class: "sdr-pane sdr-pane-receiver active", id: "sdr-pane-receiver" });
+  const paneScan = h("div", { class: "sdr-pane panel-grid grid-2", id: "sdr-pane-scan" });
+  const paneCapture = h("div", { class: "sdr-pane", id: "sdr-pane-capture" });
+  const paneNetwork = h("div", { class: "sdr-pane panel-grid grid-2", id: "sdr-pane-network" });
+  const paneWeb = h("div", { class: "sdr-pane", id: "sdr-pane-websdr" });
+  const paneSystem = h("div", { class: "sdr-pane panel-grid grid-2", id: "sdr-pane-system" });
+  const panes = { receiver: paneReceiver, scan: paneScan, capture: paneCapture,
+    network: paneNetwork, websdr: paneWeb, system: paneSystem };
+  let activeTab = "receiver";
+  function showTab(name) {
+    activeTab = panes[name] ? name : "receiver";
+    for (const [id, button] of Object.entries(tabButtons)) {
+      button.classList.toggle("active", id === activeTab);
+      button.setAttribute("aria-selected", id === activeTab ? "true" : "false");
+    }
+    for (const [id, pane] of Object.entries(panes)) {
+      pane.classList.toggle("active", id === activeTab);
+    }
+    try { localStorage.setItem("darksec.sdr.tab", activeTab); } catch {}
+    if (activeTab === "receiver") setTimeout(drawLiveSpectrum, 20);
+  }
+  for (const [id, label, iconName] of tabDefs) {
+    const button = h("button", { class: "sdr-tab", role: "tab", "data-tab": id,
+      onClick: () => showTab(id) }, icon(iconName), h("span", { text: label }));
+    tabButtons[id] = button;
+    tabBar.appendChild(button);
+  }
+  stats.classList.add("span-2");
+  legalNote.classList.add("span-2");
+  paneSystem.prepend(legalNote);
+  paneSystem.prepend(stats);
+  root.appendChild(tabBar);
+  root.appendChild(h("div", { class: "sdr-panes" }, ...Object.values(panes)));
+  let storedTab = "receiver";
+  try { storedTab = localStorage.getItem("darksec.sdr.tab") || "receiver"; } catch {}
+  showTab(storedTab);
 
   /* ------------------------------------------------------------- hardware */
   const devWrap = h("div", { class: "col" });
@@ -431,14 +475,15 @@ export async function render(root, params = {}) {
     h("div", { class: "row wrap mt-10" }, sweepBtn, stopSweepBtn,
       h("span", { class: "tiny muted", text: "Sweep uses hackrf_sweep or rtl_power. A full 1–6000 MHz sweep can take time and congest USB." })),
   );
-  topGrid.appendChild(panel({
+  paneScan.appendChild(panel({
     title: "Wideband spectrum",
-    sub: "hackrf_sweep · live NDJSON",
+    sub: "hackrf_sweep / rtl_power · live NDJSON",
     icon: "signal",
     cls: "span-2",
     body: spectrumBody,
   }));
-  topGrid.appendChild(hardwarePanel);
+  paneScan.appendChild(presetsPanel);
+  paneSystem.appendChild(hardwarePanel);
 
   /* ------------------------------------------------------- live receiver */
   const liveCenterStart = (Number(paramFreq) || 100) * 1e6;
@@ -663,7 +708,7 @@ export async function render(root, params = {}) {
     ctx.clearRect(0, 0, w, hh);
     ctx.fillStyle = "#020604";
     ctx.fillRect(0, 0, w, hh);
-    ctx.strokeStyle = "rgba(93,255,154,.08)";
+    ctx.strokeStyle = "rgba(72,215,255,.09)";
     for (let i = 1; i < 10; i++) {
       ctx.beginPath(); ctx.moveTo((w / 10) * i, 0); ctx.lineTo((w / 10) * i, hh); ctx.stroke();
     }
@@ -687,7 +732,7 @@ export async function render(root, params = {}) {
     }
     ctx.lineTo(w - 4, hh - 18); ctx.lineTo(4, hh - 18); ctx.closePath();
     const grad = ctx.createLinearGradient(0, 0, 0, hh);
-    grad.addColorStop(0, "rgba(93,255,154,.24)");
+    grad.addColorStop(0, "rgba(72,215,255,.24)");
     grad.addColorStop(1, "rgba(93,255,154,.015)");
     ctx.fillStyle = grad; ctx.fill();
     ctx.beginPath();
@@ -696,7 +741,7 @@ export async function render(root, params = {}) {
       const y = hh - 18 - ((bins[i] - lo) / Math.max(0.001, hi - lo)) * (hh - 30);
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
-    ctx.strokeStyle = "#5dff9a"; ctx.lineWidth = 1.3; ctx.stroke();
+    ctx.strokeStyle = "#7dffe0"; ctx.lineWidth = 1.3; ctx.stroke();
     if (liveSpec.peak_hz) {
       const px = 4 + ((liveSpec.peak_hz - liveSpec.start_hz) / Math.max(1, liveSpec.end_hz - liveSpec.start_hz)) * (w - 8);
       ctx.strokeStyle = "rgba(255,209,102,.8)";
@@ -741,9 +786,10 @@ export async function render(root, params = {}) {
         let t = (frame[idx] - lo) / Math.max(0.001, hi - lo);
         t = Math.max(0, Math.min(1, t));
         let r, g, b;
-        if (t < .45) { const k = t / .45; r = 2 + 10 * k; g = 8 + 80 * k; b = 6 + 24 * k; }
-        else if (t < .8) { const k = (t - .45) / .35; r = 12 + 80 * k; g = 88 + 167 * k; b = 30 + 40 * k; }
-        else { const k = (t - .8) / .2; r = 92 + 163 * k; g = 255; b = 70 + 150 * k; }
+        if (t < .25) { const k = t / .25; r = 2 + 4 * k; g = 10 + 30 * k; b = 18 + 44 * k; }
+        else if (t < .5) { const k = (t - .25) / .25; r = 6 + 20 * k; g = 40 + 100 * k; b = 62 + 46 * k; }
+        else if (t < .75) { const k = (t - .5) / .25; r = 26 + 110 * k; g = 140 + 80 * k; b = 108 - 40 * k; }
+        else { const k = (t - .75) / .25; r = 136 + 119 * k; g = 220 + 35 * k; b = 68 + 120 * k; }
         const p = (y * width + x) * 4;
         img.data[p] = r; img.data[p + 1] = g; img.data[p + 2] = b; img.data[p + 3] = 255;
       }
@@ -976,8 +1022,8 @@ export async function render(root, params = {}) {
     h("div", { class: "sdr-keyhint tiny muted" },
       "CLICK SPECTRUM TO TUNE · WHEEL = STEP · ↑/↓ OR ←/→ = STEP · M = MODE · SPACE = STOP"),
   );
-  topGrid.appendChild(panel({
-    title: "Live receiver",
+  paneReceiver.appendChild(panel({
+    title: "Receiver",
     sub: "Spectrum + waterfall + audio · click to tune",
     icon: "signal",
     cls: "span-2 sdr-live-panel",
@@ -1043,7 +1089,7 @@ export async function render(root, params = {}) {
     captureBody.insertBefore(h("div", { class: "callout small" },
       `Tuned from Communications: ${fmt.num(paramFreq, 4)} MHz ${paramMode ? `// ${paramMode.toUpperCase()}` : ""}`), capGrid);
   }
-  topGrid.appendChild(panel({
+  paneCapture.appendChild(panel({
     title: "Capture & demodulate",
     sub: "HackRF / RTL-SDR / rtl_tcp → local DSP",
     icon: "radio",
@@ -1074,7 +1120,7 @@ export async function render(root, params = {}) {
     netStatus,
     h("div", { class: "tiny muted mt-6", text: "Connect DarkSec to a Raspberry Pi/uConsole or another host running rtl_tcp. Select “Network rtl_tcp” in Live audio or Capture after probing." }),
   );
-  topGrid.appendChild(panel({ title: "Network SDR", sub: "rtl_tcp client", icon: "network", body: netBody }));
+  paneNetwork.appendChild(panel({ title: "Network SDR", sub: "rtl_tcp client", icon: "network", body: netBody }));
 
   const srvPort = input({ type: "number", value: String(store.settings?.sdr_server_port || 1234), min: "1", max: "65535" });
   const srvBind = input({ type: "text", value: store.settings?.sdr_server_bind || "0.0.0.0" });
@@ -1107,7 +1153,7 @@ export async function render(root, params = {}) {
     srvStatus,
     h("div", { class: "tiny muted mt-6", text: "rtl_tcp has no authentication. Use only a trusted private LAN. Another DarkSec instance can connect from the Network SDR panel." }),
   );
-  topGrid.appendChild(panel({ title: "Share this SDR", sub: "rtl_tcp server", icon: "upload", body: srvBody }));
+  paneNetwork.appendChild(panel({ title: "Share this SDR", sub: "rtl_tcp server", icon: "upload", body: srvBody }));
 
   function paintServer(out) {
     srvStatus.className = `tiny ${out?.running ? "muted" : "muted"}`;
@@ -1229,7 +1275,7 @@ export async function render(root, params = {}) {
     h("div", { class: "scroll-y mt-8", style: { maxHeight: "46vh" } }, wsList),
     h("div", { class: "tiny muted mt-8", text: "LISTEN opens the receiver's own web interface tuned to this frequency. DarkSec does not proxy or record public receivers; respect operator limits and terms." }),
   );
-  root.appendChild(panel({ title: "WebSDR / remote receivers", sub: "No local radio required", icon: "globe", cls: "mt-14", body: wsBody }));
+  paneWeb.appendChild(panel({ title: "WebSDR / remote receivers", sub: "No local radio required · opens in-app", icon: "globe", body: wsBody }));
   loadWebsdr(false);
 
   let pollTimer = null;
@@ -1334,9 +1380,8 @@ export async function render(root, params = {}) {
     tools: [btn("REFRESH", { size: "sm", icon: "refresh", onClick: () => loadRecordings() })],
     body: h("div", { class: "col", id: "sdr-rec-list" }),
   });
-  root.appendChild(recPanel);
-  root.appendChild(h("div", { class: "grid grid-2 mt-14", id: "sdr-lower" }));
-  const lower = root.querySelector("#sdr-lower");
+  paneCapture.appendChild(recPanel);
+  const lower = paneSystem;
 
   async function loadRecordings() {
     try {
@@ -1508,11 +1553,11 @@ export async function render(root, params = {}) {
         return table;
       })()),
     });
-    root.appendChild(jobsPanel);
+    paneCapture.appendChild(jobsPanel);
   }
 
   const cards = await referenceSection("COMMS", { limit: 6 });
-  if (cards) root.appendChild(panel({ title: "Radio field cards", sub: "Receive and procedure reference", icon: "book", cls: "mt-14", body: cards }));
+  if (cards) paneSystem.appendChild(panel({ title: "Radio field cards", sub: "Receive and procedure reference", icon: "book", body: cards }));
 
   loadRecordings();
 

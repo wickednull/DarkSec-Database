@@ -813,6 +813,20 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 .waterfall-shell { height: 120px; border: 1px solid var(--line); border-top: 0; background: #020604; overflow: hidden; }
 .waterfall-shell canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
 .sdr-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 9px; align-items: end; }
+.sdr-tabs { position: sticky; top: 0; z-index: 6; display: flex; gap: 2px; margin: 14px 0 0; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; background: linear-gradient(180deg, var(--bg) 78%, rgba(0,0,0,0)); backdrop-filter: blur(6px); }
+.sdr-tabs::-webkit-scrollbar { display: none; }
+.sdr-tab { display: inline-flex; align-items: center; gap: 7px; padding: 10px 15px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-family: "JetBrains Mono", monospace; font-size: 11px; letter-spacing: .08em; cursor: pointer; white-space: nowrap; }
+.sdr-tab svg { width: 14px; height: 14px; opacity: .8; }
+.sdr-tab:hover { color: var(--text); background: rgba(93,255,154,.04); }
+.sdr-tab.active { color: var(--accent); border-bottom-color: var(--accent); background: linear-gradient(180deg, rgba(93,255,154,.08), transparent); }
+.sdr-panes { margin-top: 14px; }
+.sdr-pane { display: none; }
+.sdr-pane.active { display: block; }
+.sdr-pane.panel-grid.active { display: grid; }
+.sdr-pane > .panel { margin-top: 0; }
+.sdr-live-panel { background: radial-gradient(120% 90% at 50% 0%, rgba(93,255,154,.055), transparent 55%), rgba(6,12,9,.72); border: 1px solid rgba(93,255,154,.18); box-shadow: 0 18px 50px rgba(0,0,0,.28); }
+.sdr-live-panel .panel-head { display: none; }
+.sdr-live-panel .panel-body { padding: 14px; }
 .sdr-cockpit { display: flex; flex-direction: column; gap: 10px; }
 .sdr-vfo-row { display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
 .sdr-vfo-main { flex: 1 1 420px; min-width: 260px; }
@@ -829,8 +843,8 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 .sdr-band-row { display: flex; gap: 4px; flex-wrap: wrap; }
 .sdr-band-btn { font-family: "JetBrains Mono", monospace; font-size: 10px; letter-spacing: .05em; padding: 4px 7px; border: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; }
 .sdr-band-btn:hover { border-color: var(--amber, #ffd166); color: var(--amber, #ffd166); }
-.sdr-live-grid { border: 1px solid var(--line); background: #020604; display: flex; flex-direction: column; overflow: hidden; }
-.sdr-live-spectrum { display: block; width: 100%; height: 250px; cursor: crosshair; touch-action: none; }
+.sdr-live-grid { border: 1px solid rgba(93,255,154,.16); border-radius: 3px; background: #020604; display: flex; flex-direction: column; overflow: hidden; box-shadow: inset 0 0 30px rgba(0,0,0,.55); }
+.sdr-live-spectrum { display: block; width: 100%; height: 250px; cursor: crosshair; touch-action: none; background: radial-gradient(80% 90% at 50% 0%, rgba(93,255,154,.035), transparent 70%), #020604; }
 .sdr-live-waterfall { display: block; width: 100%; height: 92px; border-top: 1px solid var(--line); image-rendering: pixelated; }
 .sdr-live-readout { font-family: "JetBrains Mono", monospace; font-size: 10px; color: var(--muted); letter-spacing: .03em; }
 .sdr-smeter { height: 13px; border: 1px solid var(--line); background: #020604; overflow: hidden; }
@@ -839,6 +853,8 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 .sdr-small-input { max-width: 108px; }
 .sdr-inline-select { min-width: 96px; }
 .sdr-keyhint { letter-spacing: .045em; }
+.rec-item audio { width: min(260px, 42vw); height: 30px; }
+.rec-item { align-items: center; }
 .btn.recording, .sdr-vfo-side .btn.recording { background: #ff5c5c; border-color: #ff5c5c; color: #1a0202; font-weight: 700; }
 .sdr-live-panel:fullscreen { background: var(--bg); padding: 14px; overflow: auto; }
 .sdr-websdr-body { height: min(76vh, 880px); background: #000; }
@@ -897,6 +913,8 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 .sdr-preset-dot { color: var(--muted-2); }
 .sdr-preset-actions { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .sdr-presets-panel .panel-head { align-items: center; }
+.sdr-presets-panel { grid-column: 1 / -1; }
+.sdr-preset-list { max-height: 430px; overflow-y: auto; }
 @media (max-width: 700px) {
   .sdr-preset-row { grid-template-columns: 26px minmax(0, 1fr); }
   .sdr-preset-actions { grid-column: 1 / -1; justify-content: flex-start; padding-left: 30px; }
