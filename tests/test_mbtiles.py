@@ -629,3 +629,28 @@ def test_existing_empty_folder_does_not_resolve_to_itself(tmp_path, monkeypatch)
     mbtiles.invalidate()
     assert mbtiles.resolve_sources(str(empty)) == []
     assert mbtiles.describe_path(str(empty))["ok"] is False
+
+
+def test_archive_connection_is_safe_across_worker_threads(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from darksec import mbtiles
+
+    archive = make_mbtiles(tmp_path / "threaded.mbtiles", tiles={(8, 57, 97): PNG})
+    mbtiles.invalidate()
+    # First access opens and caches the SQLite connection in this thread, just
+    # like a Settings CHECK before the map requests tiles on other workers.
+    assert mbtiles.lookup_tile(8, 57, 97, raw=str(archive))[0] == PNG
+
+    def read(_):
+        hit = mbtiles.lookup_tile(8, 57, 97, raw=str(archive))
+        return bool(hit and hit[0] == PNG)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert all(pool.map(read, range(12)))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        sample = pool.submit(
+            lambda: mbtiles._archive_for(archive).sample_tile()
+        ).result()
+    assert sample["ok"] is True

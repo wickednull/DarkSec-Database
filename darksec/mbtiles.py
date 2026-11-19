@@ -672,7 +672,11 @@ def _connect(path: Path) -> sqlite3.Connection:
     last: Exception | None = None
     for target in attempts:
         try:
-            conn = sqlite3.connect(target, uri=True, timeout=3)
+            # Archive objects are cached and used by Starlette's threadpool, so
+            # the connection must be usable from any worker thread. Access is
+            # serialised by Archive.lock.
+            conn = sqlite3.connect(target, uri=True, timeout=3,
+                                   check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
             return conn
@@ -1046,30 +1050,31 @@ class Archive:
         return data or None
 
     def describe(self) -> dict[str, Any]:
-        try:
-            size = self.path.stat().st_size
-        except OSError:
-            size = None
-        out: dict[str, Any] = {
-            "path": str(self.path),
-            "name": self.name or self.path.stem,
-            "file": self.path.name,
-            "size_bytes": size,
-            "format": self.format or "unknown",
-            "scheme": self.scheme,
-            "minzoom": self.minzoom,
-            "maxzoom": self.maxzoom,
-            "bounds": self.bounds,
-            "vector": self.vector,
-            "raster": self.raster,
-            "usable": self.usable,
-            "has_tiles": self.has_tiles,
-            "vector_layers": self.vector_layers,
-            "attribution": self.attribution,
-            "indexed": self.indexed,
-            "legacy": self.legacy,
-            "error": self.error,
-        }
+        with self.lock:
+            try:
+                size = self.path.stat().st_size
+            except OSError:
+                size = None
+            out: dict[str, Any] = {
+                "path": str(self.path),
+                "name": self.name or self.path.stem,
+                "file": self.path.name,
+                "size_bytes": size,
+                "format": self.format or "unknown",
+                "scheme": self.scheme,
+                "minzoom": self.minzoom,
+                "maxzoom": self.maxzoom,
+                "bounds": self.bounds,
+                "vector": self.vector,
+                "raster": self.raster,
+                "usable": self.usable,
+                "has_tiles": self.has_tiles,
+                "vector_layers": list(self.vector_layers),
+                "attribution": self.attribution,
+                "indexed": self.indexed,
+                "legacy": self.legacy,
+                "error": self.error,
+            }
         return out
 
     def sample_tile(self) -> dict[str, Any] | None:
@@ -1082,10 +1087,19 @@ class Archive:
             if self.conn is None:
                 return {"ok": False, "error": self.error or "archive is not open"}
             try:
-                row = self.conn.execute(
-                    f"SELECT zoom_level, tile_column, tile_row FROM {self._tile_source()} "
-                    "ORDER BY zoom_level LIMIT 1"
-                ).fetchone()
+                if self.minzoom is not None:
+                    row = self.conn.execute(
+                        f"SELECT zoom_level, tile_column, tile_row FROM {self._tile_source()} "
+                        "WHERE zoom_level=? LIMIT 1",
+                        (int(self.minzoom),),
+                    ).fetchone()
+                else:
+                    row = None
+                if row is None:
+                    row = self.conn.execute(
+                        f"SELECT zoom_level, tile_column, tile_row FROM {self._tile_source()} "
+                        "ORDER BY zoom_level LIMIT 1"
+                    ).fetchone()
             except sqlite3.Error as exc:
                 return {"ok": False, "error": str(exc)[:200]}
             if not row:
