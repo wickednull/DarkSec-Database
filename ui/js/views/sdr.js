@@ -463,6 +463,8 @@ export async function render(root, params = {}) {
   let liveRecBytes = 0;
   let liveRecStarted = 0;
   let liveRecTimer = null;
+  let liveScanActive = false;
+  let liveScanTimer = null;
 
   const liveVfo = h("div", { class: "sdr-vfo-digits" });
   const liveSub = h("div", { class: "sdr-vfo-sub" });
@@ -491,6 +493,7 @@ export async function render(root, params = {}) {
   const liveStopBtn = btn("STOP", { icon: "stop", tone: "danger", disabled: true });
   const liveRecBtn = btn("REC", { icon: "mic", tone: "ghost" });
   const liveFull = btn("FULL", { icon: "maximize", tone: "ghost" });
+  const liveScanBtn = btn("SCAN", { icon: "search", tone: "ghost" });
   const liveStatus = h("span", { class: "tiny muted", text: "IDLE" });
   const liveModeRow = h("div", { class: "sdr-mode-row" });
   const liveBandRow = h("div", { class: "sdr-band-row" });
@@ -561,6 +564,60 @@ export async function render(root, params = {}) {
     paintVfo();
     liveSend({ cmd: "tune", freq_mhz: liveCenter / 1e6, mode: liveModeValue,
       squelch: Number(liveSquelchIn.value) || 0, gain: Number(liveGainIn.value) || 40 });
+  }
+
+  function openTuneDialog() {
+    const value = input({ type: "number", value: (liveCenter / 1e6).toFixed(6),
+      step: "0.000001", min: "0.1", max: "6000" });
+    const m = modal({
+      title: "Tune receiver",
+      sub: "Enter a frequency in MHz",
+      narrow: true,
+      body: field("FREQUENCY (MHz)", value),
+      actions: [
+        btn("CANCEL", { tone: "ghost", onClick: () => m.close() }),
+        btn("TUNE", { tone: "primary", icon: "target", onClick: () => {
+          const hz = Number(value.value) * 1e6;
+          if (!(hz >= 100_000 && hz <= 6_000_000_000)) { toast("Frequency must be 0.1–6000 MHz", "warn"); return; }
+          tuneTo(hz);
+          m.close();
+        } }),
+      ],
+    });
+    setTimeout(() => { try { value.focus(); value.select(); } catch {} }, 30);
+  }
+  function stopScan(message = "") {
+    liveScanActive = false;
+    if (liveScanTimer) { clearTimeout(liveScanTimer); liveScanTimer = null; }
+    liveScanBtn.replaceChildren(h("span", { text: "SCAN" }));
+    if (message) toast(message, "warn", 5000);
+  }
+  function startScan() {
+    if (liveScanActive) { stopScan(); return; }
+    if (!liveRunning) { toast("Press PLAY before scanning", "warn"); return; }
+    liveScanActive = true;
+    liveScanBtn.replaceChildren(h("span", { text: "STOP SCAN" }));
+    let steps = 0;
+    const step = Math.max(1000, liveStep);
+    const threshold = Number(liveSquelchIn.value) > 0 ? -75 : -80;
+    const tick = () => {
+      if (!liveScanActive) return;
+      if (steps++ > 600 || liveCenter > 6_000_000_000) {
+        stopScan("Scan finished: no signal above threshold");
+        return;
+      }
+      tuneTo(liveCenter + step);
+      liveScanTimer = setTimeout(() => {
+        if (!liveScanActive) return;
+        const peak = Number(liveSpec?.peak_db);
+        if (Number.isFinite(peak) && peak > threshold) {
+          stopScan(`Signal found at ${fmt.num(liveCenter / 1e6, 5)} MHz (${fmt.num(peak, 1)} dB)`);
+        } else {
+          tick();
+        }
+      }, 420);
+    };
+    tick();
   }
 
   function schedulePcm(arrayBuffer) {
@@ -829,11 +886,15 @@ export async function render(root, params = {}) {
     livePlay.replaceChildren(h("span", { text: "PLAY" }));
     liveStatus.textContent = "IDLE";
     liveSMeter.style.width = "0%";
+    stopScan();
     stopRecording();
   }
 
+  liveVfo.addEventListener("click", openTuneDialog);
+  liveVfo.style.cursor = "pointer";
   livePlay.addEventListener("click", startLive);
   liveStopBtn.addEventListener("click", stopLive);
+  liveScanBtn.addEventListener("click", startScan);
   liveRecBtn.addEventListener("click", () => { liveRecording ? stopRecording() : startRecording(); });
   liveBackendSel.addEventListener("change", () => {
     liveBackendValue = liveBackendSel.value;
@@ -888,7 +949,7 @@ export async function render(root, params = {}) {
       h("div", { class: "sdr-vfo-side" },
         h("div", { class: "row between" }, h("span", { class: "tiny muted", text: "S-METER" }), liveStatus),
         liveSBox,
-        h("div", { class: "row wrap gap-6 mt-6" }, livePlay, liveStopBtn, liveRecBtn, liveFull))),
+        h("div", { class: "row wrap gap-6 mt-6" }, livePlay, liveStopBtn, liveScanBtn, liveRecBtn, liveFull))),
     liveModeRow,
     liveGrid,
     liveReadout,
