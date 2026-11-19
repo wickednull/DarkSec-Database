@@ -84,6 +84,16 @@ does not require SDR++; it uses `rtl_sdr`, `rtl_power` and `rtl_tcp` directly.
   ```
   Replug the dongle afterwards.
 
+## RTL-SDR HF direct sampling and the HackerGadgets AIO V2
+
+The AIO V2 uses an RTL2832U + R820T with an HF path wired to the **Q** direct-sampling input. In the receiver select **HF Q** for 0.1–24 MHz shortwave and **TUNER 24M+** for VHF/UHF. The same selector exists in Scan, Capture and Share this SDR.
+
+`rtl_test` reporting `No E4000 tuner found, aborting.` is normal for an R820T; it is not a fault. The useful lines are the device name, `R820T tuner`, the gain list and `Sampling at ...`.
+
+## ADS-B / dump1090
+
+Open **SDR → ADS-B** to start and stop a managed `dump1090`/`readsb` receiver, set the JSON port, tuner gain and device index, and watch the aircraft table. DarkSec reuses an existing feed if one is already running. Stop the live receiver or rtl_tcp first — one RTL-SDR cannot feed two programs at once. Logs are written to `fielddata/logs/dump1090.log`.
+
 ## HackRF
 
 ```bash

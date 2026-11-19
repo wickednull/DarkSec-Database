@@ -3846,6 +3846,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                    "sdr_ppm": (-1000, 1000), "sdr_rtl_gain": (0, 62),
                    "sdr_rtl_tcp_port": (1, 65535), "sdr_server_port": (1, 65535),
                    "sdr_live_squelch": (0, 100), "sdr_live_rate": (0.25, 3.2),
+                   "adsb_port": (1, 65535), "adsb_gain": (0, 62), "adsb_device": (0, 8),
                    "position_accuracy_m": (0, 100000),
                    "position_mode": (0, 3), "font_scale": (0.8, 1.5),
                    "critical_radius_km": (100, 10000), "lan_port": (1, 65535)}
@@ -3863,14 +3864,14 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     raise HTTPException(status_code=400, detail=f"{key} out of range")
                 value = f
             if key in ("sdr_tx_enabled", "sdr_tx_attested", "sdr_amp", "sdr_bias_tee",
-                       "sdr_server_enabled", "scanlines", "sound",
+                       "sdr_server_enabled", "adsb_auto_start", "scanlines", "sound",
                        "map_vector", "map_auto_pack", "map_space_background", "map_labels_overlay", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter", "assistant_system_tools", "assistant_medical_tools", "assistant_history_encrypted", "lan_easy_access", "lan_tls"):
                 value = bool(value)
             if key in ("lan_port", "sdr_rtl_tcp_port", "sdr_server_port"):
                 value = int(float(value))
             if key in ("callsign", "team", "operator", "timezone", "units", "date_format",
                        "grid_format", "accent", "tile_source", "mbtiles_path", "map_cache_path", "dem_mbtiles_path",
-                       "sdr_backend", "sdr_rtl_tcp_host", "sdr_server_bind",
+                       "sdr_backend", "sdr_rtl_tcp_host", "sdr_server_bind", "sdr_direct_sampling", "adsb_host",
                        "dem_encoding", "epoch", "position_source", "position_updated_at", "position_fix_at",
                        "ollama_base_url", "ollama_model", "assistant_keep_alive"):
                 value = str(value)[:500]
@@ -6292,7 +6293,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     def sdr_live(request: Request, freq_mhz: float = 100.0, mode: str = "nfm",
                  backend: str = "auto", rate: float = 1.024, gain: float = 40,
                  squelch: float = 0, host: str = "", port: int = 1234,
-                 lna: int = 32, vga: int = 40, amp: bool = False):
+                 lna: int = 32, vga: int = 40, amp: bool = False,
+                 direct: bool = False):
         require(1.0 <= freq_mhz <= 6000.0, "Frequency must be 1-6000 MHz")
         require(0.25 <= rate <= 3.2, "Live sample rate must be 0.25-3.2 Msps")
         settings = db(request).all_settings()
@@ -6324,6 +6326,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     rate=rate_hz, gain=float(gain or settings.get("sdr_rtl_gain") or 40),
                     ppm=int(settings.get("sdr_ppm") or 0), squelch=float(squelch or 0),
                     host=host, port=port, lna=int(lna), vga=int(vga), amp=bool(amp),
+                    direct=bool(direct or str(settings.get("sdr_direct_sampling") or "0") != "0"),
                     stop_event=stop_event,
                 )
             finally:
@@ -6367,6 +6370,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             lna = int(ws.query_params.get("lna", "32") or 32)
             vga = int(ws.query_params.get("vga", "40") or 40)
             amp = str(ws.query_params.get("amp", "false")).lower() in ("1", "true", "yes")
+            direct = str(ws.query_params.get("direct", "0")).lower() in ("1", "true", "yes", "2")
             pre = sdr.live_preflight(backend, host, port)
             chosen = pre["backend"]
             if chosen == "hackrf":
@@ -6428,7 +6432,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                       "rate": rate, "audio_rate": sdr.live_audio_rate(rate),
                       "mode": params["mode"]})
                 source = sdr._live_source(chosen, center, rate, params["gain"], ppm,
-                                          host, port, lna, vga, amp, 0, stop_event=stop)
+                                          host, port, lna, vga, amp, 0, stop_event=stop,
+                                          direct=direct or str(settings.get("sdr_direct_sampling") or "0") != "0")
                 frame = 0
                 try:
                     for data, sample_format in source:
@@ -6562,6 +6567,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 gain=float(payload.get("gain") or 40),
                 ppm=int(payload.get("ppm") or 0),
                 bias=bool(payload.get("bias", False)),
+                direct=bool(payload.get("direct", False)),
             )
             db(request).audit("SDR_SERVER_START", f"port={out.get('port')} bind={out.get('bind')}")
             return out
@@ -6578,7 +6584,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     def sdr_sweep_stream(request: Request, start_mhz: float = 88.0, end_mhz: float = 108.0,
                          bin_khz: float = 100.0, lna: int = 32, vga: int = 40, amp: bool = False,
                          backend: str = "auto", gain: int = 40, ppm: int = 0,
-                         device: int = 0):
+                         device: int = 0, direct: bool = False):
         require(0.1 <= start_mhz < end_mhz <= 6000, "Sweep range must be 0.1-6000 MHz")
         require(10 <= bin_khz <= 5000, "Bin width must be 10-5000 kHz")
         require(0 <= lna <= 40 and 0 <= vga <= 62, "Gain out of range")
@@ -6591,7 +6597,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 for frame in sdr.sweep_stream(int(start_mhz * 1e6), int(end_mhz * 1e6),
                                               int(bin_khz * 1e3), lna, vga, amp,
                                               backend=backend, gain=gain, ppm=ppm,
-                                              device=device):
+                                              device=device, direct=direct):
                     yield json.dumps(frame) + "\n"
             finally:
                 request.app.state.sweep_active = False
@@ -6614,6 +6620,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 backend=str(payload.get("backend", "auto")).lower(),
                 host=str(payload.get("sdr_rtl_tcp_host") or payload.get("host") or ""),
                 port=int(payload.get("sdr_rtl_tcp_port") or payload.get("port") or 0),
+                direct=bool(payload.get("direct", False)),
             )
             db(request).audit("SDR_CAPTURE", f"job={job['id']} freq={freq}")
             return job
@@ -6687,6 +6694,29 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     @app.get("/api/sdr/adsb")
     def sdr_adsb():
         return sdr.adsb_snapshot()
+
+    @app.get("/api/sdr/adsb/status")
+    def sdr_adsb_status():
+        return sdr.adsb_status()
+
+    @app.post("/api/sdr/adsb/start")
+    def sdr_adsb_start(request: Request, payload: dict = Body(...)):
+        try:
+            out = sdr.start_adsb(
+                port=int(payload.get("port") or 8080),
+                gain=int(payload.get("gain") or 40),
+                device=int(payload.get("device") or 0),
+            )
+            db(request).audit("ADSB_START", f"port={out.get('port')} binary={out.get('binary')}")
+            return out
+        except (TypeError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/sdr/adsb/stop")
+    def sdr_adsb_stop(request: Request):
+        out = sdr.stop_adsb()
+        db(request).audit("ADSB_STOP", "dump1090 stopped")
+        return out
 
     @app.post("/api/sdr/tx")
     def sdr_tx(request: Request, payload: dict = Body(...)):

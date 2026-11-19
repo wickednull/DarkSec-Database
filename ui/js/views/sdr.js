@@ -331,6 +331,7 @@ export async function render(root, params = {}) {
     ["capture", "CAPTURE", "radio"],
     ["network", "NETWORK", "network"],
     ["websdr", "WEBSDR", "globe"],
+    ["adsb", "ADS-B", "satellite"],
     ["system", "SYSTEM", "settings"],
   ];
   const tabBar = h("div", { class: "sdr-tabs", role: "tablist" });
@@ -340,9 +341,10 @@ export async function render(root, params = {}) {
   const paneCapture = h("div", { class: "sdr-pane", id: "sdr-pane-capture" });
   const paneNetwork = h("div", { class: "sdr-pane panel-grid grid-2", id: "sdr-pane-network" });
   const paneWeb = h("div", { class: "sdr-pane", id: "sdr-pane-websdr" });
+  const paneAdsb = h("div", { class: "sdr-pane", id: "sdr-pane-adsb" });
   const paneSystem = h("div", { class: "sdr-pane panel-grid grid-2", id: "sdr-pane-system" });
   const panes = { receiver: paneReceiver, scan: paneScan, capture: paneCapture,
-    network: paneNetwork, websdr: paneWeb, system: paneSystem };
+    network: paneNetwork, websdr: paneWeb, adsb: paneAdsb, system: paneSystem };
   let activeTab = "receiver";
   function showTab(name) {
     activeTab = panes[name] ? name : "receiver";
@@ -406,7 +408,8 @@ export async function render(root, params = {}) {
     badge(`${(devices.backends || []).filter((b) => b.connected && b.rx).length} RX`, "green")));
   rf.appendChild(kv([
     ["HackRF", hackrf.connected ? (hackrf.board_id || "connected") : tools.hackrf_info ? "tools installed / no device" : "not installed"],
-    ["RTL-SDR", rtl.connected ? (rtl.tuner || "connected") : rtl.present || tools.rtl_test ? "tools installed / no device" : "not installed"],
+    ["RTL-SDR", rtl.connected ? [rtl.device_name || "RTL-SDR", rtl.tuner].filter(Boolean).join(" · ") : rtl.present || tools.rtl_test ? "tools installed / no device" : "not installed"],
+    ["HF mode", rtl.direct_sampling === 2 || String(store.settings?.sdr_direct_sampling || "0") === "2" ? "DIRECT Q / HF" : "TUNER"],
     ["RTL gains", (rtl.gains || []).length ? `${rtl.gains.length} steps` : "—"],
     ["SoapySDR", soapy.connected ? `${(soapy.devices || []).length} device(s)` : soapy.present ? "no device" : "not installed"],
     ["Network", network.configured ? `${network.host}:${network.port}` : "not configured"],
@@ -475,6 +478,9 @@ export async function render(root, params = {}) {
   ], String(store.settings?.sdr_backend || "auto"));
   const sweepGain = input({ type: "number", value: String(store.settings?.sdr_rtl_gain ?? 40), min: "0", max: "62" });
   const sweepPpm = input({ type: "number", value: String(store.settings?.sdr_ppm ?? 0), min: "-1000", max: "1000" });
+  const sweepDirect = select([
+    { value: "0", label: "TUNER" }, { value: "2", label: "HF Q" },
+  ], String(store.settings?.sdr_direct_sampling || "0") === "2" ? "2" : "0");
   controls.append(
     field("START (MHz)", startInput),
     field("END (MHz)", endInput),
@@ -484,6 +490,7 @@ export async function render(root, params = {}) {
     field("VGA (0-62)", vgaInput),
     field("RTL GAIN", sweepGain),
     field("PPM", sweepPpm),
+    field("HF MODE", sweepDirect),
     h("div", { class: "field" }, h("label", { text: "AMP" }), ampInput),
   );
   const sweepBtn = btn("START SWEEP", { tone: "primary", icon: "play" });
@@ -541,6 +548,11 @@ export async function render(root, params = {}) {
     { value: "rtl_tcp", label: "NETWORK" },
   ], liveBackendValue);
   liveBackendSel.classList.add("sdr-inline-select");
+  const liveDirect = select([
+    { value: "0", label: "TUNER 24M+" },
+    { value: "2", label: "HF Q" },
+  ], String(store.settings?.sdr_direct_sampling || "0") === "2" ? "2" : "0");
+  liveDirect.classList.add("sdr-inline-select");
   const liveRateIn = input({ type: "number", value: String(store.settings?.sdr_live_rate ?? 1.024), step: "0.025", min: "0.25", max: "3.2" });
   liveRateIn.classList.add("sdr-small-input");
   const liveGainIn = input({ type: "number", value: String(store.settings?.sdr_rtl_gain ?? 40), min: "0", max: "62" });
@@ -578,7 +590,7 @@ export async function render(root, params = {}) {
   }
   function paintVfo() {
     liveVfo.textContent = formatVfo(liveCenter);
-    liveSub.textContent = `${backendName(liveBackendValue)} · ${liveModeValue.toUpperCase()} · step ${fmt.num(liveStep, 0)} Hz`;
+    liveSub.textContent = `${backendName(liveBackendValue)} · ${liveModeValue.toUpperCase()} · ${liveDirect.value === "2" ? "HF Q" : "TUNER"} · step ${fmt.num(liveStep, 0)} Hz`;
   }
   function paintModeButtons() {
     for (const button of liveModeRow.querySelectorAll("button")) {
@@ -898,6 +910,7 @@ export async function render(root, params = {}) {
       gain: String(Number(liveGainIn.value) || 40),
       squelch: String(Number(liveSquelchIn.value) || 0),
       host: String(netHost?.value || "").trim(), port: String(Number(netPort?.value) || 1234),
+      direct: liveDirect.value,
     });
     liveWs = new WebSocket(`${scheme}://${location.host}/api/sdr/ws?${qs}`);
     liveWs.binaryType = "arraybuffer";
@@ -968,6 +981,12 @@ export async function render(root, params = {}) {
     if (liveRunning) { stopLive(); setTimeout(startLive, 250); }
     paintVfo();
   });
+  liveDirect.addEventListener("change", () => {
+    if (liveRunning) { stopLive(); setTimeout(startLive, 250); }
+    toast(liveDirect.value === "2"
+      ? "HF direct sampling Q selected — use 0.1–24 MHz with an HF antenna"
+      : "Tuner mode selected — 24 MHz and above");
+  });
   liveStepSel.addEventListener("change", () => { liveStep = Number(liveStepSel.value) || 1000; paintVfo(); });
   liveVolumeIn.addEventListener("input", () => {
     if (liveGainNode) { try { liveGainNode.gain.value = Number(liveVolumeIn.value) || 0.8; } catch {} }
@@ -1012,7 +1031,8 @@ export async function render(root, params = {}) {
           btn("◀", { size: "sm", tone: "ghost", onClick: () => tuneBy(-liveStep) }),
           btn("▶", { size: "sm", tone: "ghost", onClick: () => tuneBy(liveStep) }),
           liveStepSel,
-          liveBackendSel)),
+          liveBackendSel,
+          liveDirect)),
       h("div", { class: "sdr-vfo-side" },
         h("div", { class: "row between" }, h("span", { class: "tiny muted", text: "S-METER" }), liveStatus),
         liveSBox,
@@ -1036,12 +1056,15 @@ export async function render(root, params = {}) {
               sdr_live_squelch: Number(liveSquelchIn.value) || 0,
               sdr_server_port: Number(srvPort.value) || 1234,
               sdr_server_bind: srvBind.value.trim() || "0.0.0.0",
+              sdr_direct_sampling: liveDirect.value,
             });
             toast("SDR defaults saved");
           } catch (err) { toast(err.message, "error"); }
         } }))),
     h("div", { class: "sdr-keyhint tiny muted" },
       "CLICK FREQUENCY TO TYPE · CLICK SPECTRUM TO TUNE · WHEEL = STEP · ↑/↓ OR ←/→ = STEP · M = MODE · SPACE = STOP"),
+    h("div", { class: "tiny muted" },
+      "R820T tuner: 24 MHz and above · HF Q direct: 0.1–24 MHz with an HF antenna. AIO V2 uses the Q branch."),
   );
   paneReceiver.appendChild(panel({
     title: "Receiver",
@@ -1062,6 +1085,9 @@ export async function render(root, params = {}) {
     { value: "rtl", label: "RTL-SDR (0.9–3.2 Msps)" },
     { value: "rtl_tcp", label: "Network rtl_tcp" },
   ], String(store.settings?.sdr_backend || "auto"));
+  const capDirect = select([
+    { value: "0", label: "Tuner 24 MHz+" }, { value: "2", label: "HF direct Q" },
+  ], String(store.settings?.sdr_direct_sampling || "0") === "2" ? "2" : "0");
   const capDemod = select(DEMODS, DEMODS.some((d) => d.value === paramMode) ? paramMode : "nfm");
   const capName = input({ type: "text", placeholder: "optional label", maxlength: "120" });
   const capKeepIq = checkbox("Keep IQ file (large; enables TX replay)", false);
@@ -1099,6 +1125,7 @@ export async function render(root, params = {}) {
     field("DURATION (s)", capSeconds),
     field("BACKEND", capBackend),
     field("SAMPLE RATE (Msps)", capRate, "HackRF 2–20; RTL-SDR 0.9–3.2"),
+    field("HF MODE", capDirect, "Tuner for 24 MHz+, HF Q for shortwave"),
     field("DEMOD", capDemod),
     field("LABEL", capName),
     h("div", { class: "wide" }, capKeepIq),
@@ -1148,6 +1175,9 @@ export async function render(root, params = {}) {
   const srvFreq = input({ type: "number", value: "100.0", step: "0.0001", min: "0.1", max: "6000" });
   const srvRate = input({ type: "number", value: "2.4", step: "0.05", min: "0.9", max: "3.2" });
   const srvGain = input({ type: "number", value: String(store.settings?.sdr_rtl_gain ?? 40), min: "0", max: "62" });
+  const srvDirect = select([
+    { value: "0", label: "Tuner 24 MHz+" }, { value: "2", label: "HF direct Q" },
+  ], String(store.settings?.sdr_direct_sampling || "0") === "2" ? "2" : "0");
   const srvStatus = h("div", { class: "tiny muted", text: "Not running." });
   const srvStart = btn("SHARE RTL-SDR", { size: "sm", tone: "primary", icon: "play", onClick: async () => {
     try {
@@ -1156,6 +1186,7 @@ export async function render(root, params = {}) {
         freq_hz: Number(srvFreq.value) * 1e6, rate: Number(srvRate.value) * 1e6,
         gain: Number(srvGain.value) || 40, ppm: Number(store.settings?.sdr_ppm) || 0,
         bias: !!store.settings?.sdr_bias_tee,
+        direct: srvDirect.value === "2",
       });
       paintServer(out);
     } catch (err) { toast(err.message, "error"); }
@@ -1169,7 +1200,8 @@ export async function render(root, params = {}) {
       field("PORT", srvPort),
       field("FREQ (MHz)", srvFreq),
       field("RATE (Msps)", srvRate),
-      field("GAIN", srvGain)),
+      field("GAIN", srvGain),
+      field("HF MODE", srvDirect)),
     h("div", { class: "row wrap mt-8" }, srvStart, srvStop),
     srvStatus,
     h("div", { class: "tiny muted mt-6", text: "rtl_tcp has no authentication. Use only a trusted private LAN. Another DarkSec instance can connect from the Network SDR panel." }),
@@ -1364,6 +1396,7 @@ export async function render(root, params = {}) {
         name: capName.value.trim(),
         backend: capBackend.value,
         host: netHost.value.trim(), port: Number(netPort.value) || 1234,
+        direct: capDirect.value === "2",
       });
       showJob(job);
       clearInterval(pollTimer);
@@ -1458,16 +1491,40 @@ export async function render(root, params = {}) {
   }
 
   /* ---------------------------------------------------------------- ADS-B */
-  const adsbBody = h("div", { class: "col" });
-  if (!adsb.available) {
-    adsbBody.appendChild(emptyState("ADS-B feed unavailable", adsb.note || "Start dump1090 and expose its JSON feed on 127.0.0.1:8080.", "satellite"));
-  } else if (!(adsb.aircraft || []).length) {
-    adsbBody.appendChild(emptyState("No aircraft heard", "dump1090 is reachable but reports no aircraft.", "satellite"));
-  } else {
+  const adsb0 = adsb.status || {};
+  const adsbPort = input({ type: "number", value: String(adsb0.port || 8080), min: "1", max: "65535" });
+  const adsbGain = input({ type: "number", value: String(adsb0.gain ?? 40), min: "0", max: "62" });
+  const adsbDevice = input({ type: "number", value: String(adsb0.device ?? 0), min: "0", max: "8" });
+  const adsbStatus = h("div", { class: "tiny muted", text: "Checking ADS-B manager…" });
+  const adsbTable = h("div", { class: "col" });
+  const adsbStart = btn("START DUMP1090", { tone: "primary", icon: "play" });
+  const adsbStopBtn = btn("STOP", { icon: "stop", tone: "danger" });
+  let adsbPoll = null;
+
+  function paintAdsb(data) {
+    const status = data?.status || {};
+    const running = !!status.running;
+    adsbStatus.className = `tiny ${status.available ? "muted" : "danger-text"}`;
+    const mode = status.managed ? "MANAGED" : status.external ? "EXTERNAL FEED" : running ? "RUNNING" : "STOPPED";
+    const binaryLabel = status.binary ? PathlessName(status.binary)
+      : status.external ? "external feed" : "dump1090/readsb not installed";
+    adsbStatus.textContent = `${mode} · ${binaryLabel} · ${status.host || "127.0.0.1"}:${status.port || adsbPort.value} · ${status.aircraft_count ?? (data?.aircraft || []).length} aircraft`;
+    adsbStart.disabled = running;
+    adsbStopBtn.disabled = !status.managed;
+    adsbTable.replaceChildren();
+    const aircraft = data?.aircraft || [];
+    if (!status.available) {
+      adsbTable.appendChild(emptyState("ADS-B feed unavailable", status.note || "Start dump1090 or point DarkSec at an existing feed.", "satellite"));
+      return;
+    }
+    if (!aircraft.length) {
+      adsbTable.appendChild(emptyState("No aircraft heard", "dump1090 is reachable; waiting for ADS-B messages.", "satellite"));
+      return;
+    }
     const table = h("table", { class: "data" });
     table.innerHTML = "<thead><tr><th>FLIGHT</th><th>HEX</th><th>ALT</th><th>GS</th><th>TRK</th></tr></thead>";
     const tbody = h("tbody");
-    for (const a of adsb.aircraft) {
+    for (const a of aircraft) {
       const tr = h("tr");
       tr.append(
         h("td", { text: a.flight || "—" }),
@@ -1479,11 +1536,69 @@ export async function render(root, params = {}) {
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
-    adsbBody.appendChild(h("div", { class: "scroll-x" }, table));
+    adsbTable.appendChild(h("div", { class: "scroll-x" }, table));
   }
-  adsbBody.appendChild(h("div", { class: "hint mt-10",
-    text: "ADS-B is receive-only. dump1090 typically needs an RTL-SDR; a HackRF IQ capture can be fed to dump1090 --ifile separately." }));
-  lower.appendChild(panel({ title: "ADS-B / air picture", sub: "dump1090 local feed", icon: "satellite", body: adsbBody }));
+  function PathlessName(path) {
+    return String(path || "").split("/").pop() || "receiver";
+  }
+  async function loadAdsb() {
+    try {
+      const data = await api.get("/api/sdr/adsb");
+      paintAdsb(data);
+      if (data?.status?.running && !adsbPoll) {
+        adsbPoll = setInterval(loadAdsb, 5000);
+      }
+      if (!data?.status?.running && adsbPoll) {
+        clearInterval(adsbPoll); adsbPoll = null;
+      }
+    } catch (err) { adsbStatus.textContent = err.message; }
+  }
+  async function startAdsb() {
+    adsbStart.disabled = true;
+    try {
+      const settings = {
+        adsb_port: Number(adsbPort.value) || 8080,
+        adsb_gain: Number(adsbGain.value) || 40,
+        adsb_device: Number(adsbDevice.value) || 0,
+      };
+      try { await store.saveSettings(settings); } catch {}
+      await api.post("/api/sdr/adsb/start", {
+        port: settings.adsb_port,
+        gain: settings.adsb_gain,
+        device: settings.adsb_device,
+      });
+      toast("dump1090 started");
+      await loadAdsb();
+    } catch (err) {
+      toast(err.message || "Could not start dump1090", "error");
+    } finally {
+      adsbStart.disabled = false;
+    }
+  }
+  async function stopAdsb() {
+    try {
+      await api.post("/api/sdr/adsb/stop", {});
+      toast("dump1090 stopped");
+      await loadAdsb();
+    } catch (err) { toast(err.message, "error"); }
+  }
+  adsbStart.addEventListener("click", startAdsb);
+  adsbStopBtn.addEventListener("click", stopAdsb);
+  paintAdsb(adsb);
+  if (adsb?.status?.running) adsbPoll = setInterval(loadAdsb, 5000);
+
+  const adsbBody = h("div", { class: "col" },
+    h("div", { class: "form-grid" },
+      field("PORT", adsbPort),
+      field("GAIN", adsbGain),
+      field("DEVICE", adsbDevice)),
+    h("div", { class: "row wrap mt-8" }, adsbStart, adsbStopBtn),
+    adsbStatus,
+    h("div", { class: "mt-8" }, adsbTable),
+    h("div", { class: "hint mt-10",
+      text: "ADS-B is receive-only. Stop the live receiver and rtl_tcp before starting dump1090 — one RTL-SDR can only serve one program at a time." }),
+  );
+  paneAdsb.appendChild(panel({ title: "ADS-B / air picture", sub: "dump1090 / readsb · managed locally", icon: "satellite", body: adsbBody }));
 
   /* ------------------------------------------------------------------- TX */
   const txBody = h("div", { class: "col" });
@@ -1586,6 +1701,7 @@ export async function render(root, params = {}) {
     if (sweepAbort) { try { sweepAbort.abort(); } catch {} }
     if (pollTimer) clearInterval(pollTimer);
     window.removeEventListener("keydown", liveKeyHandler);
+    if (adsbPoll) { clearInterval(adsbPoll); adsbPoll = null; }
     stopLive();
   };
 

@@ -41,6 +41,8 @@ _LOCK = threading.RLock()
 _DETECT = {"at": 0.0, "data": None}
 _DETECT_TTL = 20.0
 _RTL_TCP_SERVER: dict = {"proc": None, "port": None, "bind": None, "started": None}
+_ADSB: dict = {"proc": None, "binary": None, "port": None, "started": None, "log": None}
+_ADSB_FEED_CACHE: dict = {"at": 0.0, "port": None, "data": None}
 
 
 def _run(cmd: list[str], timeout: float = 8) -> tuple[int, str]:
@@ -170,6 +172,9 @@ def _platform_guidance(platform: dict, rtl: dict, hackrf: dict, tools: dict) -> 
         add("warn", f"Raspberry Pi power/thermal flag: {flag}. Use a 5 V/3 A supply, improve cooling, and lower the SDR sample rate.")
     if platform.get("thermal_c") and platform["thermal_c"] >= 80:
         add("warn", f"CPU temperature is {platform['thermal_c']} °C. Reduce sample rate or improve airflow before long captures.")
+    device_name = str(rtl.get("device_name") or "").lower()
+    if "hackergadgets" in device_name or "aio_v2" in device_name or "aio v2" in device_name:
+        add("info", "HackerGadgets AIO V2 RTL-SDR detected. Leave DIRECT on TUNER for 24 MHz and above; select HF Q for shortwave below 24 MHz. HF I is the alternate input if Q is noisy.")
     if not tools.get("rtl_test"):
         add("info", "RTL-SDR tools not installed. Debian/Ubuntu/Pi: `sudo apt install rtl-sdr`; Fedora: `sudo dnf install rtl-sdr`; Arch: `sudo pacman -S rtl-sdr`.")
     elif rtl.get("present") and not rtl.get("connected"):
@@ -192,6 +197,8 @@ def _parse_rtl_test(out: str) -> dict:
     gains = re.search(r"Supported gain values \(\d+\):\s*(.+)", out)
     rate = re.search(r"Sampling at\s+([\d.]+)", out)
     count = re.search(r"Found\s+(\d+)\s+device", out)
+    device = re.search(r"^\s*0:\s+(.+?)(?:,?\s+SN:.*)?$", out, re.M)
+    direct = re.search(r"Enabled direct sampling mode,\s*input\s*(\d+)", out, re.I)
     error = ""
     for line in out.splitlines():
         low = line.lower()
@@ -210,6 +217,8 @@ def _parse_rtl_test(out: str) -> dict:
         "gains": gain_values,
         "sample_rate": float(rate.group(1)) if rate else None,
         "device_count": int(count.group(1)) if count else 0,
+        "device_name": device.group(1).strip() if device else "",
+        "direct_sampling": int(direct.group(1)) if direct else 0,
         "error": error,
     }
 
@@ -442,7 +451,8 @@ def _parse_rtl_power_line(line: str) -> dict | None:
 
 
 def _rtl_sweep_stream(start_hz: float, end_hz: float, bin_hz: float = 100_000,
-                      gain: int = 40, ppm: int = 0, device: int = 0):
+                      gain: int = 40, ppm: int = 0, device: int = 0,
+                      direct: bool = False):
     """Yield sweep frames from rtl_power, one CSV row per sweep interval."""
     if not shutil.which("rtl_power"):
         yield {"type": "error", "error": "rtl_power is not installed (package: rtl-sdr)"}
@@ -450,7 +460,10 @@ def _rtl_sweep_stream(start_hz: float, end_hz: float, bin_hz: float = 100_000,
     start_hz, end_hz = int(start_hz), int(end_hz)
     bin_hz = max(1_000, min(2_800_000, int(bin_hz)))
     cmd = ["rtl_power", "-f", f"{start_hz}:{end_hz}:{bin_hz}", "-i", "1",
-           "-g", str(max(0, int(gain))), "-p", str(int(ppm)), "-d", str(int(device)), "-"]
+           "-g", str(max(0, int(gain))), "-p", str(int(ppm)), "-d", str(int(device))]
+    if direct:
+        cmd.append("-D")
+    cmd.append("-")
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, bufsize=1)
@@ -492,14 +505,14 @@ def _rtl_sweep_stream(start_hz: float, end_hz: float, bin_hz: float = 100_000,
 def sweep_stream(start_hz: float, end_hz: float, bin_hz: float = 100_000,
                  lna: int = 32, vga: int = 40, amp: bool = False,
                  backend: str = "auto", gain: int = 40, ppm: int = 0,
-                 device: int = 0):
+                 device: int = 0, direct: bool = False):
     """Yield sweep frames from the best available local receiver."""
     backend = choose_backend(backend)
     if backend == "hackrf":
         yield from _hackrf_sweep_stream(start_hz, end_hz, bin_hz, lna, vga, amp)
         return
     if backend == "rtl":
-        yield from _rtl_sweep_stream(start_hz, end_hz, bin_hz, gain, ppm, device)
+        yield from _rtl_sweep_stream(start_hz, end_hz, bin_hz, gain, ppm, device, direct)
         return
     info = detect()
     if backend == "rtl_tcp":
@@ -655,6 +668,10 @@ class RTLTCPClient:
     def set_bias_tee(self, enabled: bool) -> None:
         self._cmd(0x0E, 1 if enabled else 0)
 
+    def set_direct_sampling(self, mode: int = 2) -> None:
+        # 0 = tuner, 1 = I-ADC, 2 = Q-ADC (HF direct sampling)
+        self._cmd(0x09, int(mode))
+
     def read(self, count: int) -> bytes:
         if self.sock is None:
             return b""
@@ -687,7 +704,7 @@ def probe_rtl_tcp(host: str, port: int = 1234) -> dict:
 def start_capture(freq_hz: float, seconds: float = 5.0, rate: float = 2_400_000,
                   demod: str = "nfm", lna: int = 32, vga: int = 40, amp: bool = False,
                   keep_iq: bool = False, name: str = "", backend: str = "auto",
-                  host: str = "", port: int = 0) -> dict:
+                  host: str = "", port: int = 0, direct: bool = False) -> dict:
     freq_hz = float(freq_hz)
     rate = float(rate)
     seconds = float(seconds)
@@ -732,7 +749,8 @@ def start_capture(freq_hz: float, seconds: float = 5.0, rate: float = 2_400_000,
                    ppm=int(settings.get("sdr_ppm") or 0),
                    rtl_gain=int(settings.get("sdr_rtl_gain") or 40),
                    host=str(host or settings.get("sdr_rtl_tcp_host") or "").strip(),
-                   port=int(port or settings.get("sdr_rtl_tcp_port") or 1234))
+                   port=int(port or settings.get("sdr_rtl_tcp_port") or 1234),
+                   direct=bool(direct or str(settings.get("sdr_direct_sampling") or "0") != "0"))
     thread = threading.Thread(target=_capture_worker, args=(job["id"],), daemon=True)
     thread.start()
     return get_job(job["id"])
@@ -778,6 +796,8 @@ def _capture_rtl(job_id: str, job: dict, iq_path: Path, samples: int,
     cmd = ["rtl_sdr", "-f", str(int(freq)), "-s", str(int(rate)),
            "-n", str(int(samples)), "-g", str(int(job.get("rtl_gain") or 40)),
            "-d", "0"]
+    if job.get("direct"):
+        cmd.append("-D")
     if job.get("ppm"):
         cmd += ["-p", str(int(job["ppm"]))]
     cmd.append(str(iq_path))
@@ -820,6 +840,8 @@ def _capture_rtl_tcp(job_id: str, job: dict, iq_path: Path, samples: int,
     client.set_frequency(int(job["freq_hz"]))
     client.set_gain_mode(True)
     client.set_gain(int(job.get("rtl_gain") or 40))
+    if job.get("direct"):
+        client.set_direct_sampling(2)
     if job.get("ppm"):
         client.set_ppm(int(job["ppm"]))
     remaining = samples * 2
@@ -1127,22 +1149,158 @@ def delete_recording(rec_id: int) -> dict:
     return {"deleted": rec_id}
 
 
-def adsb_snapshot() -> dict:
-    """Read a local dump1090 JSON feed if one is running."""
-    import requests
+def _adsb_binary() -> str | None:
+    for name in ("dump1090-fa", "dump1090-mutability", "dump1090", "readsb"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _adsb_settings() -> dict:
+    s = _settings()
     try:
-        r = requests.get("http://127.0.0.1:8080/data/aircraft.json", timeout=1.5)
+        port = int(s.get("adsb_port") or 8080)
+    except (TypeError, ValueError):
+        port = 8080
+    try:
+        gain = int(float(s.get("adsb_gain") or 40))
+    except (TypeError, ValueError):
+        gain = 40
+    try:
+        device = int(s.get("adsb_device") or 0)
+    except (TypeError, ValueError):
+        device = 0
+    return {"host": str(s.get("adsb_host") or "127.0.0.1").strip(), "port": port,
+            "gain": gain, "device": device}
+
+
+def _adsb_url(port: int | None = None) -> str:
+    cfg = _adsb_settings()
+    return f"http://{cfg['host']}:{int(port or cfg['port'])}/data/aircraft.json"
+
+
+def _adsb_feed(port: int | None = None) -> dict | None:
+    import requests
+    cfg = _adsb_settings()
+    target = int(port or cfg["port"])
+    now = time.monotonic()
+    if (_ADSB_FEED_CACHE["port"] == target and now - _ADSB_FEED_CACHE["at"] < 1.5):
+        return _ADSB_FEED_CACHE["data"]
+    try:
+        r = requests.get(_adsb_url(target), timeout=1.5)
         r.raise_for_status()
         data = r.json()
-        aircraft = []
-        for a in data.get("aircraft", [])[:100]:
-            aircraft.append({"hex": a.get("hex"), "flight": (a.get("flight") or "").strip(),
-                             "alt_baro": a.get("alt_baro"), "gs": a.get("gs"),
-                             "track": a.get("track"), "lat": a.get("lat"), "lon": a.get("lon")})
-        return {"available": True, "aircraft": aircraft, "source": "dump1090"}
     except Exception:
-        return {"available": False, "aircraft": [],
-                "note": "Start dump1090 (RTL-SDR) or feed a HackRF IQ file to dump1090 --ifile, then reload."}
+        data = None
+    _ADSB_FEED_CACHE.update({"at": now, "port": target, "data": data})
+    return data
+
+
+def adsb_status() -> dict:
+    proc = _ADSB.get("proc")
+    ours = bool(proc is not None and proc.poll() is None)
+    cfg = _adsb_settings()
+    port = int(_ADSB.get("port") or cfg["port"])
+    data = _adsb_feed(port)
+    external = bool(data is not None and not ours)
+    return {
+        "available": data is not None,
+        "running": bool(ours or external),
+        "managed": ours,
+        "external": external,
+        "binary": _ADSB.get("binary") or _adsb_binary(),
+        "port": port,
+        "host": cfg["host"],
+        "gain": cfg["gain"],
+        "device": cfg["device"],
+        "started": _ADSB.get("started"),
+        "log": str(_ADSB.get("log") or ""),
+        "aircraft_count": len((data or {}).get("aircraft") or []),
+        "note": ("A feed is already running outside DarkSec; showing it." if external
+                 else "Start dump1090 to receive ADS-B from an RTL-SDR." if not ours
+                 else "dump1090 is running under DarkSec."),
+    }
+
+
+def start_adsb(port: int | None = None, gain: int | None = None,
+               device: int | None = None) -> dict:
+    cfg = _adsb_settings()
+    port = int(port or cfg["port"])
+    gain = int(cfg["gain"] if gain is None else gain)
+    device = int(cfg["device"] if device is None else device)
+    if _adsb_feed(port) is not None:
+        return adsb_status()
+    binary = _adsb_binary()
+    if not binary:
+        raise ValueError("dump1090/readsb is not installed. Install dump1090-mutability, dump1090-fa or readsb.")
+    stop_adsb()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.4)
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            raise ValueError(f"Port {port} is already in use; another feed or service is running.")
+    base = Path(binary).name.lower()
+    if "readsb" in base:
+        cmd = [binary, "--device-type", "rtlsdr", "--device", str(device),
+               "--gain", str(gain), "--net", "--net-http-port", str(port), "--quiet"]
+    else:
+        cmd = [binary, "--device-index", str(device), "--gain", str(gain),
+               "--net", "--net-http-port", str(port), "--quiet"]
+    log_path = Path(config.LOG_DIR) / "dump1090.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log = open(log_path, "ab")
+    except OSError:
+        log = subprocess.DEVNULL
+    try:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=log, stdin=subprocess.DEVNULL)
+    finally:
+        if log is not subprocess.DEVNULL:
+            try:
+                log.close()
+            except Exception:
+                pass
+    time.sleep(1.2)
+    if proc.poll() is not None:
+        tail = ""
+        try:
+            tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-8:])
+        except OSError:
+            pass
+        raise ValueError(f"dump1090 exited with code {proc.returncode}. {tail[:500]}")
+    _ADSB.update({"proc": proc, "binary": binary, "port": port,
+                  "started": utcnow(), "log": str(log_path)})
+    return adsb_status()
+
+
+def stop_adsb() -> dict:
+    proc = _ADSB.get("proc")
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=4)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    _ADSB.update({"proc": None, "binary": None, "port": None, "started": None, "log": None})
+    return adsb_status()
+
+
+def adsb_snapshot() -> dict:
+    """Read the local dump1090/readsb JSON feed and include manager status."""
+    status = adsb_status()
+    data = _adsb_feed(status.get("port"))
+    if not data:
+        return {"available": False, "aircraft": [], "status": status,
+                "note": "Start dump1090 from the ADS-B tab, or feed a HackRF IQ file to dump1090 --ifile."}
+    aircraft = []
+    for a in data.get("aircraft", [])[:100]:
+        aircraft.append({"hex": a.get("hex"), "flight": (a.get("flight") or "").strip(),
+                         "alt_baro": a.get("alt_baro"), "gs": a.get("gs"),
+                         "track": a.get("track"), "lat": a.get("lat"), "lon": a.get("lon")})
+    return {"available": True, "aircraft": aircraft, "source": "dump1090", "status": status}
 
 
 # --------------------------------------------------------------------------
@@ -1274,7 +1432,7 @@ class _LiveDemod:
 
 def _live_source(backend: str, freq_hz: float, rate: float, gain: float,
                  ppm: int, host: str, port: int, lna: int, vga: int,
-                 amp: bool, device: int = 0, stop_event=None):
+                 amp: bool, device: int = 0, stop_event=None, direct: bool = False):
     """Yield (bytes, sample_format) IQ blocks from a live receiver."""
     backend = choose_backend(backend)
     block = max(4096, int(rate * 0.05)) * 2
@@ -1289,6 +1447,8 @@ def _live_source(backend: str, freq_hz: float, rate: float, gain: float,
         elif backend == "rtl":
             cmd = ["rtl_sdr", "-f", str(int(freq_hz)), "-s", str(int(rate)),
                    "-g", str(int(gain)), "-d", str(int(device))]
+            if direct:
+                cmd.append("-D")
             if ppm:
                 cmd += ["-p", str(int(ppm))]
             cmd.append("-")
@@ -1300,6 +1460,8 @@ def _live_source(backend: str, freq_hz: float, rate: float, gain: float,
             client.set_frequency(int(freq_hz))
             client.set_gain_mode(True)
             client.set_gain(float(gain))
+            if direct:
+                client.set_direct_sampling(2)
             if ppm:
                 client.set_ppm(int(ppm))
         else:
@@ -1360,7 +1522,8 @@ def live_audio_stream(freq_hz: float, mode: str = "nfm", backend: str = "auto",
                       rate: float = 1_024_000, gain: float = 40, ppm: int = 0,
                       squelch: float = 0, host: str = "", port: int = 1234,
                       lna: int = 32, vga: int = 40, amp: bool = False,
-                      device: int = 0, stop_event=None, max_seconds: float = 900.0):
+                      device: int = 0, stop_event=None, max_seconds: float = 900.0,
+                      direct: bool = False):
     """Yield signed 16-bit little-endian mono PCM in real time."""
     chosen = choose_backend(backend)
     deadline = time.monotonic() + max(10.0, float(max_seconds or 900.0))
@@ -1368,7 +1531,7 @@ def live_audio_stream(freq_hz: float, mode: str = "nfm", backend: str = "auto",
         max(900_000.0, min(3_200_000.0, rate))
     demod = _LiveDemod(mode, rate, squelch=squelch)
     source = _live_source(chosen, freq_hz, rate, gain, ppm, host, port, lna, vga,
-                          amp, device, stop_event=stop_event)
+                          amp, device, stop_event=stop_event, direct=direct)
     try:
         for data, sample_format in source:
             if (stop_event is not None and stop_event.is_set()) or time.monotonic() > deadline:
@@ -1438,7 +1601,8 @@ def stop_rtl_tcp_server() -> dict:
 
 def start_rtl_tcp_server(bind: str = "0.0.0.0", port: int = 1234,
                          freq_hz: float = 100_000_000, rate: float = 2_400_000,
-                         gain: float = 40, ppm: int = 0, bias: bool = False) -> dict:
+                         gain: float = 40, ppm: int = 0, bias: bool = False,
+                         direct: bool = False) -> dict:
     if not shutil.which("rtl_tcp"):
         raise ValueError("rtl_tcp is not installed (package: rtl-sdr)")
     info = detect()
@@ -1451,6 +1615,8 @@ def start_rtl_tcp_server(bind: str = "0.0.0.0", port: int = 1234,
         cmd += ["-P", str(int(ppm))]
     if bias:
         cmd += ["-T"]
+    if direct:
+        cmd += ["-D"]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.6)
     if proc.poll() is not None:
@@ -1484,3 +1650,4 @@ def enable_uconsole_sdr(gpio: int = 7) -> dict:
 
 import atexit as _atexit
 _atexit.register(lambda: stop_rtl_tcp_server())
+_atexit.register(lambda: stop_adsb())

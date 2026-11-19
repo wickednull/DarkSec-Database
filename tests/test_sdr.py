@@ -346,3 +346,13 @@ def test_live_spectrum_frame_shape():
     assert len(frame["bins"]) == 512
     assert frame["start_hz"] < 100_000_000 < frame["end_hz"]
     assert frame["peak_hz"] > 0
+
+
+def test_adsb_manager_status_and_stop_are_safe(client):
+    r = client.get("/api/sdr/adsb/status")
+    assert r.status_code == 200
+    out = r.json()
+    assert "running" in out and "binary" in out and "port" in out
+    r = client.post("/api/sdr/adsb/stop", json={})
+    assert r.status_code == 200
+    assert r.json()["running"] is False
