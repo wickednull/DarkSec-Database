@@ -349,3 +349,41 @@ def test_bundled_vector_label_glyphs_are_available(client):
     r = client.get("/ui/fonts/Open%20Sans%20Regular/0-255.pbf")
     assert r.status_code == 200
     assert r.content[:1] == b"\n"
+
+
+def test_mbtiles_without_format_metadata_detects_vector(tmp_path):
+    import sqlite3
+
+    from darksec import mbtiles
+
+    archive = tmp_path / "no-format.mbtiles"
+    conn = sqlite3.connect(archive)
+    conn.executescript(
+        "CREATE TABLE metadata (name TEXT, value TEXT);"
+        "CREATE TABLE tiles (zoom_level INTEGER, tile_column INTEGER, "
+        "tile_row INTEGER, tile_data BLOB);"
+    )
+    conn.execute("INSERT INTO metadata VALUES ('name', 'osm-latest')")
+    # Minimal valid MVT: a layer named 'osm' with no features.
+    layer = bytes([0x1a, 0x05, 0x0a, 0x03]) + b"osm"
+    conn.execute("INSERT INTO tiles VALUES (5, 1, 30, ?)", (layer,))
+    conn.commit()
+    conn.close()
+
+    info = mbtiles.describe_path(str(archive))
+    assert info["ok"] is True
+    assert info["vector"] is True
+    assert info["raster"] is False
+    assert mbtiles.lookup_tile(5, 1, 1, raw=str(archive)) is None
+    assert mbtiles.lookup_vector_tile(5, 1, 1, raw=str(archive))
+
+
+def test_mbtiles_bounds_are_derived_from_tiles(tmp_path):
+    from darksec import mbtiles
+
+    archive = make_mbtiles(tmp_path / "regional.mbtiles", tiles={(8, 57, 97): PNG})
+    info = mbtiles.describe_path(str(archive))
+    west, south, east, north = info["bounds"]
+    assert -101 < west < -98
+    assert 38 < south < 40
+    assert west < east and south < north

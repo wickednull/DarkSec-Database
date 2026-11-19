@@ -273,3 +273,31 @@ def test_relocate_to_usb_moves_tiles_and_switches_cache(tmp_path, monkeypatch, c
     finally:
         client.put("/api/settings", json={"map_cache_path": ""})
         tilecache.invalidate_cache_path("")
+
+
+def test_offline_pack_from_another_source_is_used_as_fallback(tmp_path, monkeypatch, client):
+    from darksec import tilecache
+
+    use_tmp_cache(monkeypatch, tmp_path)
+    tile = tilecache.tile_path(8, 57, 97, "esri_street")
+    tile.parent.mkdir(parents=True, exist_ok=True)
+    tile.write_bytes(JPEG)
+    monkeypatch.setattr(tilecache, "is_online", lambda: False)
+    try:
+        client.put("/api/settings", json={"tile_source": "usgs_topo"})
+        r = client.get("/api/map/tiles/8/57/97.png")
+        assert r.status_code == 200
+        assert r.headers.get("x-tile-source") == "esri_street"
+    finally:
+        client.put("/api/settings", json={"tile_source": "esri_imagery"})
+
+
+def test_label_overlay_is_never_a_basemap_fallback(tmp_path, monkeypatch):
+    from darksec import tilecache
+
+    use_tmp_cache(monkeypatch, tmp_path)
+    label = tilecache.tile_path(8, 57, 97, "esri_labels_roads")
+    label.parent.mkdir(parents=True, exist_ok=True)
+    label.write_bytes(JPEG)
+    assert tilecache.find_cached(8, 57, 97) is None
+    assert tilecache.get_cached(8, 57, 97, "esri_labels_roads") == JPEG

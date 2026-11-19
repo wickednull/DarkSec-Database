@@ -289,9 +289,9 @@ export async function render(root, params = {}) {
   const liveCheck = checkbox("Auto-refresh map intel (60s)", !!state.live, (on)=>{ state.live=on; scheduleLive(); });
   const freshText = h("div", { class: "tiny muted", text: "Intel loaded" });
   const statsBox = h("div", { class: "tiny muted", text: "Loading..." });
-  const vectorArchive = (mbInfo.archives || []).find((a) => a.vector) || {};
+  const mbArchive = (mbInfo.archives || []).find((a) => a.usable) || {};
   const basemapNote = mbInfo.vector
-    ? h("div", { class: "tiny muted wrap-any", text: `Basemap: vector · ${(mbInfo.layers || []).join(", ") || "layers unknown"} · z${vectorArchive.minzoom ?? "?"}–${vectorArchive.maxzoom ?? "?"}${vectorArchive.indexed ? "" : " · NO TILE INDEX (slow)"}` })
+    ? h("div", { class: "tiny muted wrap-any", text: `Basemap: vector · ${(mbInfo.layers || []).join(", ") || "layers unknown"} · z${mbArchive.minzoom ?? "?"}–${mbArchive.maxzoom ?? "?"}${mbArchive.indexed ? "" : " · NO TILE INDEX (slow)"}` })
     : h("div", { class: "tiny muted", text: "Basemap: raster tiles / bundled overview" });
   side.appendChild(panel({ title:"GL Layers", icon:"layers", body: h("div",{class:"col gap-8"},
     field("INTEL AGE", ageSel), layerBox, basemapNote, liveCheck, freshText,
@@ -319,8 +319,8 @@ export async function render(root, params = {}) {
   side.appendChild(panel({ title:"Legend", icon:"info", body: glLegend }));
   side.appendChild(panel({ title:"Inspector", icon:"info", body: inspector }));
 
-  const mbMinZoom = Number.isFinite(Number(vectorArchive.minzoom)) ? Number(vectorArchive.minzoom) : 0;
-  const mbMaxZoom = Number.isFinite(Number(vectorArchive.maxzoom)) ? Number(vectorArchive.maxzoom) : 22;
+  const mbMinZoom = Number.isFinite(Number(mbArchive.minzoom)) ? Number(mbArchive.minzoom) : 0;
+  const mbMaxZoom = Number.isFinite(Number(mbArchive.maxzoom)) ? Number(mbArchive.maxzoom) : 22;
   const initialZoom = hidePosition ? 1.6 : Math.min(mbMaxZoom, Math.max(3.5, mbMinZoom));
   const baseInitialZoom = (hasLink || hasLinkZoom) ? glZoom : initialZoom;
   map = new maplibregl.Map({
@@ -328,8 +328,8 @@ export async function render(root, params = {}) {
     zoom: baseInitialZoom, pitch:0, bearing:0, attributionControl:true, maxPitch:85,
     canvasContextAttributes: { alpha: true, antialias: true },
   });
-  if (mbInfo.vector && !hidePosition) {
-    const b = vectorArchive.bounds;
+  if ((mbInfo.vector || mbInfo.raster) && !hidePosition && !hasLink && !hasLinkZoom) {
+    const b = mbArchive.bounds;
     if (Array.isArray(b) && b.length === 4 && b.every((v) => Number.isFinite(Number(v)))) {
       const span = Math.max(Number(b[2]) - Number(b[0]), Number(b[3]) - Number(b[1]));
       if (span > 0 && span < 350) {
@@ -357,8 +357,8 @@ export async function render(root, params = {}) {
       watchdogShown = true;
       showMapError(
         `No vector tiles loaded for this view (z${map.getZoom().toFixed(1)}). Archive layers: ` +
-        `${(mbInfo.layers || []).join(", ") || "unknown"} · z${vectorArchive.minzoom ?? "?"}–${vectorArchive.maxzoom ?? "?"}` +
-        `${vectorArchive.indexed ? "" : " · no tiles index (queries may be extremely slow)"}. ` +
+        `${(mbInfo.layers || []).join(", ") || "unknown"} · z${mbArchive.minzoom ?? "?"}–${mbArchive.maxzoom ?? "?"}` +
+        `${mbArchive.indexed ? "" : " · no tiles index (queries may be extremely slow)"}. ` +
         `Open Settings → Offline maps → CHECK, or zoom into the archive's coverage.`
       );
     }, 9000);

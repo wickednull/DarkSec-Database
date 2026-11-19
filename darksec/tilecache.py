@@ -292,7 +292,9 @@ def find_cached(z: int, x: int, y: int, prefer: Optional[str] = None) -> Optiona
     order = []
     if prefer and prefer in TILE_SOURCES:
         order.append(prefer)
-    order += [s for s in TILE_SOURCES if s not in order]
+    # Label overlays are transparent and must never become a basemap fallback.
+    order += [s for s in TILE_SOURCES
+              if s not in order and not TILE_SOURCES[s].get("overlay")]
     for src in order:
         data = get_cached(z, x, y, src)
         if data:

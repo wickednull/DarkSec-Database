@@ -21,6 +21,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -346,10 +347,28 @@ class Archive:
             self.vector_layers = []
         if self.vector and not self.vector_layers:
             self.vector_layers = self._probe_vector_layers()
+        if self.format in ("jpeg",):
+            self.format = "jpg"
+        known_formats = {"png", "jpg", "webp"} | VECTOR_FORMATS
+        if self.format and self.format not in known_formats:
+            self.format = ""
         if not self.format:
             self.format = self._sniff_format()
+        # Some tilemaker/tippecanoe archives omit metadata.format. A valid MVT
+        # layer probe is decisive; treating those archives as raster produced a
+        # black map because PBF bytes were served as images.
+        if not self.format and self.vector_layers:
+            self.format = "pbf"
+        if not self.format:
+            probed = self._probe_vector_layers()
+            if probed:
+                self.format = "pbf"
+                if not self.vector_layers:
+                    self.vector_layers = probed
         if self.minzoom is None or self.maxzoom is None:
             self._zoom_range()
+        if self.bounds is None:
+            self.bounds = self._bounds_from_tiles()
 
     def _probe_vector_layers(self) -> list[str]:
         """Fallback for archives that omit the metadata json vector_layers."""
@@ -407,6 +426,41 @@ class Archive:
                 self.maxzoom = int(row["hi"]) if row["hi"] is not None else self.maxzoom
         except (sqlite3.Error, TypeError, ValueError):
             pass
+
+    def _bounds_from_tiles(self) -> list[float] | None:
+        """Approximate coverage from tile indexes when metadata has no bounds."""
+        try:
+            row = self.conn.execute(
+                "SELECT MIN(zoom_level) AS z FROM tiles"
+            ).fetchone()
+            if not row or row["z"] is None:
+                return None
+            zoom = int(row["z"])
+            ext = self.conn.execute(
+                "SELECT MIN(tile_column) AS x0, MAX(tile_column) AS x1, "
+                "MIN(tile_row) AS y0, MAX(tile_row) AS y1 FROM tiles "
+                "WHERE zoom_level=?",
+                (zoom,),
+            ).fetchone()
+            if not ext or ext["x0"] is None:
+                return None
+            n = 1 << zoom
+            west = int(ext["x0"]) / n * 360.0 - 180.0
+            east = (int(ext["x1"]) + 1) / n * 360.0 - 180.0
+            if self.scheme == "xyz":
+                north_row = int(ext["y0"])
+                south_row = int(ext["y1"]) + 1
+            else:
+                # TMS rows increase northwards; convert to XYZ rows.
+                north_row = n - 1 - int(ext["y1"])
+                south_row = n - int(ext["y0"])
+            north = math.degrees(math.atan(math.sinh(
+                math.pi * (1.0 - 2.0 * north_row / n))))
+            south = math.degrees(math.atan(math.sinh(
+                math.pi * (1.0 - 2.0 * south_row / n))))
+            return [west, south, east, north]
+        except (sqlite3.Error, TypeError, ValueError):
+            return None
 
     # ---------------------------------------------------------------- reads
     @property

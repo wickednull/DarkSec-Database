@@ -152,11 +152,34 @@ export async function render(root, params = {}) {
   const startZoom = hidePosition ? 1.6
     : (Number.isFinite(linkZoom) ? Math.max(1, Math.min(19, linkZoom))
       : (hasLinkPosition ? 11 : 5));
+  const raster = (layers.raster || []);
+  let mbtilesInfo = layers.mbtiles || {};
+  const mbArchive = (mbtilesInfo.archives || []).find((a) => a.usable) || {};
   const view = {
     lat: Number.isFinite(startLat) ? startLat : 39.8283,
     lon: Number.isFinite(startLon) ? startLon : -98.5795,
     zoom: startZoom,
   };
+  // A regional MBTiles pack is usually nowhere near the configured home
+  // position. Center/fit it (and honour its zoom range) so opening a pack does
+  // not land the map on an empty area with no tiles.
+  if (mbtilesInfo.raster && !hidePosition && !hasLinkPosition) {
+    const b = mbArchive.bounds;
+    let fit = null;
+    if (Array.isArray(b) && b.length === 4 && b.every((v) => Number.isFinite(Number(v)))) {
+      const span = Math.max(Number(b[2]) - Number(b[0]), Number(b[3]) - Number(b[1]));
+      if (span > 0 && span < 350) {
+        view.lat = (Number(b[1]) + Number(b[3])) / 2;
+        view.lon = (Number(b[0]) + Number(b[2])) / 2;
+        fit = Math.floor(Math.log2(1265.6 / span));
+      }
+    }
+    const minz = Number(mbArchive.minzoom), maxz = Number(mbArchive.maxzoom);
+    if (fit != null) view.zoom = fit;
+    if (Number.isFinite(minz)) view.zoom = Math.max(view.zoom, minz);
+    if (Number.isFinite(maxz)) view.zoom = Math.min(view.zoom, maxz);
+    view.zoom = Math.max(1, Math.min(18, view.zoom));
+  }
   const visible = {
     countries: true, states: true, land: true, lakes: true, rivers: true,
     places: true, graticule: true, tracks: true, waypoints: true,
@@ -164,8 +187,6 @@ export async function render(root, params = {}) {
     intelEvents: true, intelConflict: true, intelAircraft: true, intelSats: true, intelMaritime: true, intelCables: true, intelCctv: true, intelDayNight: true,
     clusterDense: true, cctvShowAlpr: true, satsOverheadOnly: false,
   };
-  const raster = (layers.raster || []);
-  let mbtilesInfo = layers.mbtiles || {};
   let tileRevision = mbtilesInfo.revision || "";
   let cacheGeneration = Number(layers.cacheGeneration) || 0;
   let tileAvailable = !!(raster.length || mbtilesInfo.raster);
@@ -207,6 +228,9 @@ export async function render(root, params = {}) {
     actions: [
       btn("2D CANVAS", { icon: "map", tone: "primary", onClick: () => { location.hash = "#/map?renderer=2d"; } }),
       btn("3D GL", { icon: "layers", onClick: () => { location.hash = "#/map?renderer=gl"; } }),
+      ...(mbtilesInfo.vector && !mbtilesInfo.raster
+        ? [btn("OPEN VECTOR MAP", { icon: "layers", tone: "primary", onClick: () => { location.hash = "#/map?renderer=gl"; } })]
+        : []),
       btn("IMPORT GPX", { icon: "upload", onClick: importGpx }),
       btn("EXPORT GPX", { icon: "download", onClick: () => download("/api/map/gpx/export", "darksec-waypoints.gpx") }),
       btn("NEW WAYPOINT", { icon: "plus", tone: "primary", onClick: () => addWaypoint() }),
@@ -942,6 +966,7 @@ export async function render(root, params = {}) {
           zoom_min: zMin, zoom_max: zMax, source, label: "manual",
         });
         activeSource = source;
+        try { await store.saveSettings({ tile_source: source }); } catch {}
         dl.close();
         toast("Download started — progress, log and cancel are in the Downloads panel", "warn", 6000);
         await loadDownloadJobs();

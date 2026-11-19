@@ -5461,6 +5461,12 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         parent = tilecache.find_cached_ancestor(z, x, y, src)
         if parent:
             return _tile_response(parent[1], f"{src}-overzoom")
+        # An offline pack may have been downloaded with a different source than
+        # the currently selected one. Prefer that cached tile over returning a
+        # blank map (or the bundled world overview).
+        other = tilecache.find_cached(z, x, y)
+        if other and other[0] != src:
+            return _tile_response(other[1], other[0])
         for dirname in ("overview", "us_tiles"):
             for ext in ("jpg", "png", "webp"):
                 path = config.MAP_TILE_DIR / dirname / str(z) / str(x) / f"{y}.{ext}"
