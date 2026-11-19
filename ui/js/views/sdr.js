@@ -1020,7 +1020,7 @@ export async function render(root, params = {}) {
           } catch (err) { toast(err.message, "error"); }
         } }))),
     h("div", { class: "sdr-keyhint tiny muted" },
-      "CLICK SPECTRUM TO TUNE · WHEEL = STEP · ↑/↓ OR ←/→ = STEP · M = MODE · SPACE = STOP"),
+      "CLICK FREQUENCY TO TYPE · CLICK SPECTRUM TO TUNE · WHEEL = STEP · ↑/↓ OR ←/→ = STEP · M = MODE · SPACE = STOP"),
   );
   paneReceiver.appendChild(panel({
     title: "Receiver",
