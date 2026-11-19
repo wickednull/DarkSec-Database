@@ -82,13 +82,15 @@ export async function render(root, params = {}) {
     activeTrips.some((trip) => trip.alert === "RETURN OVERDUE") ? "warn" : ""));
   root.appendChild(stats);
 
-  root.appendChild(h("div", { class: "mt-14" }, tabs([
+  const logisticsTabs = tabs([
     { id: "mission", label: "MISSION", count: openTasks.length },
     { id: "caches", label: "CACHES", count: cacheItems.length },
     { id: "movement", label: "MOVEMENT" },
     { id: "trips", label: "TRIPS", count: activeTrips.length },
     { id: "data", label: "OPERATOR DATA", count: backupItems.length },
-  ], lastTab, (id) => { lastTab = id; render(root, params); })));
+  ], lastTab, (id) => { lastTab = id; render(root, { ...params, tab: id }); });
+  logisticsTabs.classList.add("mt-14");
+  root.appendChild(logisticsTabs);
 
   if (lastTab === "mission") missionSection(root, openTasks, taskItems, maintenance);
   else if (lastTab === "caches") cachesSection(root, cacheItems);

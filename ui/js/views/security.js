@@ -68,13 +68,14 @@ export async function render(root, params = {}) {
   stats.appendChild(stat("Audit events", String(auditItems.length).padStart(2, "0"), "most recent local actions"));
   root.appendChild(stats);
 
-  root.appendChild(h("div", { class: "row between mt-14" },
-    tabs([
-      { id: "vault", label: "VAULT" },
-      { id: "incidents", label: "INCIDENTS", count: openIncidents.length },
-      { id: "opsec", label: "OPSEC" },
-      { id: "purge", label: "PURGE" },
-    ], tab, (id) => { lastTab = id; render(root, { tab: id }); })));
+  const securityTabs = tabs([
+    { id: "vault", label: "VAULT" },
+    { id: "incidents", label: "INCIDENTS", count: openIncidents.length },
+    { id: "opsec", label: "OPSEC" },
+    { id: "purge", label: "PURGE" },
+  ], tab, (id) => { lastTab = id; render(root, { tab: id }); });
+  securityTabs.classList.add("mt-14");
+  root.appendChild(securityTabs);
 
   if (tab === "vault") vaultSection(root, vault, notes);
   if (tab === "incidents") incidentsSection(root, incidentItems, openIncidents);

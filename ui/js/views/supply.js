@@ -66,13 +66,13 @@ export async function render(root, params = {}) {
 
   root.appendChild(stats);
 
-  const bar = h("div", { class: "row between mt-14" },
-    tabs([
-      { id: "water", label: "WATER", count: waterItems.length },
-      { id: "food", label: "FOOD", count: foodStock.length },
-      { id: "power", label: "POWER", count: powerItems.length },
-      { id: "inventory", label: "INVENTORY", count: inv.length },
-    ], lastTab, (id) => { lastTab = id; try { history.replaceState(null, "", `#/supply?tab=${id}`); } catch {} render(root); }));
+  const bar = tabs([
+    { id: "water", label: "WATER", count: waterItems.length },
+    { id: "food", label: "FOOD", count: foodStock.length },
+    { id: "power", label: "POWER", count: powerItems.length },
+    { id: "inventory", label: "INVENTORY", count: inv.length },
+  ], lastTab, (id) => { lastTab = id; try { history.replaceState(null, "", `#/supply?tab=${id}`); } catch {} render(root); });
+  bar.classList.add("mt-14");
   root.appendChild(bar);
 
   if (lastTab === "water") await waterSection(root, waterItems, waterStock, lowItems);
