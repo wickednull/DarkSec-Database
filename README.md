@@ -325,6 +325,12 @@ free space, **Verify & repair** (removes corrupt or HTML error tiles),
 per-source or **Clear all tiles**, and a shortcut to **Download offline pack**.
 MBTiles archives are read-only and are never deleted by cache clearing.
 
+Starting a pack closes the selection dialog and continues in the background, so
+the map stays usable. **Map → Downloads** shows live progress, counts, per-tile
+log, and a **Cancel** button for manual or automatic packs. Cache clearing and
+verification are blocked while a download is active; cancel it first. Finished
+jobs stay in the panel briefly with their logs.
+
 #### MBTiles from a USB drive
 
 Operator-supplied MBTiles archives are read **in place and read-only**, so a

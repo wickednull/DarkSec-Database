@@ -535,6 +535,7 @@ export async function render(root) {
       h("div", { class: "settings-subhead", text: "Cache maintenance" }),
       cacheSummary,
       h("div", { class: "settings-actions" }, cacheRefresh, cacheVerify, cacheClear, cacheDownload),
+      h("div", { class: "tiny muted", text: "Download progress, per-tile logs and cancel controls are in the Map → Downloads panel." }),
       mapVector,
       mapAutoPack,
       mapSpace,

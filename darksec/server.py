@@ -5567,7 +5567,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                                         zoom_min, zoom_max, source)
 
     @app.post("/api/map/cache/download")
-    def download_tiles(body: dict = Body(default={})):
+    def download_tiles(request: Request, body: dict = Body(default={})):
         """Start a background tile download. Poll /api/map/cache/job/{id}."""
         from . import tilecache
         try:
@@ -5588,8 +5588,28 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                                        zoom_min, zoom_max, source)
         require(est["total"] <= 40000, f"Area too large ({est['total']} tiles). Narrow the box or lower max zoom.", 400)
         job = tilecache.start_download(lat_min, lon_min, lat_max, lon_max,
-                                       zoom_min, zoom_max, source)
+                                       zoom_min, zoom_max, source,
+                                       label=str(body.get("label") or "manual"))
         job["estimate"] = est
+        db(request).audit("MAP_CACHE_DOWNLOAD",
+                          f"job={job.get('id')} source={source} z{zoom_min}-{zoom_max} "
+                          f"tiles={job.get('total')}",
+                          request.client.host if request.client else "")
+        return job
+
+    @app.get("/api/map/cache/jobs")
+    def cache_jobs():
+        from . import tilecache
+        return {"jobs": tilecache.list_jobs()}
+
+    @app.post("/api/map/cache/job/{job_id}/cancel")
+    def cache_job_cancel(job_id: str, request: Request):
+        from . import tilecache
+        job = tilecache.cancel_download(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Unknown download job")
+        db(request).audit("MAP_CACHE_CANCEL", f"job={job_id} state={job.get('state')}",
+                          request.client.host if request.client else "")
         return job
 
     @app.get("/api/map/cache/job/{job_id}")
@@ -5615,6 +5635,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         source = body.get("source") or None
         if source and source not in tilecache.TILE_SOURCES:
             raise HTTPException(status_code=400, detail="Unknown tile source")
+        if any(job.get("state") == "running" for job in tilecache.list_jobs()):
+            raise HTTPException(status_code=409, detail="Cancel active tile downloads before verifying the cache")
         result = tilecache.verify_cache(source, fix=True)
         if result.get("removed"):
             result["generation"] = _bump_cache_generation(db(request))
@@ -5626,6 +5648,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         source = body.get("source") or None
         if source and source not in tilecache.TILE_SOURCES:
             raise HTTPException(status_code=400, detail="Unknown tile source")
+        if any(job.get("state") == "running" for job in tilecache.list_jobs()):
+            raise HTTPException(status_code=409, detail="Cancel active tile downloads before clearing the cache")
         result = tilecache.clear_cache(source)
         result["generation"] = _bump_cache_generation(db(request))
         return result

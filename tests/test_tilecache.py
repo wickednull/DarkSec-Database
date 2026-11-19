@@ -208,3 +208,40 @@ def test_usgs_imagery_uses_the_live_service():
     url = tilecache.TILE_SOURCES["usgs_imagery"]["url_template"]
     assert "USGSImageryOnly" in url
     assert "USGSImageryTopo" not in url
+
+
+def test_download_job_logs_progress_and_can_be_cancelled(tmp_path, monkeypatch):
+    import time
+
+    from darksec import tilecache
+
+    use_tmp_cache(monkeypatch, tmp_path)
+    def slow_fetch(*args, **kwargs):
+        time.sleep(0.01)
+        return b"\x00" * 200
+
+    monkeypatch.setattr(tilecache, "fetch_tile", slow_fetch)
+    monkeypatch.setattr(tilecache, "tiles_in_bbox", lambda *a, **k: [
+        {"z": 10, "x": 100 + i, "y": 200, "cached": False} for i in range(200)
+    ])
+    job = tilecache.start_download(39.0, -99.0, 40.0, -98.0, 10, 10,
+                                   "esri_imagery", label="manual")
+    assert job["label"] == "manual"
+    deadline = time.time() + 3
+    while time.time() < deadline and tilecache.job_status(job["id"])["state"] == "running":
+        time.sleep(0.01)
+    state = tilecache.job_status(job["id"])
+    assert state["state"] == "done"
+    assert state["log"]
+    assert any("Finished" in line["message"] for line in state["log"])
+    assert any(item["id"] == job["id"] for item in tilecache.list_jobs())
+
+    # A fresh job can be cancelled mid-flight.
+    job2 = tilecache.start_download(39.0, -99.0, 40.0, -98.0, 10, 10, "esri_imagery")
+    tilecache.cancel_download(job2["id"])
+    deadline = time.time() + 3
+    while time.time() < deadline and tilecache.job_status(job2["id"])["state"] == "running":
+        time.sleep(0.01)
+    cancelled = tilecache.job_status(job2["id"])
+    assert cancelled["state"] == "cancelled"
+    assert any("Cancel" in line["message"] for line in cancelled["log"])

@@ -107,6 +107,10 @@ export async function render(root, params = {}) {
   let movingFetchedAt = Date.now();
   let movingTimer = null;
   let movingPollTimer = null;
+  let downloadJobsBox = null;
+  let downloadJobsTimer = null;
+  let downloadJobsHadRunning = false;
+  const sourceMeta = {};
   let satTrack = null;
   const satTrackCache = new Map();
   try {
@@ -343,7 +347,7 @@ export async function render(root, params = {}) {
     { value: "720", label: "Intel age: last 30 days" },
   ], "0");
   ageFilter.addEventListener('change', () => { intelMaxAgeHours = Number(ageFilter.value)||0; draw(); renderIntel(); });
-  side.appendChild(panel({
+  const layersPanel = panel({
     title: "Layers", icon: "layers",
     body: h("div", { class: "col" },
       layerRows,
@@ -355,7 +359,17 @@ export async function render(root, params = {}) {
       h("div", { class: "row gap-6 mt-8" },
         btn("MANAGE OFFLINE MAP", { size: "sm", icon: "download", tone: "primary", onClick: openDownloadDialog }),
         btn("REFRESH", { size: "sm", tone: "ghost", onClick: async () => { await Promise.all([refreshCache(), refreshMapIntel(), refreshAlpr(true)]); draw(); } }))),
-  }));
+  });
+  side.appendChild(layersPanel);
+  downloadJobsBox = h("div", { class: "col gap-6" }, h("div", { class: "tiny muted", text: "No active downloads." }));
+  const downloadsPanel = panel({
+    title: "Downloads", icon: "download",
+    body: downloadJobsBox,
+    tools: [btn("REFRESH", { size: "sm", tone: "ghost", onClick: () => loadDownloadJobs() })],
+  });
+  side.insertBefore(downloadsPanel, layersPanel);
+  loadDownloadJobs();
+  downloadJobsTimer = setInterval(loadDownloadJobs, 2500);
 
   function legendItem(label, color, shape = "diamond") {
     const sw = h("i", { style: { background: color } });
@@ -491,7 +505,6 @@ export async function render(root, params = {}) {
   }
 
   /* ------------------------------------------------------- offline map packs */
-  const sourceMeta = {};
   function updateAttribution() {
     const layer = (layers.raster || []).find((l) => l.id === activeSource);
     const mbNames = (mbtilesInfo.archives || []).map((a) => a.name).filter(Boolean).slice(0, 3).join(", ");
@@ -542,7 +555,7 @@ export async function render(root, params = {}) {
       const job = await api.post("/api/map/cache/download", {
         lat_min: bbox.latMin, lat_max: bbox.latMax,
         lon_min: bbox.lonMin, lon_max: bbox.lonMax,
-        zoom_min: 0, zoom_max: zMax, source: activeSource,
+        zoom_min: 0, zoom_max: zMax, source: activeSource, label: "auto",
       });
       await pollAutoPack(job.id);
     } catch {
@@ -694,9 +707,63 @@ export async function render(root, params = {}) {
     };
   }
 
-  function openDownloadDialog() {
-    if (downloading) { toast("A download is already running", "warn"); return; }
+  async function loadDownloadJobs() {
+    if (!downloadJobsBox) return;
+    try {
+      const out = await api.get("/api/map/cache/jobs");
+      const jobs = out.jobs || [];
+      const running = jobs.filter((job) => job.state === "running");
+      const recent = jobs.filter((job) => job.state !== "running").slice(0, 3);
+      downloadJobsBox.replaceChildren();
+      if (!running.length && !recent.length) {
+        downloadJobsBox.appendChild(h("div", { class: "tiny muted", text: "No active or recent downloads." }));
+        downloading = false;
+        return;
+      }
+      for (const job of [...running, ...recent]) {
+        const total = Number(job.total) || 0;
+        const done = Number(job.completed) || 0;
+        const pct = total ? Math.round(done / total * 100) : (job.state === "running" ? 0 : 100);
+        const bar = h("div", { class: "progress-track" },
+          h("div", { class: "bar", style: { width: `${pct}%` } }));
+        const logText = (job.log || []).map((line) =>
+          `${new Date(Number(line.ts) * 1000).toLocaleTimeString()}  ${line.message}`).join("\n");
+        const cancel = job.state === "running"
+          ? btn("CANCEL", { size: "sm", tone: "danger", onClick: () => cancelDownloadJob(job) })
+          : badge(String(job.state || "done").toUpperCase(),
+                  job.state === "done" ? "green" : job.state === "cancelled" ? "amber" : "red");
+        const sourceName = sourceMeta[job.source]?.name || job.source;
+        downloadJobsBox.appendChild(h("div", { class: "col gap-4", style: { borderTop: "1px solid var(--line)", paddingTop: "8px" } },
+          h("div", { class: "row gap-6 wrap" },
+            h("div", { class: "grow" },
+              h("div", { class: "small", text: `${job.label === "auto" ? "Auto-cache" : "Offline pack"} · ${sourceName}` }),
+              h("div", { class: "tiny muted", text: `${pct}% · z${job.zoom_range?.[0]}–${job.zoom_range?.[1]} · ${done}/${total || "?"} · ${job.downloaded || 0} new · ${job.already_cached || 0} cached · ${job.failed || 0} failed` })),
+            cancel),
+          bar,
+          h("details", {},
+            h("summary", { class: "tiny muted", text: `Log · ${(job.log || []).length} line(s)` }),
+            h("pre", { class: "update-log", style: { margin: "6px 0 0", whiteSpace: "pre-wrap", maxHeight: "180px" }, text: logText || "No log entries." }))));
+      }
+      downloading = running.some((job) => job.label !== "auto");
+      if (running.length) {
+        downloadJobsHadRunning = true;
+      } else if (downloadJobsHadRunning) {
+        downloadJobsHadRunning = false;
+        await refreshCache();
+        draw();
+      }
+    } catch { /* keep the last rendered list */ }
+  }
 
+  async function cancelDownloadJob(job) {
+    try {
+      await api.post(`/api/map/cache/job/${encodeURIComponent(job.id)}/cancel`);
+      toast("Cancel requested — stopping after the current tile", "warn");
+      await loadDownloadJobs();
+    } catch (err) { toast(err.message || "Could not cancel download", "error"); }
+  }
+
+  function openDownloadDialog() {
     const sourceSel = select([], activeSource, { id: "dl-source" });
     const radiusSel = select([
       { value: "5", label: `${U.distKm(5)} radius` }, { value: "10", label: `${U.distKm(10)} radius` },
@@ -724,7 +791,8 @@ export async function render(root, params = {}) {
     const body = h("div", { class: "col gap-12" },
       h("div", { class: "tiny muted", text:
         "Downloads real map tiles while you have a connection, then serves them from disk with no network. " +
-        "Only the area you choose is stored. Nothing is uploaded." }),
+        "Only the area you choose is stored. Nothing is uploaded. Progress, log and cancel are in the Downloads panel on the map." }),
+      downloading ? h("div", { class: "callout warn", text: "A download is already running. Manage or cancel it in the Downloads panel before starting another." }) : null,
       field("Tile source", sourceSel),
       field("Area", radiusSel),
       field("Detail (max zoom)", zoomSel),
@@ -743,6 +811,7 @@ export async function render(root, params = {}) {
       wide: true,
       actions: [
         btn("VERIFY CACHE", { size: "sm", icon: "check", onClick: async () => {
+          if (downloading) { toast("Cancel the active download before verifying the cache", "warn"); return; }
           try {
             const r = await api.post("/api/map/cache/verify", { source: sourceSel.value || activeSource });
             toast(r.removed
@@ -753,6 +822,7 @@ export async function render(root, params = {}) {
           } catch (err) { toast(`Verify failed: ${err.message}`, "error"); }
         }}),
         btn("CLEAR CACHE", { tone: "danger", size: "sm", onClick: async () => {
+          if (downloading) { toast("Cancel the active download before clearing the cache", "warn"); return; }
           const ok = await confirmDialog({
             title: "Clear offline tiles",
             message: "Delete every downloaded tile? You will need a connection to download them again.",
@@ -767,7 +837,7 @@ export async function render(root, params = {}) {
             draw();
           } catch (err) { toast(`Clear failed: ${err.message}`, "error"); }
         }}),
-        btn("CANCEL", { tone: "ghost", size: "sm", onClick: () => dl.close() }),
+        btn("CLOSE", { tone: "ghost", size: "sm", onClick: () => dl.close() }),
         btn("DOWNLOAD", { tone: "primary", onClick: startDownload }),
       ],
     });
@@ -843,7 +913,10 @@ export async function render(root, params = {}) {
     }).catch(() => {});
 
     async function startDownload() {
-      if (downloading) return;
+      if (downloading) {
+        toast("A download is already running — cancel it in Downloads first", "warn");
+        return;
+      }
       const { source, bbox, zMin, zMax } = currentRequest();
       if (lastEstimate && lastEstimate.missing > 30000) {
         const ok = await confirmDialog({
@@ -854,19 +927,19 @@ export async function render(root, params = {}) {
         if (!ok) return;
       }
       downloading = true;
-      progressTrack.style.display = "";
       try {
-        const job = await api.post("/api/map/cache/download", {
+        await api.post("/api/map/cache/download", {
           lat_min: bbox.latMin, lat_max: bbox.latMax,
           lon_min: bbox.lonMin, lon_max: bbox.lonMax,
-          zoom_min: zMin, zoom_max: zMax, source,
+          zoom_min: zMin, zoom_max: zMax, source, label: "manual",
         });
         activeSource = source;
-        await pollJob(job.id);
+        dl.close();
+        toast("Download started — progress, log and cancel are in the Downloads panel", "warn", 6000);
+        await loadDownloadJobs();
       } catch (err) {
-        toast(`Download failed: ${err.message}`, "error");
-      } finally {
         downloading = false;
+        toast(`Download failed: ${err.message}`, "error");
       }
     }
 
@@ -2447,6 +2520,7 @@ export async function render(root, params = {}) {
     if (hudLiveTimer) clearInterval(hudLiveTimer);
     if (movingTimer) clearInterval(movingTimer);
     if (movingPollTimer) clearInterval(movingPollTimer);
+    if (downloadJobsTimer) clearInterval(downloadJobsTimer);
     if (alprFetchTimer) clearTimeout(alprFetchTimer);
     clearTimeout(readoutTimer);
     if (resizeObs) resizeObs.disconnect();

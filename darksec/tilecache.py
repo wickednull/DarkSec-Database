@@ -488,42 +488,94 @@ def estimate_tiles(lat_min, lon_min, lat_max, lon_max, zoom_min, zoom_max, sourc
 # ---------------------------------------------------------------------------
 # Background download jobs
 # ---------------------------------------------------------------------------
+def _job_log(job: dict, message: str, level: str = "info") -> None:
+    job.setdefault("log", []).append({
+        "ts": time.time(), "level": level, "message": str(message)[:400],
+    })
+    if len(job["log"]) > 400:
+        del job["log"][:100]
+
+
 def start_download(lat_min, lon_min, lat_max, lon_max, zoom_min, zoom_max,
-                   source=DEFAULT_SOURCE) -> dict:
+                   source=DEFAULT_SOURCE, label: str = "manual") -> dict:
     job_id = uuid.uuid4().hex[:12]
     job = {
         "id": job_id,
         "state": "running",
         "source": source,
+        "label": str(label or "manual")[:20],
         "bbox": [lat_min, lon_min, lat_max, lon_max],
         "zoom_range": [zoom_min, zoom_max],
         "total": 0, "completed": 0, "downloaded": 0,
         "already_cached": 0, "failed": 0, "bytes_added": 0,
-        "blocked": None, "error": None,
+        "blocked": None, "error": None, "cancel": False,
+        "current": None, "log": [],
         "started": time.time(), "finished": None,
     }
+    _job_log(job, f"Started {source} z{zoom_min}–{zoom_max} "
+                  f"({'auto' if label == 'auto' else 'manual'} pack)")
     with _jobs_lock:
         _jobs[job_id] = job
     t = threading.Thread(target=_run_job, args=(job,), daemon=True)
     t.start()
-    return job
+    return dict(job)
+
+
+def cancel_download(job_id: str) -> Optional[dict]:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return None
+        if job.get("state") == "running":
+            job["cancel"] = True
+            _job_log(job, "Cancel requested — stopping after the current tile.", "warn")
+        return {**job, "log": list(job.get("log") or [])}
+
+
+def list_jobs(limit: int = 12) -> list[dict]:
+    """Running jobs first, then the most recent finished jobs."""
+    now = time.time()
+    with _jobs_lock:
+        stale = [jid for jid, job in _jobs.items()
+                 if job.get("state") != "running"
+                 and (job.get("finished") or now) < now - 3600]
+        for jid in stale:
+            _jobs.pop(jid, None)
+        jobs = list(_jobs.values())
+    jobs.sort(key=lambda job: (job.get("state") != "running",
+                               -(job.get("started") or 0)))
+    return [{**job, "log": list(job.get("log") or [])} for job in jobs[:limit]]
 
 
 def _run_job(job: dict) -> None:
     tiles = tiles_in_bbox(*job["bbox"], *job["zoom_range"], job["source"])
     job["total"] = len(tiles)
+    step = max(1, min(200, len(tiles) // 40)) if tiles else 1
+    _job_log(job, f"{len(tiles):,} tiles in range · source {job['source']}")
     consecutive_failures = 0
+    last_progress = time.monotonic()
     try:
         for i, t in enumerate(tiles):
+            if job.get("cancel"):
+                job["state"] = "cancelled"
+                _job_log(job, f"Cancelled at {i}/{len(tiles)} tiles.", "warn")
+                break
+            job["current"] = {"z": t["z"], "x": t["x"], "y": t["y"]}
             if t["cached"]:
                 job["already_cached"] += 1
                 job["completed"] = i + 1
+                now = time.monotonic()
+                if job["completed"] % step == 0 or now - last_progress >= 2.0:
+                    last_progress = now
+                    _job_log(job, f"{job['completed']:,}/{len(tiles):,} · "
+                                  f"{job['downloaded']:,} new · {job['already_cached']:,} cached")
                 continue
             try:
                 data = fetch_tile(t["z"], t["x"], t["y"], job["source"])
             except TileBlocked as exc:
                 job["blocked"] = str(exc)
                 job["state"] = "blocked"
+                _job_log(job, f"Provider blocked the download: {exc}", "error")
                 break
             if data:
                 job["downloaded"] += 1
@@ -532,26 +584,43 @@ def _run_job(job: dict) -> None:
             else:
                 job["failed"] += 1
                 consecutive_failures += 1
+                if job["failed"] <= 5 or job["failed"] % 25 == 0:
+                    _job_log(job, f"Tile {t['z']}/{t['x']}/{t['y']} failed "
+                                  f"({job['failed']} total failures)", "warn")
                 # Bail out fast when the network is clearly gone.
                 if consecutive_failures >= 10 and job["downloaded"] == 0:
                     job["error"] = "Upstream unreachable — no tiles downloaded. Check the connection."
                     job["state"] = "error"
+                    _job_log(job, job["error"], "error")
                     break
             job["completed"] = i + 1
+            now = time.monotonic()
+            if job["completed"] % step == 0 or now - last_progress >= 2.0:
+                last_progress = now
+                _job_log(job, f"{job['completed']:,}/{len(tiles):,} · "
+                              f"{job['downloaded']:,} new · {job['already_cached']:,} cached · "
+                              f"{job['failed']:,} failed")
     except Exception as exc:  # never leave a job stuck in "running"
         job["error"] = str(exc)
         job["state"] = "error"
+        _job_log(job, f"Download error: {exc}", "error")
     finally:
         job["finished"] = time.time()
         if job["state"] == "running":
             job["state"] = "done"
+        if job["state"] == "done":
+            _job_log(job, f"Finished: {job['downloaded']:,} new · "
+                          f"{job['already_cached']:,} already cached · "
+                          f"{job['failed']:,} failed · "
+                          f"{job['bytes_added'] / 1048576:.1f} MB", "success")
         _invalidate_stats()
+        job["current"] = None
 
 
 def job_status(job_id: str) -> Optional[dict]:
     with _jobs_lock:
         job = _jobs.get(job_id)
-        return dict(job) if job else None
+        return {**job, "log": list(job.get("log") or [])} if job else None
 
 
 def host_reachable(source: str = DEFAULT_SOURCE) -> bool:
