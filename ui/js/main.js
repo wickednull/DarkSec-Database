@@ -12,7 +12,7 @@ import * as mapView from "./views/map.js?v=glyph-2";
 import * as library from "./views/library.js?v=better-1";
 import * as manual from "./views/manual.js";
 import * as navView from "./views/nav.js?v=opsec-1";
-import * as comms from "./views/comms.js";
+import * as comms from "./views/comms.js?v=comms-1";
 import * as sdr from "./views/sdr.js?v=sdr-3";
 import * as medical from "./views/medical.js";
 import * as supply from "./views/supply.js?v=better-5";
