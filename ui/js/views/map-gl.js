@@ -30,22 +30,37 @@ function loadMapLibre() {
   return maplibrePromise;
 }
 
-function rasterStyle(revision = "", source = "", generation = 0) {
+function rasterStyle(revision = "", source = "", generation = 0, labelsOverlay = false) {
   const params = new URLSearchParams();
   if (revision) params.set("r", revision);
   if (source) params.set("s", source);
   if (generation) params.set("b", String(generation));
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const tile = `${location.origin}/api/map/tiles/{z}/{x}/{y}.png${suffix}`;
-  return {
-    version: 8,
-    name: "DarkSec Raster",
-    sources: { local: { type: "raster", tiles: [tile], tileSize: 256, attribution: "Local/offline tiles · DarkSec" } },
-    layers: [
-      { id: "bg", type: "background", paint: { "background-color": "#030806" } },
-      { id: "local-raster", type: "raster", source: "local", paint: { "raster-opacity": 0.92, "raster-fade-duration": 120 } }
-    ]
+  const sources = {
+    local: { type: "raster", tiles: [tile], tileSize: 256, attribution: "Local/offline tiles · DarkSec" },
   };
+  const layers = [
+    { id: "bg", type: "background", paint: { "background-color": "#030806" } },
+    { id: "local-raster", type: "raster", source: "local", paint: { "raster-opacity": 0.92, "raster-fade-duration": 120 } },
+  ];
+  if (labelsOverlay && ["esri_imagery", "usgs_imagery"].includes(source)) {
+    const labelTiles = (id) =>
+      [`${location.origin}/api/map/cache/tiles/${id}/{z}/{x}/{y}.png?v=5&s=${id}&b=${generation || 0}`];
+    sources.labelsPlaces = {
+      type: "raster", tiles: labelTiles("esri_labels_places"), tileSize: 256,
+      attribution: "Esri, HERE, Garmin, OpenStreetMap contributors",
+    };
+    sources.labelsRoads = {
+      type: "raster", tiles: labelTiles("esri_labels_roads"), tileSize: 256,
+      attribution: "Esri, HERE, Garmin, OpenStreetMap contributors",
+    };
+    layers.push({ id: "labels-places", type: "raster", source: "labelsPlaces",
+                  paint: { "raster-opacity": 0.96, "raster-fade-duration": 0 } });
+    layers.push({ id: "labels-roads", type: "raster", source: "labelsRoads",
+                  paint: { "raster-opacity": 0.96, "raster-fade-duration": 0 } });
+  }
+  return { version: 8, name: "DarkSec Raster", sources, layers };
 }
 
 async function vectorStyle(revision = "") {
@@ -147,6 +162,7 @@ export async function render(root, params = {}) {
   const hidePosition = opsecActive(settings);
   const positionInfo = positionConfidence(settings);
   const spaceBackground = settings.map_space_background !== false;
+  const labelsOverlay = settings.map_labels_overlay !== false;
   const lightTheme = String(settings.theme_mode || "").toLowerCase() === "light"
     || document.documentElement.dataset.scheme === "light";
   const linkLat = Number(params.lat), linkLon = Number(params.lon);
@@ -188,7 +204,7 @@ export async function render(root, params = {}) {
       toast(`Vector basemap style unavailable: ${err.message || err}`, "warn", 7000);
     }
   }
-  if (!mapStyle) mapStyle = rasterStyle(mbInfo.revision || "", mapLayers?.activeSource || "", mapLayers?.cacheGeneration || 0);
+  if (!mapStyle) mapStyle = rasterStyle(mbInfo.revision || "", mapLayers?.activeSource || "", mapLayers?.cacheGeneration || 0, labelsOverlay);
   let intelAlpr = { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };
   let alprFetchTimer = null, alprQueryKey = "";
 
@@ -214,7 +230,7 @@ export async function render(root, params = {}) {
       (vectorSchema === "generic"
         ? `generic schema (layers: ${(mbInfo.layers || []).join(", ") || "unknown"}) · `
         : "OpenMapTiles geometry · ") +
-      "no text labels (no glyph pack bundled). "
+      "bundled Open Sans labels. "
     : "";
   const mapErrorBox = h("div", { class: "callout danger small mt-8", style: { display: "none" } });
   function showMapError(message) {

@@ -100,6 +100,7 @@ def default_settings() -> dict:
         "map_vector": True,
         "map_auto_pack": True,
         "map_space_background": True,
+        "map_labels_overlay": True,
         "map_cache_path": "",
         "auto_deep_index": True,
         "document_bundle_manifest_url": "https://github.com/wickednull/DarkSec-Database/releases/download/docs-2026-11-16/document-library.bundle.json",

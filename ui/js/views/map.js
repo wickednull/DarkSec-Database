@@ -183,6 +183,8 @@ export async function render(root, params = {}) {
   let readoutTimer = null;
   let lastReadout = "";
   const tileCache = new Map();
+  const labelTileCache = new Map();
+  const labelsOverlay = settings.map_labels_overlay !== false;
   let downloading = false;
   let cacheInfo = {
     tile_count: Number(layers.cache?.tile_count) || 0,
@@ -484,6 +486,9 @@ export async function render(root, params = {}) {
       if (visible.places && view.zoom >= 3) drawPlaces(ctx, world, c, w, hh);
     }
 
+    // Labels are an overlay above the shaded vector land/country fills;
+    // drawing them under those layers made them too dark to read.
+    if (visible.basemap) drawLabelTiles(ctx, w, hh);
     if (visible.graticule) drawGraticule(ctx, w, hh);
     if (visible.tracks) drawTracks(ctx, w, hh);
     if (visible.waypoints) drawWaypoints(ctx, w, hh);
@@ -510,7 +515,9 @@ export async function render(root, params = {}) {
     const mbNames = (mbtilesInfo.archives || []).map((a) => a.name).filter(Boolean).slice(0, 3).join(", ");
     const attr = layer?.attribution || sourceMeta[activeSource]?.attribution
       || (mbtilesInfo.usable ? `MBTiles · ${mbNames || "operator archive"}` : "");
-    attribution.textContent = attr ? `Tiles: ${attr}` : "Vector basemap · no tile attribution";
+    const labels = labelsOverlay && ["esri_imagery", "usgs_imagery"].includes(activeSource)
+      ? " · Labels: Esri" : "";
+    attribution.textContent = attr ? `Tiles: ${attr}${labels}` : "Vector basemap · no tile attribution";
   }
   api.get("/api/map/cache/sources").then((r) => {
     mapOnline = !!r.online;
@@ -598,6 +605,7 @@ export async function render(root, params = {}) {
         if (nextGeneration !== cacheGeneration) {
           cacheGeneration = nextGeneration;
           tileCache.clear();
+          labelTileCache.clear();
         }
         tileAvailable = !!((l.raster || []).length || mbtilesInfo.raster);
         updateAttribution();
@@ -1007,6 +1015,50 @@ export async function render(root, params = {}) {
         }
       }
     }
+  }
+
+  function drawLabelTiles(ctx, w, hh) {
+    if (!labelsOverlay || view.zoom < 6) return;
+    if (!["esri_imagery", "usgs_imagery"].includes(activeSource)) return;
+    const z = Math.max(0, Math.min(19, Math.round(view.zoom)));
+    const worldScale = TILE * (2 ** view.zoom);
+    const tileSize = TILE * (2 ** (view.zoom - z));
+    const center = project(view.lat, view.lon);
+    const c = { x: center.x * worldScale, y: center.y * worldScale };
+    const left = c.x - w / 2, top = c.y - hh / 2;
+    const x0 = Math.floor(left / tileSize), x1 = Math.floor((left + w) / tileSize);
+    const y0 = Math.floor(top / tileSize), y1 = Math.floor((top + hh) / tileSize);
+    const n = 2 ** z;
+    for (let ty = y0; ty <= y1; ty++) {
+      if (ty < 0 || ty >= n) continue;
+      for (let tx = x0; tx <= x1; tx++) {
+        const wx = ((tx % n) + n) % n;
+        const sx = tx * tileSize - left, sy = ty * tileSize - top;
+        for (const source of ["esri_labels_places", "esri_labels_roads"]) {
+          const img = labelTileImage(source, z, wx, ty);
+          if (img && img.complete && img.naturalWidth) {
+            ctx.globalAlpha = 0.96;
+            try { ctx.drawImage(img, sx, sy, tileSize + 0.6, tileSize + 0.6); } catch {}
+            ctx.globalAlpha = 1;
+          }
+        }
+      }
+    }
+  }
+
+  function labelTileImage(source, z, x, y) {
+    const key = `${source}:${z}/${x}/${y}`;
+    if (labelTileCache.has(key)) return labelTileCache.get(key);
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => draw();
+    img.onerror = () => { img.dataset.failed = "1"; };
+    img.src = `/api/map/cache/tiles/${source}/${z}/${x}/${y}.png?v=5&s=${source}&b=${cacheGeneration}`;
+    labelTileCache.set(key, img);
+    if (labelTileCache.size > 520) {
+      labelTileCache.delete(labelTileCache.keys().next().value);
+    }
+    return img;
   }
 
   function tileImage(z, x, y) {
@@ -2526,6 +2578,7 @@ export async function render(root, params = {}) {
     if (resizeObs) resizeObs.disconnect();
     document.removeEventListener("keydown", onKey);
     tileCache.clear();
+    labelTileCache.clear();
   };
 }
 

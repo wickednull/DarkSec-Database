@@ -515,6 +515,7 @@ export async function render(root) {
   const mapVector = checkbox("Render offline vector basemap", settings.map_vector !== false);
   const mapAutoPack = checkbox("Cache viewed map areas automatically while online", settings.map_auto_pack !== false);
   const mapSpace = checkbox("Starfield space background in the 3D globe", settings.map_space_background !== false);
+  const mapLabels = checkbox("Place/street labels over satellite imagery", settings.map_labels_overlay !== false);
   const cacheSummary = h("div", { class: "col gap-4" }, loading("Loading cache…"));
   const cacheRefresh = btn("REFRESH CACHE INFO", { size: "sm", icon: "refresh", onClick: () => loadCacheSummary() });
   const cacheVerify = btn("VERIFY & REPAIR", { size: "sm", icon: "check", onClick: verifyTileCache });
@@ -540,6 +541,7 @@ export async function render(root) {
       mapVector,
       mapAutoPack,
       mapSpace,
+      mapLabels,
       h("div", { class: "settings-subhead", text: "Layers" }),
       layersBox,
       h("div", { class: "settings-actions" },
@@ -903,6 +905,7 @@ export async function render(root) {
       map_vector: mapVector.querySelector("input").checked,
       map_auto_pack: mapAutoPack.querySelector("input").checked,
       map_space_background: mapSpace.querySelector("input").checked,
+      map_labels_overlay: mapLabels.querySelector("input").checked,
       map_cache_path: nextCache,
     };
     if (nextCache !== oldCache) {

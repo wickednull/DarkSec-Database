@@ -166,7 +166,11 @@ def test_vector_mbtiles_style_and_tiles(client, tmp_path, monkeypatch):
         assert style["sources"]["omt"]["maxzoom"] == 14
         assert style["sources"]["omt"]["attribution"] == "OpenMapTiles test data"
         assert any(layer.get("source-layer") == "water" for layer in style["layers"])
-        assert not any(layer.get("type") == "symbol" for layer in style["layers"])
+        assert style["glyphs"] == "/ui/fonts/{fontstack}/{range}.pbf"
+        assert any(layer.get("id") == "street-labels" and layer.get("type") == "symbol"
+                   for layer in style["layers"])
+        assert any(layer.get("id") == "place-labels" and layer.get("type") == "symbol"
+                   for layer in style["layers"])
 
         tile = client.get("/api/map/vector/tiles/7/69/43.pbf")
         assert tile.status_code == 200
@@ -260,7 +264,9 @@ def test_vector_style_light_and_dark():
     assert dark["sources"]["omt"]["maxzoom"] == 12
     assert dark["layers"][0]["paint"]["background-color"] != light["layers"][0]["paint"]["background-color"]
     assert any(layer.get("source-layer") == "water" for layer in dark["layers"])
-    assert not any(layer.get("type") == "symbol" for layer in dark["layers"])
+    assert any(layer.get("id") == "street-labels" for layer in dark["layers"])
+    assert any(layer.get("id") == "place-labels" for layer in dark["layers"])
+    assert dark["metadata"]["darksec:labels"] is True
 
 
 def test_generic_vector_schema_is_rendered_not_black():
@@ -272,6 +278,8 @@ def test_generic_vector_schema_is_rendered_not_black():
     assert ("osm", "fill") in ids
     assert ("osm", "line") in ids
     assert ("osm", "circle") in ids
+    assert any(layer.get("id") == "gen-osm-label" and layer.get("type") == "symbol"
+               for layer in style["layers"])
 
 
 def test_mvt_layer_name_probe():
@@ -331,3 +339,13 @@ def test_dark_vector_style_has_visible_land_water_and_roads():
     assert brightness(bg) > 24, "dark background must not collapse into pure black"
     assert brightness(water) > brightness(bg) + 40
     assert brightness(road) > brightness(bg) + 80
+
+
+def test_bundled_vector_label_glyphs_are_available(client):
+    from pathlib import Path
+
+    glyph = Path("ui/fonts/Open Sans Regular/0-255.pbf")
+    assert glyph.is_file() and glyph.stat().st_size > 1000
+    r = client.get("/ui/fonts/Open%20Sans%20Regular/0-255.pbf")
+    assert r.status_code == 200
+    assert r.content[:1] == b"\n"

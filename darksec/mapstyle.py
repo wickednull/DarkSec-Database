@@ -1,9 +1,9 @@
 """MapLibre style for offline OpenMapTiles-schema vector MBTiles.
 
-The archive carries geometry only; labels need a glyph pack, so this style
-renders land, water, boundaries, roads and buildings without text. Colours
-follow the active light/dark scheme. Tile URLs stay relative so the browser
-resolves them against the DarkSec origin.
+The style uses the bundled Open Sans glyph pack for place, street and water
+labels; archives that omit those layers still render geometry. Colours follow
+the active light/dark scheme. Tile URLs and glyph URLs stay relative so the
+browser resolves them against the DarkSec origin.
 """
 from __future__ import annotations
 
@@ -32,6 +32,8 @@ _DARK = {
     "rail": "#555555",
     "building": "#1a241c",
     "aeroway": "#35443a",
+    "label": "#dce9df",
+    "label_halo": "#030806",
 }
 
 _LIGHT = {
@@ -54,6 +56,8 @@ _LIGHT = {
     "rail": "#a9a49a",
     "building": "#ded8ca",
     "aeroway": "#cfd3cc",
+    "label": "#26312b",
+    "label_halo": "#f7f2e8",
 }
 
 
@@ -131,6 +135,7 @@ def _generic_layers(names: list[str], c: dict[str, str], dark: bool) -> list[dic
     fills: list[dict[str, Any]] = []
     lines: list[dict[str, Any]] = []
     circles: list[dict[str, Any]] = []
+    labels: list[dict[str, Any]] = []
     accent = "#8fe3b0" if dark else "#2f6b4f"
     for name in names:
         if name in _LABEL_LAYERS:
@@ -164,7 +169,30 @@ def _generic_layers(names: list[str], c: dict[str, str], dark: bool) -> list[dic
                           "circle-opacity": 0.7,
                           "circle-stroke-color": c["bg"], "circle-stroke-width": 0.5},
             })
-    return fills + lines + circles
+        # Unknown schemas often carry a plain `name` on points/lines. Add both
+        # point and line label layers so streets/places remain identifiable.
+        for placement, suffix, minzoom in (("point", "label", 8), ("line", "road-label", 12)):
+            labels.append({
+                "id": f"gen-{lid}-{suffix}", "type": "symbol", "source": "omt",
+                "source-layer": name, "minzoom": minzoom,
+                "layout": {
+                    "text-field": ["coalesce", ["get", "name"], ["get", "title"]],
+                    "text-font": ["Open Sans Regular"],
+                    "text-size": 10 if placement == "point" else 9,
+                    "text-max-width": 10,
+                    "text-anchor": "top" if placement == "point" else "center",
+                    "text-offset": [0, 0.35] if placement == "point" else [0, 0],
+                    "symbol-placement": placement,
+                    "text-rotation-alignment": "map",
+                    "text-pitch-alignment": "viewport",
+                    "text-padding": 2,
+                },
+                "paint": {
+                    "text-color": c["label"], "text-halo-color": c["label_halo"],
+                    "text-halo-width": 1.2,
+                },
+            })
+    return fills + lines + circles + labels
 
 
 def vector_style(*, theme: str = "dark", minzoom: int | None = 0,
@@ -202,6 +230,69 @@ def vector_style(*, theme: str = "dark", minzoom: int | None = 0,
               filter=["match", ["get", "class"], ["motorway", "trunk"], True, False]),
         _line("aeroway", "aeroway", c["aeroway"], 1.0, minzoom=9),
         _fill("building", "building", c["building"], minzoom=13),
+        # Labels use the bundled glyph pack; this is what gives vector maps
+        # place names, street names and water names.
+        {
+            "id": "place-labels", "type": "symbol", "source": "omt",
+            "source-layer": "place", "minzoom": 3,
+            "filter": ["match", ["get", "class"],
+                       ["country", "state", "province", "city", "town", "village",
+                        "suburb", "hamlet", "isolated_dwelling"], True, False],
+            "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+                "text-font": ["Open Sans Regular"],
+                "text-size": ["step", ["zoom"], 9, 5, 10, 8, 11, 12, 12, 15, 14],
+                "text-max-width": 9,
+                "text-anchor": "top",
+                "text-offset": [0, 0.35],
+                "text-padding": 2,
+            },
+            "paint": {"text-color": c["label"], "text-halo-color": c["label_halo"],
+                      "text-halo-width": 1.2},
+        },
+        {
+            "id": "street-labels", "type": "symbol", "source": "omt",
+            "source-layer": "transportation_name", "minzoom": 12,
+            "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name"], ["get", "ref"]],
+                "text-font": ["Open Sans Regular"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 12, 8, 16, 11],
+                "text-max-angle": 35,
+                "symbol-placement": "line",
+                "text-rotation-alignment": "map",
+                "text-pitch-alignment": "viewport",
+                "text-padding": 2,
+            },
+            "paint": {"text-color": c["label"], "text-halo-color": c["label_halo"],
+                      "text-halo-width": 1.2},
+        },
+        {
+            "id": "water-labels", "type": "symbol", "source": "omt",
+            "source-layer": "water_name", "minzoom": 7,
+            "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+                "text-font": ["Open Sans Regular"],
+                "text-size": 10,
+                "text-max-width": 10,
+                "symbol-placement": "line",
+                "text-rotation-alignment": "map",
+                "text-pitch-alignment": "viewport",
+            },
+            "paint": {"text-color": c["waterway"], "text-halo-color": c["label_halo"],
+                      "text-halo-width": 1.2},
+        },
+        {
+            "id": "house-numbers", "type": "symbol", "source": "omt",
+            "source-layer": "housenumber", "minzoom": 16,
+            "layout": {
+                "text-field": ["get", "housenumber"],
+                "text-font": ["Open Sans Regular"],
+                "text-size": 8,
+                "text-padding": 2,
+            },
+            "paint": {"text-color": c["label"], "text-halo-color": c["label_halo"],
+                      "text-halo-width": 1},
+        },
     ]
     if unknown:
         layers.extend(_generic_layers(unknown, c, dark))
@@ -212,9 +303,10 @@ def vector_style(*, theme: str = "dark", minzoom: int | None = 0,
     return {
         "version": 8,
         "name": "DarkSec Offline Vector",
+        "glyphs": "/ui/fonts/{fontstack}/{range}.pbf",
         "metadata": {
             "darksec:basemap": "vector-mbtiles",
-            "darksec:labels": False,
+            "darksec:labels": True,
             "darksec:schema": schema,
             "darksec:layers": requested[:40],
         },

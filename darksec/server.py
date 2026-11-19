@@ -3859,7 +3859,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     raise HTTPException(status_code=400, detail=f"{key} out of range")
                 value = f
             if key in ("sdr_tx_enabled", "sdr_tx_attested", "sdr_amp", "scanlines", "sound",
-                       "map_vector", "map_auto_pack", "map_space_background", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter", "assistant_system_tools", "assistant_medical_tools", "assistant_history_encrypted", "lan_easy_access", "lan_tls"):
+                       "map_vector", "map_auto_pack", "map_space_background", "map_labels_overlay", "auto_deep_index", "feed_auto_refresh", "opsec_mode", "dem_enabled", "assistant_enabled", "assistant_think", "assistant_tools", "assistant_tools_auto", "assistant_library_context", "assistant_history_filter", "assistant_system_tools", "assistant_medical_tools", "assistant_history_encrypted", "lan_easy_access", "lan_tls"):
                 value = bool(value)
             if key == "lan_port":
                 value = int(float(value))

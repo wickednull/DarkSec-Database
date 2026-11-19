@@ -91,6 +91,24 @@ TILE_SOURCES: dict[str, dict] = {
         "ext": "png",
         "note": "Terrain and contours worldwide.",
     },
+    "esri_labels_places": {
+        "name": "Place labels overlay (Esri)",
+        "url_template": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+        "attribution": "Esri, HERE, Garmin, OpenStreetMap contributors",
+        "max_zoom": 19,
+        "ext": "png",
+        "overlay": True,
+        "note": "Transparent place, boundary and water labels for satellite imagery.",
+    },
+    "esri_labels_roads": {
+        "name": "Road labels overlay (Esri)",
+        "url_template": "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+        "attribution": "Esri, HERE, Garmin, OpenStreetMap contributors",
+        "max_zoom": 19,
+        "ext": "png",
+        "overlay": True,
+        "note": "Transparent road network and street-name labels for satellite imagery.",
+    },
     "osm": {
         "name": "OpenStreetMap",
         "url_template": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -988,6 +1006,8 @@ def sources_info() -> list[dict]:
     stats = {s["source"]: s for s in cache_stats()["sources"]}
     out = []
     for key, src in TILE_SOURCES.items():
+        if src.get("overlay"):
+            continue
         s = stats.get(key, {})
         out.append({
             "id": key,
