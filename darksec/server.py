@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
-from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
                                RedirectResponse, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
@@ -2981,7 +2981,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; "
                 "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; "
-                "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; "                "form-action 'self'",
+                "connect-src 'self' ws: wss:; font-src 'self'; object-src 'none'; base-uri 'none'; "
+                "frame-src http: https:; frame-ancestors 'self'; form-action 'self'",
             )
         if path.startswith("/api/") or path.startswith("/ui/") or is_html:
             resp.headers.setdefault("Cache-Control", "no-store")
@@ -6344,6 +6345,197 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         if stop_event is not None:
             stop_event.set()
         return {"ok": stop_event is not None, "session": session}
+
+    @app.websocket("/api/sdr/ws")
+    async def sdr_ws(ws: WebSocket):
+        if token is not None:
+            supplied = (ws.cookies.get(COOKIE) or ws.query_params.get("token")
+                        or ws.headers.get("x-darksec-token") or "")
+            if not supplied or not secrets.compare_digest(str(supplied), str(token)):
+                await ws.close(code=1008)
+                return
+        await ws.accept()
+        try:
+            freq_hz = float(ws.query_params.get("freq_mhz", "100")) * 1e6
+            rate_hz = float(ws.query_params.get("rate", "1.024")) * 1e6
+            mode = str(ws.query_params.get("mode", "nfm")).lower()
+            backend = str(ws.query_params.get("backend", "auto"))
+            gain = float(ws.query_params.get("gain", "40"))
+            squelch = float(ws.query_params.get("squelch", "0"))
+            host = str(ws.query_params.get("host", "") or "")
+            port = int(ws.query_params.get("port", "1234") or 1234)
+            lna = int(ws.query_params.get("lna", "32") or 32)
+            vga = int(ws.query_params.get("vga", "40") or 40)
+            amp = str(ws.query_params.get("amp", "false")).lower() in ("1", "true", "yes")
+            pre = sdr.live_preflight(backend, host, port)
+            chosen = pre["backend"]
+            if chosen == "hackrf":
+                rate_hz = max(2_000_000.0, min(20_000_000.0, rate_hz))
+            else:
+                rate_hz = max(900_000.0, min(3_200_000.0, rate_hz))
+            settings = db_ws = None
+            try:
+                db_ws = Database()
+                settings = db_ws.all_settings()
+            finally:
+                if db_ws is not None:
+                    db_ws.close()
+            settings = settings or {}
+            host = (host or str(settings.get("sdr_rtl_tcp_host") or "")).strip()
+            port = int(port or settings.get("sdr_rtl_tcp_port") or 1234)
+            gain = float(gain or settings.get("sdr_rtl_gain") or 40)
+            ppm = int(settings.get("sdr_ppm") or 0)
+        except Exception as exc:
+            try:
+                await ws.send_json({"type": "error", "error": str(exc)[:400]})
+            except Exception:
+                pass
+            await ws.close()
+            return
+
+        loop = asyncio.get_running_loop()
+        out: asyncio.Queue = asyncio.Queue(maxsize=64)
+        control = {"freq_hz": freq_hz, "rate_hz": rate_hz, "mode": mode,
+                   "gain": gain, "squelch": squelch}
+        stop = threading.Event()
+        restart = threading.Event()
+
+        def push(item):
+            def _put():
+                if out.full():
+                    try:
+                        out.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                out.put_nowait(item)
+            try:
+                loop.call_soon_threadsafe(_put)
+            except RuntimeError:
+                pass
+
+        def worker():
+            consecutive_errors = 0
+            last_error_at = 0.0
+            last_reconnect_at = 0.0
+            while not stop.is_set():
+                with threading.Lock():
+                    params = dict(control)
+                center = float(params["freq_hz"])
+                rate = float(params["rate_hz"])
+                demod = sdr._LiveDemod(params["mode"], rate, squelch=params["squelch"])
+                spectrum = sdr._LiveSpectrum()
+                push({"type": "status", "backend": chosen, "center_hz": center,
+                      "rate": rate, "audio_rate": sdr.live_audio_rate(rate),
+                      "mode": params["mode"]})
+                source = sdr._live_source(chosen, center, rate, params["gain"], ppm,
+                                          host, port, lna, vga, amp, 0, stop_event=stop)
+                frame = 0
+                try:
+                    for data, sample_format in source:
+                        if stop.is_set() or restart.is_set():
+                            break
+                        iq = demod._bytes_to_iq(data, sample_format)
+                        pcm = demod.process(iq)
+                        if pcm:
+                            push(("audio", pcm))
+                        frame += 1
+                        if frame % 2 == 0:
+                            spec = spectrum.process(iq, center, rate)
+                            if spec:
+                                push(spec)
+                except Exception as exc:
+                    now = time.monotonic()
+                    consecutive_errors += 1
+                    if now - last_error_at > 5.0:
+                        last_error_at = now
+                        push({"type": "error", "error": str(exc)[:300]})
+                    if consecutive_errors >= 4:
+                        push({"type": "error", "error": "Receiver disconnected repeatedly; press PLAY to retry."})
+                        stop.set()
+                else:
+                    consecutive_errors = 0
+                finally:
+                    try:
+                        source.close()
+                    except Exception:
+                        pass
+                if not stop.is_set():
+                    now = time.monotonic()
+                    if now - last_reconnect_at > 5.0:
+                        last_reconnect_at = now
+                        push({"type": "status", "status": "reconnecting",
+                              "backend": chosen, "rate": rate,
+                              "audio_rate": sdr.live_audio_rate(rate),
+                              "center_hz": control.get("freq_hz"),
+                              "mode": control.get("mode")})
+                restart.clear()
+                time.sleep(0.4)
+
+        def send_thread():
+            threading.Thread(target=worker, daemon=True).start()
+
+        send_thread()
+
+        async def sender():
+            while True:
+                item = await out.get()
+                if isinstance(item, tuple) and item[0] == "audio":
+                    await ws.send_bytes(item[1])
+                elif isinstance(item, dict):
+                    await ws.send_json(item)
+
+        async def receiver():
+            while True:
+                raw = await ws.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except ValueError:
+                    continue
+                if msg.get("cmd") in ("tune", "set"):
+                    if "freq_mhz" in msg:
+                        try:
+                            control["freq_hz"] = float(msg["freq_mhz"]) * 1e6
+                        except (TypeError, ValueError):
+                            pass
+                    if "mode" in msg:
+                        control["mode"] = str(msg["mode"]).lower()
+                    if "squelch" in msg:
+                        control["squelch"] = float(msg.get("squelch") or 0)
+                    if "gain" in msg:
+                        control["gain"] = float(msg.get("gain") or 40)
+                    if "rate" in msg:
+                        try:
+                            new_rate = float(msg["rate"]) * 1e6
+                            control["rate_hz"] = new_rate
+                        except (TypeError, ValueError):
+                            pass
+                    restart.set()
+                elif msg.get("cmd") == "stop":
+                    break
+
+        try:
+            sender_task = asyncio.create_task(sender())
+            receiver_task = asyncio.create_task(receiver())
+            done, pending = await asyncio.wait(
+                {sender_task, receiver_task}, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            for task in done:
+                try:
+                    task.result()
+                except (WebSocketDisconnect, asyncio.CancelledError):
+                    pass
+                except Exception:
+                    pass
+        except WebSocketDisconnect:
+            pass
+        finally:
+            stop.set()
+            restart.set()
+            try:
+                await ws.close()
+            except Exception:
+                pass
 
     @app.get("/api/sdr/websdr")
     def sdr_websdr(refresh: bool = False, q: str = "", band: str = ""):

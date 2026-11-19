@@ -122,7 +122,9 @@ shows copyable LAN URLs.
 The **WebSDR / remote receivers** panel lists public KiwiSDR receivers from the
 KiwiSDR community mirror (`cdn.aethersdr.com/kiwi.json`) plus a small curated
 fallback. Choose a frequency and mode, then **LISTEN**. DarkSec creates a tuned
-URL such as `?f=7100lsb` and opens the receiver's own web interface.
+URL such as `?f=7100lsb` and opens the receiver inside a DarkSec modal, so
+playback and waterfall stay in the app. **OPEN EXTERNALLY** is available if a
+receiver blocks embedding or if DarkSec is HTTPS and the receiver is HTTP.
 
 Notes:
 

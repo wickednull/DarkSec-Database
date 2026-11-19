@@ -440,299 +440,488 @@ export async function render(root, params = {}) {
   }));
   topGrid.appendChild(hardwarePanel);
 
-  /* ----------------------------------------------------------- live audio */
-  const liveFreq = input({ type: "number", value: paramFreq ? String(paramFreq) : "100.0", step: "0.0001", min: "0.1", max: "6000" });
-  const liveMode = select([
-    { value: "nfm", label: "NFM — voice" },
-    { value: "wfm", label: "WFM — broadcast" },
-    { value: "am", label: "AM — aviation/broadcast" },
-    { value: "usb", label: "USB" },
-    { value: "lsb", label: "LSB" },
-  ], DEMODS.some((d) => d.value === paramMode) && ["nfm", "wfm", "am", "usb", "lsb"].includes(paramMode) ? paramMode : "nfm");
-  const liveBackend = select([
-    { value: "auto", label: "Auto" },
-    { value: "hackrf", label: "HackRF" },
+  /* ------------------------------------------------------- live receiver */
+  const liveCenterStart = (Number(paramFreq) || 100) * 1e6;
+  const liveModes = [["am","AM"],["nfm","NFM"],["wfm","WFM"],["usb","USB"],["lsb","LSB"]];
+  let liveCenter = liveCenterStart;
+  let liveStep = 1000;
+  let liveModeValue = DEMODS.some((d) => d.value === paramMode)
+    && ["nfm","wfm","am","usb","lsb"].includes(paramMode) ? paramMode : "nfm";
+  let liveBackendValue = String(store.settings?.sdr_backend || "auto");
+  let liveAudioRate = 48000;
+  let liveRunning = false;
+  let liveWs = null;
+  let liveCtx = null;
+  let liveGainNode = null;
+  let liveNext = 0;
+  let liveSources = [];
+  let liveHistory = [];
+  let liveBounds = { min: -120, max: -10 };
+  let liveSpec = null;
+  let liveRecording = false;
+  let liveRecChunks = [];
+  let liveRecBytes = 0;
+  let liveRecStarted = 0;
+  let liveRecTimer = null;
+
+  const liveVfo = h("div", { class: "sdr-vfo-digits" });
+  const liveSub = h("div", { class: "sdr-vfo-sub" });
+  const liveBackendSel = select([
+    { value: "auto", label: "AUTO" },
+    { value: "hackrf", label: "HACKRF" },
     { value: "rtl", label: "RTL-SDR" },
-    { value: "rtl_tcp", label: "Network rtl_tcp" },
-  ], String(store.settings?.sdr_backend || "auto"));
-  const liveRate = input({ type: "number", value: String(store.settings?.sdr_live_rate ?? 1.024), step: "0.025", min: "0.25", max: "3.2" });
-  const liveGain = input({ type: "number", value: String(store.settings?.sdr_rtl_gain ?? 40), min: "0", max: "62" });
-  const liveSquelch = input({ type: "number", value: String(store.settings?.sdr_live_squelch ?? 0), min: "0", max: "100" });
-  const liveVolume = input({ type: "range", value: "0.8", min: "0", max: "1", step: "0.01" });
-  const livePlay = btn("LISTEN", { tone: "primary", icon: "play" });
+    { value: "rtl_tcp", label: "NETWORK" },
+  ], liveBackendValue);
+  liveBackendSel.classList.add("sdr-inline-select");
+  const liveRateIn = input({ type: "number", value: String(store.settings?.sdr_live_rate ?? 1.024), step: "0.025", min: "0.25", max: "3.2" });
+  liveRateIn.classList.add("sdr-small-input");
+  const liveGainIn = input({ type: "number", value: String(store.settings?.sdr_rtl_gain ?? 40), min: "0", max: "62" });
+  liveGainIn.classList.add("sdr-small-input");
+  const liveSquelchIn = input({ type: "number", value: String(store.settings?.sdr_live_squelch ?? 0), min: "0", max: "100" });
+  liveSquelchIn.classList.add("sdr-small-input");
+  const liveVolumeIn = input({ type: "range", value: "0.8", min: "0", max: "1", step: "0.01" });
+  const liveStepSel = select([
+    { value: "1", label: "1 Hz" }, { value: "10", label: "10 Hz" },
+    { value: "100", label: "100 Hz" }, { value: "1000", label: "1 kHz" },
+    { value: "5000", label: "5 kHz" }, { value: "12500", label: "12.5 kHz" },
+    { value: "25000", label: "25 kHz" }, { value: "100000", label: "100 kHz" },
+  ], "1000");
+  liveStepSel.classList.add("sdr-inline-select");
+  const livePlay = btn("PLAY", { tone: "primary", icon: "play" });
   const liveStopBtn = btn("STOP", { icon: "stop", tone: "danger", disabled: true });
-  const liveStatus = h("span", { class: "tiny muted", text: "IDLE // no stream" });
-  const liveLevelBar = h("i", { style: { width: "0%" } });
-  const liveLevel = h("div", { class: "sdr-level", title: "audio level" }, liveLevelBar);
-  const liveBody = h("div", { class: "col" },
-    h("div", { class: "form-grid" },
-      field("FREQUENCY (MHz)", liveFreq),
-      field("MODE", liveMode),
-      field("BACKEND", liveBackend),
-      field("SAMPLE RATE (Msps)", liveRate, "Lower is easier on a Pi/uConsole"),
-      field("RTL GAIN", liveGain),
-      field("SQUELCH (0=off)", liveSquelch),
-    ),
-    h("div", { class: "row between mt-8" },
-      h("div", { class: "row gap-8" }, livePlay, liveStopBtn, liveStatus),
-      h("div", { class: "row gap-8 wrap" },
-        btn("SAVE DEFAULTS", { size: "sm", tone: "ghost", icon: "check", onClick: async () => {
+  const liveRecBtn = btn("REC", { icon: "mic", tone: "ghost" });
+  const liveFull = btn("FULL", { icon: "maximize", tone: "ghost" });
+  const liveStatus = h("span", { class: "tiny muted", text: "IDLE" });
+  const liveModeRow = h("div", { class: "sdr-mode-row" });
+  const liveBandRow = h("div", { class: "sdr-band-row" });
+  const liveSpectrum = h("canvas", { class: "sdr-live-spectrum" });
+  const liveWaterfall = h("canvas", { class: "sdr-live-waterfall" });
+  const liveGrid = h("div", { class: "sdr-live-grid" }, liveSpectrum, liveWaterfall);
+  const liveSMeter = h("i");
+  const liveSBox = h("div", { class: "sdr-smeter" }, liveSMeter);
+  const liveReadout = h("div", { class: "sdr-live-readout" });
+
+  function formatVfo(hz) {
+    const mhz = (Number(hz) || 0) / 1e6;
+    const text = mhz.toFixed(6);
+    const [whole, frac] = text.split(".");
+    return `${whole}.${frac.slice(0, 3)} ${frac.slice(3)}`;
+  }
+  function paintVfo() {
+    liveVfo.textContent = formatVfo(liveCenter);
+    liveSub.textContent = `${backendName(liveBackendValue)} · ${liveModeValue.toUpperCase()} · step ${fmt.num(liveStep, 0)} Hz`;
+  }
+  function paintModeButtons() {
+    for (const button of liveModeRow.querySelectorAll("button")) {
+      button.classList.toggle("active", button.dataset.mode === liveModeValue);
+    }
+  }
+  function setMode(mode) {
+    liveModeValue = mode;
+    if (["wfm","nfm"].includes(mode)) {
+      liveRateIn.value = mode === "wfm" ? "2.4" : "1.024";
+    }
+    paintModeButtons();
+    paintVfo();
+    liveSend({ cmd: "tune", freq_mhz: liveCenter / 1e6, mode: liveModeValue,
+      squelch: Number(liveSquelchIn.value) || 0, gain: Number(liveGainIn.value) || 40 });
+  }
+  for (const [value, label] of liveModes) {
+    const button = h("button", { class: "sdr-mode-btn", "data-mode": value, text: label,
+      onClick: () => setMode(value) });
+    liveModeRow.appendChild(button);
+  }
+  const bands = [
+    ["160m", 1_900_000, "lsb"], ["80m", 3_700_000, "lsb"], ["40m", 7_100_000, "lsb"],
+    ["20m", 14_200_000, "usb"], ["15m", 21_200_000, "usb"], ["10m", 28_500_000, "usb"],
+    ["6m", 50_150_000, "usb"], ["FM", 100_100_000, "wfm"], ["AIR", 121_500_000, "am"],
+    ["MAR", 156_800_000, "nfm"], ["2m", 145_500_000, "nfm"], ["70cm", 433_500_000, "nfm"],
+  ];
+  for (const [label, hz, mode] of bands) {
+    liveBandRow.appendChild(h("button", { class: "sdr-band-btn", text: label, onClick: () => {
+      liveCenter = hz;
+      setMode(mode);
+      paintVfo();
+    } }));
+  }
+
+  function liveSend(payload) {
+    if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+      try { liveWs.send(JSON.stringify(payload)); } catch {}
+    }
+  }
+  function tuneBy(delta) {
+    liveCenter = Math.max(100_000, Math.min(6_000_000_000, liveCenter + delta));
+    paintVfo();
+    liveSend({ cmd: "tune", freq_mhz: liveCenter / 1e6, mode: liveModeValue,
+      squelch: Number(liveSquelchIn.value) || 0, gain: Number(liveGainIn.value) || 40 });
+  }
+  function tuneTo(hz) {
+    liveCenter = Math.max(100_000, Math.min(6_000_000_000, hz));
+    paintVfo();
+    liveSend({ cmd: "tune", freq_mhz: liveCenter / 1e6, mode: liveModeValue,
+      squelch: Number(liveSquelchIn.value) || 0, gain: Number(liveGainIn.value) || 40 });
+  }
+
+  function schedulePcm(arrayBuffer) {
+    if (!liveCtx || !liveGainNode) return;
+    const int16 = new Int16Array(arrayBuffer);
+    if (!int16.length) return;
+    const buffer = liveCtx.createBuffer(1, int16.length, liveAudioRate);
+    const channel = buffer.getChannelData(0);
+    let sum = 0;
+    for (let i = 0; i < int16.length; i++) {
+      const v = int16[i] / 32768;
+      channel[i] = v;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / Math.max(1, int16.length));
+    liveSMeter.style.width = `${Math.min(100, rms * 420)}%`;
+    if (liveRecording) {
+      liveRecChunks.push(new Int16Array(int16));
+      liveRecBytes += int16.length * 2;
+      if (liveRecBytes > 120 * 1024 * 1024) stopRecording();
+    }
+    const src = liveCtx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(liveGainNode);
+    const now = liveCtx.currentTime;
+    if (liveNext < now + 0.05) liveNext = now + 0.05;
+    if (liveNext > now + 0.7) liveNext = now + 0.1;
+    src.start(liveNext);
+    liveNext += buffer.duration;
+    liveSources.push(src);
+    src.onended = () => { liveSources = liveSources.filter((item) => item !== src); };
+  }
+
+  function drawLiveSpectrum() {
+    const rect = liveSpectrum.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(280, rect.width || 900);
+    const hh = Math.max(140, rect.height || 240);
+    liveSpectrum.width = Math.round(w * dpr);
+    liveSpectrum.height = Math.round(hh * dpr);
+    const ctx = liveSpectrum.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, hh);
+    ctx.fillStyle = "#020604";
+    ctx.fillRect(0, 0, w, hh);
+    ctx.strokeStyle = "rgba(93,255,154,.08)";
+    for (let i = 1; i < 10; i++) {
+      ctx.beginPath(); ctx.moveTo((w / 10) * i, 0); ctx.lineTo((w / 10) * i, hh); ctx.stroke();
+    }
+    for (let i = 1; i < 5; i++) {
+      const y = (hh / 5) * i;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    }
+    if (!liveSpec || !liveSpec.bins?.length) {
+      ctx.fillStyle = "rgba(123,154,136,.72)";
+      ctx.font = "10px 'JetBrains Mono', monospace";
+      ctx.fillText("PRESS PLAY TO START THE RECEIVER", 14, hh / 2);
+      return;
+    }
+    const bins = liveSpec.bins;
+    const lo = liveBounds.min, hi = liveBounds.max;
+    ctx.beginPath();
+    for (let i = 0; i < bins.length; i++) {
+      const x = 4 + (i / Math.max(1, bins.length - 1)) * (w - 8);
+      const y = hh - 18 - ((bins[i] - lo) / Math.max(0.001, hi - lo)) * (hh - 30);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w - 4, hh - 18); ctx.lineTo(4, hh - 18); ctx.closePath();
+    const grad = ctx.createLinearGradient(0, 0, 0, hh);
+    grad.addColorStop(0, "rgba(93,255,154,.24)");
+    grad.addColorStop(1, "rgba(93,255,154,.015)");
+    ctx.fillStyle = grad; ctx.fill();
+    ctx.beginPath();
+    for (let i = 0; i < bins.length; i++) {
+      const x = 4 + (i / Math.max(1, bins.length - 1)) * (w - 8);
+      const y = hh - 18 - ((bins[i] - lo) / Math.max(0.001, hi - lo)) * (hh - 30);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = "#5dff9a"; ctx.lineWidth = 1.3; ctx.stroke();
+    if (liveSpec.peak_hz) {
+      const px = 4 + ((liveSpec.peak_hz - liveSpec.start_hz) / Math.max(1, liveSpec.end_hz - liveSpec.start_hz)) * (w - 8);
+      ctx.strokeStyle = "rgba(255,209,102,.8)";
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, hh - 18); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#ffd166";
+      ctx.font = "9px 'JetBrains Mono', monospace";
+      ctx.fillText(`${fmt.num(liveSpec.peak_hz / 1e6, 4)}`, Math.min(w - 60, px + 4), 12);
+    }
+    ctx.fillStyle = "rgba(205,236,218,.78)";
+    ctx.font = "9px 'JetBrains Mono', monospace";
+    ctx.fillText(`${fmt.num(liveSpec.start_hz / 1e6, 3)} MHz`, 6, hh - 5);
+    ctx.textAlign = "center";
+    ctx.fillText(`${fmt.num(liveSpec.center_hz / 1e6, 4)}`, w / 2, hh - 5);
+    ctx.textAlign = "right";
+    ctx.fillText(`${fmt.num(liveSpec.end_hz / 1e6, 3)} MHz`, w - 6, hh - 5);
+    ctx.textAlign = "left";
+    ctx.fillStyle = "rgba(123,154,136,.8)";
+    ctx.fillText(`${Math.round(hi)} dB`, 6, 12);
+  }
+
+  function drawLiveWaterfall() {
+    const width = 512;
+    if (!liveHistory.length) {
+      const ctx0 = liveWaterfall.getContext("2d");
+      liveWaterfall.width = width; liveWaterfall.height = 60;
+      ctx0.fillStyle = "#020604"; ctx0.fillRect(0, 0, width, 60);
+      return;
+    }
+    const rows = liveHistory.length;
+    liveWaterfall.width = width;
+    liveWaterfall.height = Math.max(60, rows);
+    const ctx = liveWaterfall.getContext("2d");
+    const img = ctx.createImageData(width, liveWaterfall.height);
+    const lo = liveBounds.min, hi = liveBounds.max;
+    for (let row = 0; row < rows; row++) {
+      const frame = liveHistory[row];
+      const y = rows - 1 - row;
+      for (let x = 0; x < width; x++) {
+        const idx = Math.min(frame.length - 1, Math.floor((x / width) * frame.length));
+        let t = (frame[idx] - lo) / Math.max(0.001, hi - lo);
+        t = Math.max(0, Math.min(1, t));
+        let r, g, b;
+        if (t < .45) { const k = t / .45; r = 2 + 10 * k; g = 8 + 80 * k; b = 6 + 24 * k; }
+        else if (t < .8) { const k = (t - .45) / .35; r = 12 + 80 * k; g = 88 + 167 * k; b = 30 + 40 * k; }
+        else { const k = (t - .8) / .2; r = 92 + 163 * k; g = 255; b = 70 + 150 * k; }
+        const p = (y * width + x) * 4;
+        img.data[p] = r; img.data[p + 1] = g; img.data[p + 2] = b; img.data[p + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  function acceptLiveSpectrum(frame) {
+    liveSpec = frame;
+    const values = frame.bins || [];
+    if (values.length) {
+      const lo = Math.min(...values), hi = Math.max(...values);
+      liveBounds.min = liveBounds.min * .9 + (lo - 6) * .1;
+      liveBounds.max = liveBounds.max * .9 + (hi + 6) * .1;
+      liveHistory.push(values);
+      if (liveHistory.length > 110) liveHistory.shift();
+      drawLiveWaterfall();
+    }
+    liveReadout.textContent = `${fmt.num(frame.center_hz / 1e6, 4)} MHz · span ${fmt.num((frame.end_hz - frame.start_hz) / 1e6, 3)} MHz · peak ${fmt.num(frame.peak_hz / 1e6, 4)} MHz / ${fmt.num(frame.peak_db, 1)} dB`;
+    drawLiveSpectrum();
+  }
+
+  function makeWav(chunks, rate) {
+    let total = 0;
+    for (const c of chunks) total += c.length;
+    const buffer = new ArrayBuffer(44 + total * 2);
+    const view = new DataView(buffer);
+    const write = (offset, text) => { for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i)); };
+    write(0, "RIFF"); view.setUint32(4, 36 + total * 2, true); write(8, "WAVE");
+    write(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true); view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    write(36, "data"); view.setUint32(40, total * 2, true);
+    let offset = 44;
+    for (const chunk of chunks) {
+      for (let i = 0; i < chunk.length; i++) { view.setInt16(offset, chunk[i], true); offset += 2; }
+    }
+    return URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
+  }
+
+  function startRecording() {
+    liveRecording = true;
+    liveRecChunks = [];
+    liveRecBytes = 0;
+    liveRecStarted = Date.now();
+    liveRecBtn.classList.add("recording");
+    liveRecBtn.replaceChildren(h("span", { text: "REC ●" }));
+    liveRecTimer = setInterval(() => {
+      const seconds = Math.floor((Date.now() - liveRecStarted) / 1000);
+      liveStatus.textContent = `LIVE · REC ${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+    }, 1000);
+  }
+  function stopRecording() {
+    if (!liveRecording) return;
+    liveRecording = false;
+    clearInterval(liveRecTimer);
+    liveRecTimer = null;
+    liveRecBtn.classList.remove("recording");
+    liveRecBtn.replaceChildren(h("span", { text: "REC" }));
+    if (!liveRecChunks.length) return;
+    const url = makeWav(liveRecChunks, liveAudioRate);
+    const a = h("a", { href: url, download: `darksec-${Date.now()}.wav` });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 8000);
+    toast("Recording saved as WAV");
+    liveStatus.textContent = "LIVE";
+  }
+
+  function startLive() {
+    if (liveRunning) return;
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) { toast("This browser has no Web Audio support", "error"); return; }
+    try { liveCtx = new AudioCtor(); } catch (err) { toast(`Audio unavailable: ${err.message || err}`, "error"); return; }
+    liveGainNode = liveCtx.createGain();
+    liveGainNode.gain.value = Number(liveVolumeIn.value) || 0.8;
+    liveGainNode.connect(liveCtx.destination);
+    liveCtx.resume().catch(() => {});
+    liveHistory = [];
+    liveSpec = null;
+    liveBounds = { min: -120, max: -10 };
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const qs = new URLSearchParams({
+      backend: liveBackendValue, freq_mhz: String(liveCenter / 1e6), mode: liveModeValue,
+      rate: String(Number(liveRateIn.value) || 1.024),
+      gain: String(Number(liveGainIn.value) || 40),
+      squelch: String(Number(liveSquelchIn.value) || 0),
+      host: String(netHost?.value || "").trim(), port: String(Number(netPort?.value) || 1234),
+    });
+    liveWs = new WebSocket(`${scheme}://${location.host}/api/sdr/ws?${qs}`);
+    liveWs.binaryType = "arraybuffer";
+    liveRunning = true;
+    livePlay.disabled = true;
+    liveStopBtn.disabled = false;
+    livePlay.replaceChildren(h("span", { text: "LIVE" }));
+    liveStatus.textContent = "CONNECTING…";
+    liveWs.onopen = () => { liveStatus.textContent = "LIVE · waiting for audio"; };
+    liveWs.onmessage = (event) => {
+      if (typeof event.data === "string") {
+        let frame;
+        try { frame = JSON.parse(event.data); } catch { return; }
+        if (frame.type === "status") {
+          liveAudioRate = Number(frame.audio_rate) || 48000;
+          liveBackendValue = frame.backend || liveBackendValue;
+          if (frame.status === "reconnecting") {
+            liveStatus.textContent = "RECONNECTING…";
+          } else {
+            liveStatus.textContent = `LIVE · ${backendName(liveBackendValue)} · ${fmt.num(frame.rate / 1e6, 3)} Msps`;
+          }
+          paintVfo();
+        } else if (frame.type === "spectrum") {
+          acceptLiveSpectrum(frame);
+        } else if (frame.type === "error") {
+          liveStatus.textContent = `ERROR · ${frame.error}`;
+          toast(frame.error || "SDR error", "error");
+        }
+      } else {
+        schedulePcm(event.data);
+      }
+    };
+    liveWs.onerror = () => { liveStatus.textContent = "CONNECTION ERROR"; };
+    liveWs.onclose = () => {
+      liveRunning = false;
+      livePlay.disabled = false;
+      liveStopBtn.disabled = true;
+      livePlay.replaceChildren(h("span", { text: "PLAY" }));
+      if (liveStatus.textContent.startsWith("LIVE")) liveStatus.textContent = "DISCONNECTED";
+      liveWs = null;
+    };
+  }
+  function stopLive() {
+    if (liveWs) { try { liveWs.close(); } catch {} liveWs = null; }
+    for (const src of liveSources) { try { src.stop(); } catch {} }
+    liveSources = [];
+    if (liveCtx) { try { liveCtx.close(); } catch {} liveCtx = null; }
+    liveGainNode = null;
+    liveNext = 0;
+    liveRunning = false;
+    livePlay.disabled = false;
+    liveStopBtn.disabled = true;
+    livePlay.replaceChildren(h("span", { text: "PLAY" }));
+    liveStatus.textContent = "IDLE";
+    liveSMeter.style.width = "0%";
+    stopRecording();
+  }
+
+  livePlay.addEventListener("click", startLive);
+  liveStopBtn.addEventListener("click", stopLive);
+  liveRecBtn.addEventListener("click", () => { liveRecording ? stopRecording() : startRecording(); });
+  liveBackendSel.addEventListener("change", () => {
+    liveBackendValue = liveBackendSel.value;
+    if (liveRunning) { stopLive(); setTimeout(startLive, 250); }
+    paintVfo();
+  });
+  liveStepSel.addEventListener("change", () => { liveStep = Number(liveStepSel.value) || 1000; paintVfo(); });
+  liveVolumeIn.addEventListener("input", () => {
+    if (liveGainNode) { try { liveGainNode.gain.value = Number(liveVolumeIn.value) || 0.8; } catch {} }
+  });
+  liveSquelchIn.addEventListener("change", () => liveSend({ cmd: "set", squelch: Number(liveSquelchIn.value) || 0 }));
+  liveGainIn.addEventListener("change", () => { if (liveRunning) { stopLive(); setTimeout(startLive, 250); } });
+  liveRateIn.addEventListener("change", () => { if (liveRunning) { stopLive(); setTimeout(startLive, 250); } });
+  liveFull.addEventListener("click", () => {
+    const target = liveSpectrum.closest(".panel") || liveSpectrum;
+    target.requestFullscreen?.().catch(() => {});
+  });
+  liveSpectrum.addEventListener("click", (event) => {
+    if (!liveSpec) return;
+    const rect = liveSpectrum.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
+    tuneTo(liveSpec.start_hz + ratio * (liveSpec.end_hz - liveSpec.start_hz));
+  });
+  liveSpectrum.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    tuneBy(event.deltaY < 0 ? liveStep : -liveStep);
+  }, { passive: false });
+  function liveKeyHandler(event) {
+    if (["INPUT","SELECT","TEXTAREA"].includes(document.activeElement?.tagName)) return;
+    if (!liveRunning) return;
+    if (event.key === "ArrowUp" || event.key === "ArrowRight") { event.preventDefault(); tuneBy(liveStep); }
+    else if (event.key === "ArrowDown" || event.key === "ArrowLeft") { event.preventDefault(); tuneBy(-liveStep); }
+    else if (event.key.toLowerCase() === "m") {
+      const idx = liveModes.findIndex(([value]) => value === liveModeValue);
+      setMode(liveModes[(idx + 1) % liveModes.length][0]);
+    } else if (event.code === "Space") { event.preventDefault(); stopLive(); }
+  }
+  window.addEventListener("keydown", liveKeyHandler);
+  paintModeButtons();
+  paintVfo();
+  setTimeout(() => { drawLiveSpectrum(); drawLiveWaterfall(); }, 40);
+
+  const liveBody = h("div", { class: "sdr-cockpit" },
+    h("div", { class: "sdr-vfo-row" },
+      h("div", { class: "sdr-vfo-main" },
+        liveVfo,
+        h("div", { class: "sdr-vfo-actions" },
+          btn("◀", { size: "sm", tone: "ghost", onClick: () => tuneBy(-liveStep) }),
+          btn("▶", { size: "sm", tone: "ghost", onClick: () => tuneBy(liveStep) }),
+          liveStepSel,
+          liveBackendSel)),
+      h("div", { class: "sdr-vfo-side" },
+        h("div", { class: "row between" }, h("span", { class: "tiny muted", text: "S-METER" }), liveStatus),
+        liveSBox,
+        h("div", { class: "row wrap gap-6 mt-6" }, livePlay, liveStopBtn, liveRecBtn, liveFull))),
+    liveModeRow,
+    liveGrid,
+    liveReadout,
+    h("div", { class: "sdr-cockpit-controls" },
+      field("RATE (Msps)", liveRateIn),
+      field("RTL GAIN", liveGainIn),
+      field("SQUELCH", liveSquelchIn),
+      h("div", { class: "field" }, h("label", { text: "VOLUME" }), liveVolumeIn),
+      h("div", { class: "field" }, h("label", { text: "DEFAULTS" }),
+        btn("SAVE", { size: "sm", tone: "ghost", icon: "check", onClick: async () => {
           try {
             await store.saveSettings({
-              sdr_backend: liveBackend.value,
+              sdr_backend: liveBackendSel.value,
               sdr_ppm: Number(sweepPpm.value) || 0,
-              sdr_rtl_gain: Number(liveGain.value) || 40,
-              sdr_live_rate: Number(liveRate.value) || 1.024,
-              sdr_live_squelch: Number(liveSquelch.value) || 0,
+              sdr_rtl_gain: Number(liveGainIn.value) || 40,
+              sdr_live_rate: Number(liveRateIn.value) || 1.024,
+              sdr_live_squelch: Number(liveSquelchIn.value) || 0,
               sdr_server_port: Number(srvPort.value) || 1234,
               sdr_server_bind: srvBind.value.trim() || "0.0.0.0",
             });
             toast("SDR defaults saved");
           } catch (err) { toast(err.message, "error"); }
-        } }),
-        h("span", { class: "tiny muted", text: "VOL" }), liveVolume)),
-    liveLevel,
-    h("div", { class: "tiny muted mt-6" },
-      "Live audio is demodulated on the server and streamed as 16-bit PCM. On a uConsole, use USB-A and keep the sample rate at 1.024–2.4 Msps. Public WebSDR receivers do not use this stream — see the WebSDR panel."),
+        } }))),
+    h("div", { class: "sdr-keyhint tiny muted" },
+      "CLICK SPECTRUM TO TUNE · WHEEL = STEP · ↑/↓ OR ←/→ = STEP · M = MODE · SPACE = STOP"),
   );
   topGrid.appendChild(panel({
-    title: "Live audio",
-    sub: "HackRF / RTL-SDR / rtl_tcp · server-side DSP",
+    title: "Live receiver",
+    sub: "Spectrum + waterfall + audio · click to tune",
     icon: "signal",
-    cls: "span-2",
+    cls: "span-2 sdr-live-panel",
     body: liveBody,
   }));
-
-  let liveCtx = null;
-  let liveGainNode = null;
-  let liveSession = "";
-  let liveAbort = null;
-  let liveSources = [];
-  let liveNext = 0;
-  let liveRunning = false;
-
-  function setLiveRunning(running) {
-    liveRunning = running;
-    livePlay.disabled = running;
-    liveStopBtn.disabled = !running;
-    livePlay.replaceChildren(h("span", { text: running ? "LIVE…" : "LISTEN" }));
-  }
-
-  function stopLive() {
-    if (liveSession) {
-      const sid = liveSession;
-      liveSession = "";
-      api.post(`/api/sdr/live/stop?session=${encodeURIComponent(sid)}`, {}).catch(() => {});
-    }
-    if (liveAbort) { try { liveAbort.abort(); } catch {} liveAbort = null; }
-    for (const src of liveSources) { try { src.stop(); } catch {} }
-    liveSources = [];
-    if (liveCtx) {
-      try { liveCtx.close(); } catch {}
-      liveCtx = null;
-    }
-    liveGainNode = null;
-    liveNext = 0;
-    liveLevelBar.style.width = "0%";
-    if (liveRunning) liveStatus.textContent = "STOPPED // operator";
-    setLiveRunning(false);
-  }
-
-  async function startLive() {
-    if (liveRunning) return;
-    const freq = Number(liveFreq.value);
-    if (!(freq >= 1 && freq <= 6000)) { toast("Frequency must be 1–6000 MHz", "warn"); return; }
-    const AudioCtor = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtor) { toast("This browser has no Web Audio support", "error"); return; }
-    let ctx;
-    try { ctx = new AudioCtor(); } catch (err) { toast(`Audio unavailable: ${err.message || err}`, "error"); return; }
-    liveCtx = ctx;
-    liveGainNode = ctx.createGain();
-    liveGainNode.gain.value = Number(liveVolume.value) || 0.8;
-    liveGainNode.connect(ctx.destination);
-    const playThrough = (buffer) => {
-      const src = ctx.createBufferSource();
-      src.buffer = buffer;
-      src.connect(liveGainNode);
-      return src;
-    };
-    await ctx.resume();
-    const controller = new AbortController();
-    liveAbort = controller;
-    setLiveRunning(true);
-    liveStatus.textContent = "CONNECTING // waiting for audio";
-    const qs = new URLSearchParams({
-      freq_mhz: String(freq), mode: liveMode.value, backend: liveBackend.value,
-      rate: String(Number(liveRate.value) || 1.024),
-      gain: String(Number(liveGain.value) || 40),
-      squelch: String(Number(liveSquelch.value) || 0),
-      host: String(netHost?.value || "").trim(),
-      port: String(Number(netPort?.value) || 1234),
-    });
-    try {
-      const res = await fetch(`/api/sdr/live?${qs}`, { credentials: "same-origin", signal: controller.signal });
-      if (!res.ok) {
-        let detail = `Live audio failed (${res.status})`;
-        try { const data = await res.json(); detail = data.detail || data.error || detail; } catch {}
-        throw new Error(detail);
-      }
-      liveSession = res.headers.get("x-sdr-session") || "";
-      const rate = Number(res.headers.get("x-audio-rate")) || 48000;
-      const backendUsed = res.headers.get("x-sdr-backend") || liveBackend.value;
-      liveStatus.textContent = `LIVE // ${String(backendUsed).toUpperCase()} · ${Math.round(rate / 1000)} kHz`;
-      if (!res.body) throw new Error("Streaming response is unavailable in this browser");
-      const reader = res.body.getReader();
-      let carry = new Uint8Array(0);
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (!value) continue;
-        const merged = new Uint8Array(carry.length + value.length);
-        merged.set(carry); merged.set(value, carry.length);
-        carry = merged;
-        while (carry.length >= 4096) {
-          const chunk = carry.slice(0, 4096);
-          carry = carry.slice(4096);
-          const int16 = new Int16Array(chunk.buffer, 0, chunk.length / 2);
-          const buffer = ctx.createBuffer(1, int16.length, rate);
-          const channel = buffer.getChannelData(0);
-          let sum = 0;
-          for (let i = 0; i < int16.length; i++) {
-            const v = int16[i] / 32768;
-            channel[i] = v; sum += v * v;
-          }
-          liveLevelBar.style.width = `${Math.min(100, Math.sqrt(sum / Math.max(1, int16.length)) * 420)}%`;
-          const src = playThrough(buffer);
-          const now = ctx.currentTime;
-          if (liveNext < now + 0.05) liveNext = now + 0.05;
-          if (liveNext > now + 0.7) liveNext = now + 0.1;
-          src.start(liveNext);
-          liveNext += buffer.duration;
-          liveSources.push(src);
-          src.onended = () => { liveSources = liveSources.filter((item) => item !== src); };
-        }
-      }
-      if (liveRunning) liveStatus.textContent = "STREAM ENDED // restart to listen";
-      liveSession = "";
-    } catch (err) {
-      if (err.name !== "AbortError") {
-        liveStatus.textContent = `ERROR // ${err.message}`;
-        toast(err.message || "Live audio failed", "error");
-      }
-    } finally {
-      if (liveAbort === controller) liveAbort = null;
-      if (!controller.signal.aborted && liveCtx === ctx) {
-        try { ctx.close(); } catch {}
-        liveCtx = null;
-        liveGainNode = null;
-      }
-      setLiveRunning(false);
-    }
-  }
-
-  livePlay.addEventListener("click", startLive);
-  liveStopBtn.addEventListener("click", stopLive);
-  liveVolume.addEventListener("input", () => {
-    if (liveGainNode) {
-      try { liveGainNode.gain.value = Number(liveVolume.value) || 0.8; } catch {}
-    }
-  });
-  liveMode.addEventListener("change", () => {
-    if (["wfm", "nfm"].includes(liveMode.value)) liveRate.value = liveMode.value === "wfm" ? "2.4" : "1.024";
-  });
-
-  let sweepAbort = null;
-  let sweepHistory = [];
-  let bounds = null;
-  function setSweepRunning(running) {
-    sweepBtn.disabled = running;
-    stopSweepBtn.disabled = !running;
-    sweepBtn.replaceChildren(h("span", { text: running ? "SWEEPING…" : "START SWEEP" }));
-  }
-  async function startSweep() {
-    if (sweepAbort) return;
-    const start = Number(startInput.value), end = Number(endInput.value);
-    if (!(start >= 0.1 && end <= 6000 && start < end)) {
-      toast("Enter a valid start/end range within 0.1–6000 MHz", "warn");
-      return;
-    }
-    sweepHistory = [];
-    bounds = null;
-    const controller = new AbortController();
-    sweepAbort = controller;
-    setSweepRunning(true);
-    spectrumReadout.firstChild.textContent = "CONNECTING // waiting for first frame";
-    try {
-      const qs = new URLSearchParams({
-        start_mhz: String(start), end_mhz: String(end), bin_khz: String(Number(binInput.value) || 100),
-        lna: String(Number(lnaInput.value) || 32), vga: String(Number(vgaInput.value) || 40),
-        amp: ampInput.querySelector("input")?.checked ? "true" : "false",
-        backend: sweepBackend.value, gain: String(Number(sweepGain.value) || 40),
-        ppm: String(Number(sweepPpm.value) || 0),
-      });
-      const res = await fetch(`/api/sdr/sweep?${qs}`, {
-        credentials: "same-origin", signal: controller.signal,
-        headers: { Accept: "application/x-ndjson" },
-      });
-      if (!res.ok) {
-        let detail = `Sweep failed (${res.status})`;
-        try { const data = await res.json(); detail = data.detail || data.error || detail; } catch {}
-        throw new Error(detail);
-      }
-      if (!res.body) throw new Error("Streaming response is unavailable in this browser");
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          let frame;
-          try { frame = JSON.parse(line); } catch { continue; }
-          if (frame.type === "error") throw new Error(frame.error || "Sweep error");
-          if (frame.type === "sweep") acceptSweep(frame);
-        }
-      }
-      spectrumReadout.firstChild.textContent = "SWEEP STOPPED // stream closed";
-    } catch (err) {
-      if (err.name === "AbortError") {
-        spectrumReadout.firstChild.textContent = "SWEEP STOPPED // operator";
-      } else {
-        spectrumReadout.firstChild.textContent = `ERROR // ${err.message}`;
-        toast(err.message || "Sweep failed", "error");
-      }
-    } finally {
-      if (sweepAbort === controller) sweepAbort = null;
-      setSweepRunning(false);
-      drawSpectrum(spectrumCanvas, null, bounds);
-    }
-  }
-  function acceptSweep(frame) {
-    const db = Array.isArray(frame.db) ? frame.db : [];
-    if (!db.length) return;
-    const localMin = Math.min(...db), localMax = Math.max(...db);
-    if (!bounds) bounds = { min: localMin - 7, max: localMax + 7 };
-    else {
-      bounds.min = bounds.min * .88 + (localMin - 7) * .12;
-      bounds.max = bounds.max * .88 + (localMax + 7) * .12;
-    }
-    drawSpectrum(spectrumCanvas, frame, bounds);
-    sweepHistory.push(db);
-    if (sweepHistory.length > 150) sweepHistory.shift();
-    drawWaterfall(waterfallCanvas, sweepHistory, bounds);
-    spectrumReadout.firstChild.textContent =
-      `LIVE // ${fmt.num(frame.start_hz / 1e6, 3)}–${fmt.num(frame.end_hz / 1e6, 3)} MHz`;
-    const peakHz = peakFrequency(frame);
-    spectrumReadout.lastChild.textContent =
-      `PEAK ${peakHz ? `${fmt.num(peakHz / 1e6, 4)} MHz` : "—"} / ${fmt.num(frame.peak_db, 1)} dB`;
-  }
-  sweepBtn.addEventListener("click", startSweep);
-  stopSweepBtn.addEventListener("click", () => { if (sweepAbort) sweepAbort.abort(); });
-  setTimeout(() => drawSpectrum(spectrumCanvas, null, null), 30);
 
   /* -------------------------------------------------------------- capture */
   const captureBody = h("div", { class: "col" });
@@ -890,19 +1079,33 @@ export async function render(root, params = {}) {
   async function openWebsdr(rec) {
     const freq = Number(wsFreq.value);
     if (!(freq >= 0.1 && freq <= 6000)) { toast("Enter a frequency within 0.1–6000 MHz", "warn"); return; }
-    const win = window.open("about:blank", "_blank");
+    let tuned;
     try {
       const out = await api.get(`/api/sdr/websdr/tune?url=${encodeURIComponent(rec.url)}&freq_hz=${encodeURIComponent(freq * 1e6)}&mode=${encodeURIComponent(wsMode.value)}`);
-      if (win) {
-        try { win.opener = null; } catch {}
-        win.location.href = out.url;
-      } else {
-        window.open(out.url, "_blank", "noopener,noreferrer");
-      }
+      tuned = out.url;
     } catch (err) {
-      try { win?.close(); } catch {}
       toast(err.message || "Could not build receiver URL", "error");
+      return;
     }
+    const mixed = location.protocol === "https:" && tuned.startsWith("http:");
+    const frame = h("iframe", {
+      src: tuned, title: rec.name || "WebSDR receiver",
+      class: "sdr-websdr-frame", allow: "autoplay; fullscreen; microphone",
+      referrerpolicy: "no-referrer",
+    });
+    const m = modal({
+      title: rec.name || "WebSDR receiver",
+      sub: `${rec.loc || "public receiver"} · ${rec.band || ""} · ${tuned}`,
+      wide: true, flush: true,
+      body: h("div", { class: "sdr-websdr-body" },
+        mixed ? h("div", { class: "callout warn small", text: "This receiver is HTTP and DarkSec is HTTPS. The browser may block the embedded view; use OPEN EXTERNALLY if it stays blank." }) : null,
+        frame),
+      actions: [
+        btn("OPEN EXTERNALLY", { tone: "ghost", icon: "upload", onClick: () => window.open(tuned, "_blank", "noopener,noreferrer") }),
+        btn("CLOSE", { tone: "ghost", onClick: () => m.close() }),
+      ],
+      onClose: () => { try { frame.src = "about:blank"; } catch {} },
+    });
   }
 
   function paintWebsdr(out) {
@@ -1255,6 +1458,8 @@ export async function render(root, params = {}) {
   return () => {
     if (sweepAbort) { try { sweepAbort.abort(); } catch {} }
     if (pollTimer) clearInterval(pollTimer);
+    window.removeEventListener("keydown", liveKeyHandler);
+    stopLive();
   };
 
   async function rescan(force = false) {

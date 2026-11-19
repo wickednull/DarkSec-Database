@@ -333,3 +333,16 @@ def test_live_stop_unknown_session_is_safe(client):
     r = client.post("/api/sdr/live/stop?session=missing", json={})
     assert r.status_code == 200
     assert r.json()["ok"] is False
+
+
+def test_live_spectrum_frame_shape():
+    from darksec.sdr import _LiveSpectrum
+
+    rate = 1_024_000
+    t = np.arange(4096) / rate
+    iq = np.exp(1j * 2 * np.pi * 25_000 * t).astype(np.complex64)
+    frame = _LiveSpectrum().process(iq, 100_000_000.0, rate)
+    assert frame["type"] == "spectrum"
+    assert len(frame["bins"]) == 512
+    assert frame["start_hz"] < 100_000_000 < frame["end_hz"]
+    assert frame["peak_hz"] > 0

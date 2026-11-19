@@ -337,10 +337,12 @@ jobs stay in the panel briefly with their logs.
 
 ### Software-defined radio
 
-DarkSec drives HackRF, RTL-SDR and network `rtl_tcp` receivers directly, with
-wideband sweep, live audio, IQ capture, demodulation, recordings and a gated
-HackRF transmit path. A WebSDR/KiwiSDR panel gives operators without a radio a
-curated public receiver list and tuned links. The SDR screen reports the board,
+DarkSec drives HackRF, RTL-SDR and network `rtl_tcp` receivers directly, with a
+live spectrum/waterfall cockpit, click-to-tune VFO, live audio, wideband scan,
+IQ capture, demodulation, recordings and a gated HackRF transmit path. A
+WebSDR/KiwiSDR panel gives operators without a radio a curated public receiver
+list, and opens the receiver tuned **inside DarkSec** instead of a new browser
+tab. The SDR screen reports the board,
 tuner, gain steps, CPU temperature, Raspberry Pi throttling flags and
 uConsole/AIO V2 setup steps. See [docs/SDR.md](docs/SDR.md) for hardware
 setup, uConsole USB-A/GPIO details, Raspberry Pi power advice, `rtl_tcp`

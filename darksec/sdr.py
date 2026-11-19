@@ -660,7 +660,7 @@ class RTLTCPClient:
             return b""
         try:
             return self.sock.recv(count)
-        except socket.timeout:
+        except (socket.timeout, OSError):
             return b""
 
     def close(self) -> None:
@@ -1148,6 +1148,37 @@ def adsb_snapshot() -> dict:
 # --------------------------------------------------------------------------
 # Live audio (server-side DSP, browser plays PCM)
 # --------------------------------------------------------------------------
+
+class _LiveSpectrum:
+    """FFT display frames from the same IQ blocks used for live audio."""
+
+    def __init__(self, fft_size: int = 2048, bins: int = 512):
+        self.fft_size = max(256, int(fft_size))
+        self.bins = max(64, int(bins))
+        self.window = np.hanning(self.fft_size).astype(np.float32)
+
+    def process(self, iq: np.ndarray, center_hz: float, rate: float) -> dict | None:
+        if iq.size < self.fft_size:
+            return None
+        segment = iq[-self.fft_size:]
+        spec = np.fft.fftshift(np.fft.fft(segment * self.window))
+        power = 20.0 * np.log10(np.maximum(np.abs(spec) / self.fft_size, 1e-9))
+        step = max(1, power.size // self.bins)
+        values = power[::step][:self.bins]
+        peak_idx = int(np.argmax(values))
+        span = float(rate)
+        start = float(center_hz) - span / 2.0
+        return {
+            "type": "spectrum",
+            "center_hz": float(center_hz),
+            "rate": float(rate),
+            "start_hz": start,
+            "end_hz": start + span,
+            "bins": [round(float(v), 1) for v in values],
+            "peak_hz": round(start + (peak_idx / max(1, len(values) - 1)) * span, 1),
+            "peak_db": round(float(values[peak_idx]), 1),
+        }
+
 
 def live_audio_rate(rate: float) -> int:
     rate = float(rate or 1_024_000)
