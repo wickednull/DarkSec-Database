@@ -738,7 +738,7 @@ export async function render(root, params = {}) {
   const captureBody = h("div", { class: "col" });
   const capFreq = input({ type: "number", value: paramFreq ? String(paramFreq) : "146.520", step: "0.0001", min: "0.1", max: "6000" });
   const capSeconds = input({ type: "number", value: "5", step: "0.5", min: "0.2", max: "180" });
-  const capRate = input({ type: "number", value: "2.4", step: "0.05", min: "0.9", max: "3.2" });
+  const capRate = input({ type: "number", value: "2.4", step: "0.05", min: "0.9", max: "20" });
   const capBackend = select([
     { value: "auto", label: "Auto" },
     { value: "hackrf", label: "HackRF (2–20 Msps)" },

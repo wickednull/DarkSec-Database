@@ -114,10 +114,12 @@ def platform_info() -> dict:
     ), "unknown")
     board = _read_first(("/sys/class/dmi/id/board_name",
                           "/sys/class/dmi/id/product_name"), "")
+    compatible = _read_first(("/proc/device-tree/compatible",
+                              "/sys/firmware/devicetree/base/compatible"), "")
     if board and board.lower() not in model.lower():
         model = f"{model} / {board}"
     arch = os.uname().machine if hasattr(os, "uname") else "unknown"
-    low = model.lower()
+    low = f"{model} {compatible}".lower()
     throttled_raw = ""
     if shutil.which("vcgencmd"):
         _rc, out = _run(["vcgencmd", "get_throttled"], 3)
