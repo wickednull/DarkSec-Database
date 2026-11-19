@@ -73,6 +73,34 @@ async function vectorStyle(revision = "") {
   return style;
 }
 
+// A missing glyph file must never blank a vector map. Probe the first glyph
+// range before MapLibre loads the style; if it is unavailable, drop text
+// layers and the glyphs URL so land, water, roads and boundaries still paint.
+async function ensureVectorGlyphs(style) {
+  const template = style?.glyphs;
+  if (!template) return style;
+  const probe = template
+    .replace("{fontstack}", encodeURIComponent("Open Sans Regular"))
+    .replace("{range}", "0-255");
+  try {
+    const response = await fetch(probe, { credentials: "same-origin", cache: "no-store" });
+    const type = response.headers.get("content-type") || "";
+    if (!response.ok || /text\/html/i.test(type)) {
+      throw new Error(`glyph pack returned ${response.status}`);
+    }
+    return style;
+  } catch (err) {
+    console.warn("Vector labels disabled — glyph pack unavailable:", err?.message || err);
+    const plain = {
+      ...style,
+      metadata: { ...(style.metadata || {}), "darksec:labels": false },
+      layers: (style.layers || []).filter((layer) => layer.type !== "symbol"),
+    };
+    delete plain.glyphs;
+    return plain;
+  }
+}
+
 const WORLD_RECT = {
   type: "Feature",
   properties: {},
@@ -206,6 +234,7 @@ export async function render(root, params = {}) {
     }
   }
   if (!mapStyle) mapStyle = rasterStyle(mbInfo.revision || "", mapLayers?.activeSource || "", mapLayers?.cacheGeneration || 0, labelsOverlay);
+  mapStyle = await ensureVectorGlyphs(mapStyle);
   let intelAlpr = { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };
   let alprFetchTimer = null, alprQueryKey = "";
 
@@ -226,12 +255,13 @@ export async function render(root, params = {}) {
     ],
   }));
   const vectorSchema = mapStyle?.metadata?.["darksec:schema"] || "openmaptiles";
+  const vectorLabels = mapStyle?.metadata?.["darksec:labels"] !== false;
   const vectorNote = mbInfo.vector && mbUsable
     ? `Offline vector basemap: ${(mbInfo.archives || []).map((a) => a.name).filter(Boolean).slice(0, 2).join(", ") || "configured archive"} · ` +
       (vectorSchema === "generic"
         ? `generic schema (layers: ${(mbInfo.layers || []).join(", ") || "unknown"}) · `
         : "OpenMapTiles geometry · ") +
-      "bundled Open Sans labels. "
+      (vectorLabels ? "bundled Open Sans labels. " : "labels unavailable (glyph pack missing). ")
     : "";
   const mapErrorBox = h("div", { class: "callout danger small mt-8", style: { display: "none" } });
   function showMapError(message) {
@@ -367,6 +397,25 @@ export async function render(root, params = {}) {
   }
   let vectorTileSeen = false;
   let watchdogShown = false;
+  let labelsStripped = false;
+  function dropVectorLabels(reason) {
+    if (labelsStripped || !map) return;
+    labelsStripped = true;
+    try {
+      const current = map.getStyle?.();
+      for (const layer of (current?.layers || [])) {
+        if (layer.type === "symbol") {
+          try { map.removeLayer(layer.id); } catch {}
+        }
+      }
+      map.triggerRepaint();
+    } catch {}
+    console.warn("Vector labels removed:", reason || "style error");
+  }
+  map.on("error", (event) => {
+    const message = String(event?.error?.message || event?.error || event?.message || "");
+    if (/glyph|font/i.test(message)) dropVectorLabels(message);
+  });
   map.on("sourcedata", (e) => {
     if (e.sourceId === "omt" && e.tile) {
       vectorTileSeen = true;
@@ -382,6 +431,9 @@ export async function render(root, params = {}) {
   if (mbInfo.vector) {
     setTimeout(() => {
       if (vectorTileSeen || !map) return;
+      // A glyph/style failure can leave the source loaded but nothing painted.
+      // Remove text layers and give geometry a chance before reporting an error.
+      dropVectorLabels("no vector tiles painted");
       watchdogShown = true;
       showMapError(
         `No vector tiles loaded for this view (z${map.getZoom().toFixed(1)}). Archive layers: ` +

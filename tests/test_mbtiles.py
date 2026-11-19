@@ -654,3 +654,39 @@ def test_archive_connection_is_safe_across_worker_threads(tmp_path):
             lambda: mbtiles._archive_for(archive).sample_tile()
         ).result()
     assert sample["ok"] is True
+
+
+def test_vector_style_can_render_geometry_without_glyphs():
+    from darksec import mapstyle
+
+    style = mapstyle.vector_style(layers=["water", "place"], glyphs=None)
+    assert "glyphs" not in style
+    assert style["metadata"]["darksec:labels"] is False
+    assert not any(layer.get("type") == "symbol" for layer in style["layers"])
+    assert any(layer.get("source-layer") == "water" for layer in style["layers"])
+
+    generic = mapstyle.vector_style(layers=["osm"], glyphs=None)
+    assert not any(layer.get("type") == "symbol" for layer in generic["layers"])
+    assert any(layer.get("id") == "gen-osm-fill" for layer in generic["layers"])
+
+
+def test_style_endpoint_omits_glyphs_when_pack_is_missing(tmp_path, monkeypatch, client):
+    from darksec import config, mbtiles
+
+    archive = make_mbtiles(tmp_path / "vector.mbtiles", fmt="pbf",
+                           tiles={(5, 3, 4): VECTOR_TILE},
+                           extra_meta={"json": '{"vector_layers":[{"id":"water"}]}'})
+    mbtiles.invalidate()
+    assert client.put("/api/settings", json={"mbtiles_path": str(archive)}).status_code == 200
+
+    empty_ui = tmp_path / "ui-without-fonts"
+    empty_ui.mkdir()
+    monkeypatch.setattr(config, "UI_DIR", empty_ui)
+    style = client.get("/api/map/vector/style").json()
+    assert "glyphs" not in style
+    assert style["metadata"]["darksec:labels"] is False
+    assert not any(layer.get("type") == "symbol" for layer in style["layers"])
+    assert any(layer.get("source-layer") == "water" for layer in style["layers"])
+
+    client.put("/api/settings", json={"mbtiles_path": ""})
+    mbtiles.invalidate()

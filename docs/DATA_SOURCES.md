@@ -41,9 +41,11 @@ Loose `{z}/{x}/{y}.png|jpg|webp` trees work as raster sources on both maps.
 OpenMapTiles layers get the dedicated offline style; other schemas
 (tilemaker/tippecanoe/custom, for example a single `osm` layer) get a generic
 fill/line/point style so they are not blank. Vector labels use the bundled
-Open Sans glyph pack (place, street, water and generic `name` fields). The
-**Find on USB** scanner checks kernel mount points (including GVFS and drives
-mounted under the home folder) first, then the data folder, `maps/` and the
+Open Sans glyph pack (place, street, water and generic `name` fields). If the
+glyph pack is unavailable, labels are omitted and the geometry still renders
+instead of a black map. The **Find on USB** scanner checks kernel mount points
+(including GVFS and drives mounted under the home folder) first, then the data
+folder, `maps/` and the
 home folder. **Diagnose** prints a copyable report of mounts, permissions,
 archive metadata and a sample tile read. If a drive returns under a different
 mount path, an archive or tile folder with the same name is re-used

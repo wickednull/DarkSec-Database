@@ -18,7 +18,8 @@ a = Analysis(
         ('./maps', 'maps'),
         ('./medical', 'medical'),
         ('./prepper', 'prepper'),
-        ('./water_food', 'water_food')
+        ('./water_food', 'water_food'),
+        ('./ui', 'ui')
     ],
     hiddenimports=['darksec.updater', 'darksec.alpr', 'darksec.docbundle',
                    'sgp4', 'sgp4.api', 'sgp4.propagation', 'scipy.signal',

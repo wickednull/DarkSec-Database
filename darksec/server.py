@@ -5276,7 +5276,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         }
 
     @app.get("/api/map/vector/style")
-    def map_vector_style(request: Request):
+    def map_vector_style(request: Request, labels: int = Query(1, ge=0, le=1)):
         """MapLibre style for an offline OpenMapTiles-schema vector archive."""
         s = db(request).all_settings()
         source = mbtiles.describe_source()
@@ -5294,12 +5294,21 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             for layer in (archive.get("vector_layers") or [])
             if str(layer).strip()
         })
+        # A missing glyph pack must not make the whole vector map black:
+        # without glyphs, emit geometry-only layers and no glyphs URL.
+        glyph_file = Path(config.UI_DIR) / "fonts" / "Open Sans Regular" / "0-255.pbf"
+        try:
+            glyphs_ok = glyph_file.is_file()
+        except OSError:
+            glyphs_ok = False
         return mapstyle.vector_style(
             theme=str(s.get("theme_mode") or "dark"),
             minzoom=min(lows) if lows else 0,
             maxzoom=max(highs) if highs else 14,
             attribution=attribution,
             layers=vector_layers,
+            glyphs="/ui/fonts/{fontstack}/{range}.pbf" if glyphs_ok else None,
+            labels=bool(labels) and glyphs_ok,
         )
 
     def _vector_tile_response(z: int, x: int, y: int):

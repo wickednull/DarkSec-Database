@@ -381,9 +381,11 @@ boundaries, roads, buildings); archives from tilemaker, tippecanoe or custom
 pipelines get a generic fill/line/point style, so a single layer such as `osm`
 is still visible instead of rendering black. OpenMapTiles place, street and
 water labels render from a bundled Open Sans glyph pack; generic `name` fields
-are labelled too. For raster satellite maps, **Place/street labels over
-satellite imagery** (Settings → Offline maps) overlays Esri reference labels
-and roads; those tiles cache like any other map tile. The GL map shows the archive's layer names, zoom
+are labelled too. If that glyph pack is missing, DarkSec drops only the text
+layers and still draws land, water, boundaries and roads — a missing font can
+never blank the vector map. For raster satellite maps, **Place/street labels
+over satellite imagery** (Settings → Offline maps) overlays Esri reference
+labels and roads; those tiles cache like any other map tile. The GL map shows the archive's layer names, zoom
 range and index status, and warns if no tiles render for the current view.
 Keep the drive mounted while the map is in use; if it is removed the map falls
 back to bundled and cached tiles.

@@ -125,7 +125,8 @@ def _generic_kind(name: str) -> str:
     return "generic"
 
 
-def _generic_layers(names: list[str], c: dict[str, str], dark: bool) -> list[dict[str, Any]]:
+def _generic_layers(names: list[str], c: dict[str, str], dark: bool,
+                    with_labels: bool = True) -> list[dict[str, Any]]:
     """Render any vector schema without knowing its layer names.
 
     A fill, line and circle layer is added per unknown source-layer, so mixed
@@ -171,6 +172,8 @@ def _generic_layers(names: list[str], c: dict[str, str], dark: bool) -> list[dic
             })
         # Unknown schemas often carry a plain `name` on points/lines. Add both
         # point and line label layers so streets/places remain identifiable.
+        if not with_labels:
+            continue
         for placement, suffix, minzoom in (("point", "label", 8), ("line", "road-label", 12)):
             labels.append({
                 "id": f"gen-{lid}-{suffix}", "type": "symbol", "source": "omt",
@@ -197,7 +200,9 @@ def _generic_layers(names: list[str], c: dict[str, str], dark: bool) -> list[dic
 
 def vector_style(*, theme: str = "dark", minzoom: int | None = 0,
                  maxzoom: int | None = 14, attribution: str = "",
-                 layers: list[str] | None = None) -> dict[str, Any]:
+                 layers: list[str] | None = None,
+                 glyphs: str | None = "/ui/fonts/{fontstack}/{range}.pbf",
+                 labels: bool = True) -> dict[str, Any]:
     """Build a MapLibre style for an OpenMapTiles or generic vector archive."""
     c = _color(theme)
     dark = str(theme or "").lower() != "light"
@@ -230,8 +235,11 @@ def vector_style(*, theme: str = "dark", minzoom: int | None = 0,
               filter=["match", ["get", "class"], ["motorway", "trunk"], True, False]),
         _line("aeroway", "aeroway", c["aeroway"], 1.0, minzoom=9),
         _fill("building", "building", c["building"], minzoom=13),
+    ]
+    if labels and glyphs:
         # Labels use the bundled glyph pack; this is what gives vector maps
         # place names, street names and water names.
+        layers.extend([
         {
             "id": "place-labels", "type": "symbol", "source": "omt",
             "source-layer": "place", "minzoom": 3,
@@ -293,20 +301,19 @@ def vector_style(*, theme: str = "dark", minzoom: int | None = 0,
             "paint": {"text-color": c["label"], "text-halo-color": c["label_halo"],
                       "text-halo-width": 1},
         },
-    ]
+        ])
     if unknown:
-        layers.extend(_generic_layers(unknown, c, dark))
+        layers.extend(_generic_layers(unknown, c, dark, with_labels=bool(labels and glyphs)))
     attribution = str(attribution or "").strip()
     schema = "generic" if requested and not (set(requested) & _OMT_LAYERS) else (
         "mixed" if unknown else "openmaptiles"
     )
-    return {
+    style: dict[str, Any] = {
         "version": 8,
         "name": "DarkSec Offline Vector",
-        "glyphs": "/ui/fonts/{fontstack}/{range}.pbf",
         "metadata": {
             "darksec:basemap": "vector-mbtiles",
-            "darksec:labels": True,
+            "darksec:labels": bool(labels and glyphs),
             "darksec:schema": schema,
             "darksec:layers": requested[:40],
         },
@@ -321,3 +328,6 @@ def vector_style(*, theme: str = "dark", minzoom: int | None = 0,
         },
         "layers": layers,
     }
+    if glyphs:
+        style["glyphs"] = glyphs
+    return style
