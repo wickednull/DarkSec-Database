@@ -1277,3 +1277,12 @@ def test_cached_items_turn_feed_error_into_stale(tmp_path):
     row = next(f for f in feeds.list_feeds(db) if f["id"] == "open_meteo_weather")
     assert row["status"] == "STALE"
     assert row["items"][0]["temperature_c"] == 3.1
+
+
+def test_space_background_setting(client):
+    old = client.get("/api/settings").json().get("map_space_background", True)
+    try:
+        assert client.put("/api/settings", json={"map_space_background": False}).json()["map_space_background"] is False
+        assert client.get("/api/settings").json()["map_space_background"] is False
+    finally:
+        client.put("/api/settings", json={"map_space_background": old})

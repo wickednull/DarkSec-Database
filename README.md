@@ -1,4 +1,4 @@
-# DarkSec-Database project: NIGHTWATCH
+# DarkSec NIGHTWATCH
 <img width="1408" height="768" alt="image" src="https://github.com/user-attachments/assets/f85d3ea1-0a1c-4673-ac2e-d6edaa46189d" />
 
 A local-only, offline-first survival field console. It runs a Python FastAPI
@@ -291,6 +291,11 @@ same provider online, then an overzoomed parent tile from the same provider,
 and only then the bundled overview. Cached tiles from unrelated providers are
 never mixed into the same view. Missing high-zoom tiles therefore stay aligned
 with roads, waypoints and intel instead of turning into a patchwork.
+
+The 3D globe uses a starfield space background beyond Earth's limb. Toggle
+**Settings → Offline maps → Starfield space background** if you prefer a plain
+background. The starfield is local CSS, makes no network requests, and keeps
+Earth's surface opaque.
 
 **Cache viewed areas automatically** in Settings → Offline maps is on by
 default: after the map is idle for a few seconds it downloads the missing full

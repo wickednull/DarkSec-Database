@@ -58,6 +58,43 @@ async function vectorStyle(revision = "") {
   return style;
 }
 
+const WORLD_RECT = {
+  type: "Feature",
+  properties: {},
+  geometry: {
+    type: "Polygon",
+    coordinates: [[
+      [-180, -89.999], [180, -89.999], [180, 89.999],
+      [-180, 89.999], [-180, -89.999],
+    ]],
+  },
+};
+
+function applySpaceBackground(map, lightTheme) {
+  // The starfield is CSS behind a transparent WebGL canvas. A world-sized
+  // polygon keeps Earth's surface opaque so stars only appear beyond the limb.
+  const before = (map.getStyle().layers || []).find((layer) => layer.id !== "background");
+  try {
+    if (!map.getSource("darksec-globe-base")) {
+      map.addSource("darksec-globe-base", { type: "geojson", data: WORLD_RECT });
+    }
+    map.addLayer({
+      id: "darksec-globe-base",
+      type: "fill",
+      source: "darksec-globe-base",
+      paint: { "fill-color": lightTheme ? "#e9e5d9" : "#13241a" },
+    }, before?.id);
+  } catch (err) {
+    console.warn("Could not add globe surface base", err);
+  }
+  try {
+    map.setPaintProperty("background", "background-color", "rgba(0,0,0,0)");
+    map.setPaintProperty("background", "background-pattern", null);
+  } catch (err) {
+    console.warn("Could not make space background transparent", err);
+  }
+}
+
 function escapeHtml(s){ return String(s ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
 function num(v){ const n=Number(v); return Number.isFinite(n)?n:null; }
 function fc(features){ return { type:"FeatureCollection", features: features || [] }; }
@@ -102,13 +139,23 @@ function destination(lon, lat, bearingDeg, distKm) {
   return [(lon2*180/Math.PI+540)%360-180, lat2*180/Math.PI];
 }
 
-export async function render(root) {
+export async function render(root, params = {}) {
   root.replaceChildren(loading("INITIALISING GL MAP"));
   const settings = store.settings || {};
   const homeLat = Number.isFinite(Number(settings.lat)) ? Number(settings.lat) : 39.8283;
   const homeLon = Number.isFinite(Number(settings.lon)) ? Number(settings.lon) : -98.5795;
   const hidePosition = opsecActive(settings);
   const positionInfo = positionConfidence(settings);
+  const spaceBackground = settings.map_space_background !== false;
+  const lightTheme = String(settings.theme_mode || "").toLowerCase() === "light"
+    || document.documentElement.dataset.scheme === "light";
+  const linkLat = Number(params.lat), linkLon = Number(params.lon);
+  const linkZoom = Number(params.z ?? params.zoom);
+  const hasLink = !hidePosition && Number.isFinite(linkLat) && Number.isFinite(linkLon)
+    && Math.abs(linkLat) <= 85 && Math.abs(linkLon) <= 180;
+  const hasLinkZoom = Number.isFinite(linkZoom);
+  const glCenter = hasLink ? [linkLon, linkLat] : [homeLon, homeLat];
+  const glZoom = hasLinkZoom ? Math.max(-2, Math.min(18, linkZoom)) : 3.5;
   let intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud, mapLayers;
   let statusBox = null, coordBox = null;
   try {
@@ -176,8 +223,9 @@ export async function render(root) {
 
   root.appendChild(mapErrorBox);
   const layout = h("div", { class: "map-layout mt-14" });
-  const wrap = h("div", { class: "map-shell", style: { height: "min(72vh, 820px)", minHeight: "460px", position: "relative" } });
-  const container = h("div", { style: { position: "absolute", inset: "0" } });
+  const wrap = h("div", { class: `map-shell ${spaceBackground ? "map-space" : ""}`.trim(), style: { height: "min(72vh, 820px)", minHeight: "460px", position: "relative" } });
+  if (spaceBackground) wrap.appendChild(h("div", { class: "map-starfield" }));
+  const container = h("div", { style: { position: "absolute", inset: "0", zIndex: "1" } });
   wrap.appendChild(container);
   layout.appendChild(wrap);
   const side = h("div", { class: "map-side" });
@@ -256,7 +304,12 @@ export async function render(root) {
   const mbMinZoom = Number.isFinite(Number(vectorArchive.minzoom)) ? Number(vectorArchive.minzoom) : 0;
   const mbMaxZoom = Number.isFinite(Number(vectorArchive.maxzoom)) ? Number(vectorArchive.maxzoom) : 22;
   const initialZoom = hidePosition ? 1.6 : Math.min(mbMaxZoom, Math.max(3.5, mbMinZoom));
-  map = new maplibregl.Map({ container, style: mapStyle, center: hidePosition ? [0,20] : [homeLon,homeLat], zoom: initialZoom, pitch:0, bearing:0, attributionControl:true, maxPitch:85 });
+  const baseInitialZoom = (hasLink || hasLinkZoom) ? glZoom : initialZoom;
+  map = new maplibregl.Map({
+    container, style: mapStyle, center: hidePosition ? [0,20] : glCenter,
+    zoom: baseInitialZoom, pitch:0, bearing:0, attributionControl:true, maxPitch:85,
+    canvasContextAttributes: { alpha: true, antialias: true },
+  });
   if (mbInfo.vector && !hidePosition) {
     const b = vectorArchive.bounds;
     if (Array.isArray(b) && b.length === 4 && b.every((v) => Number.isFinite(Number(v)))) {
@@ -827,6 +880,7 @@ export async function render(root) {
   });
   updateStats();
   map.on('load', () => {
+    if (spaceBackground) applySpaceBackground(map, lightTheme);
     try { if (typeof map.setProjection === 'function') map.setProjection({ type:'globe' }); } catch (e) { console.warn('Initial globe projection failed', e); }
     // The layout can settle after the style's first frame; resize/repaint so
     // vector geometry is not left unpainted (black map) until user movement.

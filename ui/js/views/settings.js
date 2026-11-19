@@ -514,6 +514,7 @@ export async function render(root) {
   const cacheRow = h("div", { class: "row gap-6 wrap" }, h("div", { class: "grow" }, mapCache), cacheScan, cacheCheck);
   const mapVector = checkbox("Render offline vector basemap", settings.map_vector !== false);
   const mapAutoPack = checkbox("Cache viewed map areas automatically while online", settings.map_auto_pack !== false);
+  const mapSpace = checkbox("Starfield space background in the 3D globe", settings.map_space_background !== false);
   const layersBox = h("div", { class: "col gap-4" }, h("div", { class: "tiny muted", text: "Loading layers…" }));
   const mapPanel = panel({
     title: "Offline maps",
@@ -528,6 +529,7 @@ export async function render(root) {
       cacheStatus,
       mapVector,
       mapAutoPack,
+      mapSpace,
       h("div", { class: "settings-subhead", text: "Layers" }),
       layersBox,
       h("div", { class: "settings-actions" },
@@ -889,6 +891,7 @@ export async function render(root) {
       tile_source: tileSource.value, mbtiles_path: mbtiles.value.trim(),
       map_vector: mapVector.querySelector("input").checked,
       map_auto_pack: mapAutoPack.querySelector("input").checked,
+      map_space_background: mapSpace.querySelector("input").checked,
       map_cache_path: nextCache,
     };
     if (nextCache !== oldCache) {

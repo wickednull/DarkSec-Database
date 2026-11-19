@@ -1787,3 +1787,61 @@ html[data-scheme="light"] .update-log { background: rgba(0, 0, 0, .035); }
 .update-log-line.error { color: var(--red); }
 .update-log-line.warn { color: var(--amber); }
 .update-log-line.success { color: var(--acc); }
+
+/* Starfield behind the transparent 3D globe canvas. Tiles/globe surface stay
+   opaque; stars are only visible where the Earth does not cover the viewport. */
+.map-shell.map-space { background: #01030a; }
+.map-starfield {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-color: #01030a;
+  background-image:
+    radial-gradient(circle at 12% 18%, rgba(255,255,255,.92) 0 .9px, transparent 1.4px),
+    radial-gradient(circle at 31% 64%, rgba(255,255,255,.7) 0 .8px, transparent 1.3px),
+    radial-gradient(circle at 54% 27%, rgba(190,215,255,.8) 0 1px, transparent 1.6px),
+    radial-gradient(circle at 73% 82%, rgba(255,255,255,.55) 0 .7px, transparent 1.2px),
+    radial-gradient(circle at 88% 39%, rgba(255,236,200,.8) 0 .9px, transparent 1.4px),
+    radial-gradient(circle at 9% 88%, rgba(255,255,255,.65) 0 .8px, transparent 1.3px),
+    radial-gradient(circle at 44% 9%, rgba(255,255,255,.75) 0 .8px, transparent 1.3px),
+    radial-gradient(circle at 66% 52%, rgba(190,215,255,.65) 0 .9px, transparent 1.4px),
+    radial-gradient(circle at 23% 43%, rgba(255,255,255,.5) 0 .7px, transparent 1.2px),
+    radial-gradient(circle at 96% 71%, rgba(255,255,255,.7) 0 .8px, transparent 1.3px),
+    radial-gradient(circle at 38% 92%, rgba(255,255,255,.45) 0 .7px, transparent 1.2px),
+    radial-gradient(circle at 82% 13%, rgba(255,255,255,.6) 0 .8px, transparent 1.3px),
+    radial-gradient(circle at 5% 56%, rgba(255,226,190,.55) 0 .9px, transparent 1.4px),
+    radial-gradient(circle at 59% 74%, rgba(255,255,255,.5) 0 .7px, transparent 1.2px),
+    radial-gradient(circle at 17% 6%, rgba(255,255,255,.55) 0 .7px, transparent 1.2px),
+    radial-gradient(circle at 92% 94%, rgba(190,215,255,.6) 0 .8px, transparent 1.3px),
+    radial-gradient(circle at 27% 78%, rgba(255,255,255,.4) 0 .6px, transparent 1.1px),
+    radial-gradient(circle at 76% 60%, rgba(255,255,255,.5) 0 .7px, transparent 1.2px),
+    radial-gradient(circle at 48% 41%, rgba(255,255,255,.4) 0 .6px, transparent 1.1px),
+    radial-gradient(circle at 63% 4%, rgba(255,255,255,.55) 0 .7px, transparent 1.2px),
+    radial-gradient(circle at 4% 32%, rgba(255,255,255,.45) 0 .6px, transparent 1.1px),
+    radial-gradient(circle at 86% 56%, rgba(255,255,255,.5) 0 .7px, transparent 1.2px),
+    radial-gradient(ellipse at 35% 55%, rgba(40,70,130,.16), transparent 48%),
+    radial-gradient(ellipse at 74% 38%, rgba(90,55,135,.10), transparent 45%);
+  background-size:
+    560px 380px, 560px 380px, 560px 380px, 560px 380px, 560px 380px, 560px 380px,
+    560px 380px, 560px 380px, 560px 380px, 560px 380px, 560px 380px, 560px 380px,
+    560px 380px, 560px 380px, 560px 380px, 560px 380px, 560px 380px, 560px 380px,
+    560px 380px, 560px 380px, 560px 380px, 560px 380px,
+    1050px 720px, 1050px 720px;
+  background-repeat: repeat;
+}
+.map-starfield::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(circle at 22% 33%, rgba(255,255,255,.95) 0 1.4px, transparent 2px),
+    radial-gradient(circle at 61% 67%, rgba(255,244,220,.9) 0 1.5px, transparent 2.1px),
+    radial-gradient(circle at 84% 22%, rgba(190,215,255,.95) 0 1.3px, transparent 1.9px),
+    radial-gradient(circle at 47% 84%, rgba(255,255,255,.7) 0 1.1px, transparent 1.7px),
+    radial-gradient(circle at 8% 73%, rgba(255,255,255,.75) 0 1.2px, transparent 1.8px),
+    radial-gradient(circle at 93% 58%, rgba(255,255,255,.8) 0 1.2px, transparent 1.8px),
+    radial-gradient(circle at 69% 9%, rgba(255,255,255,.7) 0 1px, transparent 1.6px);
+  background-size: 930px 640px;
+  background-repeat: repeat;
+}
