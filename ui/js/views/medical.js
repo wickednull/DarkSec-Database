@@ -3,7 +3,7 @@
 import { api } from "../api.js";
 import {
   h, panel, stat, badge, btn, pageHead, alertStrip, emptyState, loading, fmt, toast,
-  field, input, modal,
+  field, input, modal, tabs,
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { calculatorGrid } from "../calculators.js";
@@ -23,7 +23,7 @@ function triageTone(value) {
   return ({ RED: "red", YELLOW: "amber", GREEN: "green", BLACK: "muted" })[String(value || "").toUpperCase()] || "";
 }
 
-export async function render(root) {
+export async function render(root, params = {}) {
   root.replaceChildren(loading("LOADING MEDICAL REGISTRY"));
   let patients, summary, medLog;
   try {
@@ -50,11 +50,20 @@ export async function render(root) {
     ],
   }));
 
-  root.appendChild(alertStrip(
+  const warning = alertStrip(
     "Medical warning: this software does not diagnose, prescribe or replace a trained clinician. In a real emergency call local emergency services. "
     + "Drug doses, fluids and procedures must be verified against current protocols and your scope of practice. Record allergies and interventions accurately.",
     "",
-  ));
+  );
+  const tabsList = [
+    { id: "patients", label: "PATIENTS" },
+    { id: "triage", label: "TRIAGE" },
+    { id: "vitals", label: "VITALS" },
+    { id: "medications", label: "MEDICATIONS" },
+    { id: "tools", label: "TOOLS" },
+  ];
+  const tab = tabsList.some((t) => t.id === params.tab) ? params.tab : "patients";
+  root.appendChild(tabs(tabsList, tab, (id) => render(root, { ...params, tab: id })));
 
   const counts = summary.triage || {};
   const red = counts.RED || 0;
@@ -64,7 +73,7 @@ export async function render(root) {
   stats.appendChild(stat("Immediate", String(red).padStart(2, "0"), "RED triage", red ? "warn" : ""));
   stats.appendChild(stat("Unassessed", String(unassessed).padStart(2, "0"), "assign triage early", unassessed ? "warn" : ""));
   stats.appendChild(stat("Vitals entries", String((summary.recent_vitals || []).length).padStart(2, "0"), "most recent 10 shown"));
-  root.appendChild(stats);
+  if (tab === "patients") root.appendChild(stats);
 
   const triageWrap = h("div", { class: "triage-grid mt-14" });
   for (const cat of TRIAGE) {
@@ -73,15 +82,34 @@ export async function render(root) {
     card.appendChild(h("div", { class: "lbl", text: `${cat.label} // ${cat.id}` }));
     triageWrap.appendChild(card);
   }
-  root.appendChild(panel({
-    title: "Triage board",
-    sub: "Counts from the local patient registry",
-    icon: "medical",
-    body: triageWrap,
-  }));
+  if (tab === "triage") {
+    root.appendChild(panel({
+      title: "Triage board",
+      sub: "Counts from the local patient registry",
+      icon: "medical",
+      body: triageWrap,
+    }));
+    const triageGuide = {
+      RED: "Immediate — life-threatening; treat now.",
+      YELLOW: "Delayed — serious but stable; can wait briefly.",
+      GREEN: "Minor — walking wounded; self-care or delayed.",
+      BLACK: "Expectant — unsurvivable with available resources.",
+    };
+    root.appendChild(panel({
+      title: "Triage protocol",
+      sub: "Assign from the patient detail view; reassess frequently.",
+      icon: "warning",
+      cls: "mt-14",
+      body: h("div", { class: "col gap-6" }, ...TRIAGE.map((cat) => h("div", { class: "list-item" },
+        h("div", { class: "li-main" },
+          h("div", { class: "li-title", text: `${cat.label} // ${cat.id}` }),
+          h("div", { class: "li-sub", text: triageGuide[cat.id] || "" })),
+        badge(cat.id, triageTone(cat.id))))),
+    }));
+  }
 
   const grid = h("div", { class: "panel-grid grid-2 mt-14" });
-  root.appendChild(grid);
+  if (tab === "patients") root.appendChild(grid);
 
   /* ----------------------------------------------------------- patient list */
   const rosterBody = h("div", { class: "col" });
@@ -170,7 +198,7 @@ export async function render(root) {
 
     const vitalsWrap = h("div", { class: "col mt-10" });
     detailBody.appendChild(vitalsWrap);
-    loadVitals(selected.id, vitalsWrap);
+    if (tab === "patients") loadVitals(selected.id, vitalsWrap);
   }
 
   /* ---------------------------------------------------------- recent vitals */
@@ -197,7 +225,7 @@ export async function render(root) {
       { label: "NOTE", key: "note", render: (r) => r.note || "—" },
     ], { empty: "No vitals recorded", emptyIcon: "pulse" }),
   });
-  root.appendChild(recentPanel);
+  if (tab === "vitals") root.appendChild(recentPanel);
 
   /* -------------------------------------------------- medication administration */
   const meds = medLog.items || [];
@@ -224,20 +252,21 @@ export async function render(root) {
       }) },
     ], { empty: "No medication administrations recorded", emptyIcon: "medical" }),
   });
-  root.appendChild(medPanel);
+  if (tab === "medications") root.appendChild(medPanel);
 
   /* ----------------------------------------------------------- calculations */
-  const calc = panel({
-    title: "Clinical calculators",
-    sub: "Screening and dose references — verify against protocol",
-    icon: "flask",
-    cls: "mt-14",
-    body: await calculatorGrid("MEDICAL"),
-  });
-  root.appendChild(calc);
-
-  const refs = await referenceSection("MEDICAL");
-  if (refs) root.appendChild(panel({ title: "Medical field cards", icon: "book", cls: "mt-14", body: refs }));
+  if (tab === "tools") {
+    root.appendChild(warning);
+    root.appendChild(panel({
+      title: "Clinical calculators",
+      sub: "Screening and dose references — verify against protocol",
+      icon: "flask",
+      cls: "mt-14",
+      body: await calculatorGrid("MEDICAL"),
+    }));
+    const refs = await referenceSection("MEDICAL");
+    if (refs) root.appendChild(panel({ title: "Medical field cards", icon: "book", cls: "mt-14", body: refs }));
+  }
 
   return () => { clearTimeout(searchTimer); };
 }

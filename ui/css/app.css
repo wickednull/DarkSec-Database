@@ -689,14 +689,20 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 .progress.red > span { background: var(--red); }
 
 /* ------------------------------------------------------------------ tabs */
-.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 14px; overflow-x: auto; }
+.tabs {
+  position: sticky; top: 0; z-index: 6; display: flex; gap: 2px;
+  border-bottom: 1px solid var(--line); margin-bottom: 14px; overflow-x: auto;
+  scrollbar-width: none; background: linear-gradient(180deg, var(--bg) 78%, rgba(0,0,0,0));
+  backdrop-filter: blur(6px);
+}
+.tabs::-webkit-scrollbar { display: none; }
 .tabs button {
-  background: transparent; border: 1px solid transparent; border-bottom: 0; color: var(--muted);
-  padding: 7px 13px; font-family: var(--font-head); font-size: 11px; letter-spacing: .11em;
-  text-transform: uppercase; white-space: nowrap; position: relative; top: 1px;
+  background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--muted);
+  padding: 10px 15px; font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em;
+  text-transform: uppercase; white-space: nowrap; cursor: pointer;
 }
 .tabs button:hover { color: var(--text); background: rgba(var(--acc-rgb), .04); }
-.tabs button.active { color: var(--acc); border-color: var(--line-strong); background: rgba(var(--acc-rgb), .06); border-bottom-color: transparent; }
+.tabs button.active { color: var(--acc); border-bottom-color: var(--acc); background: linear-gradient(180deg, rgba(var(--acc-rgb), .09), transparent); }
 .tabs button .count { color: var(--muted-2); font-family: var(--font-mono); font-size: 9px; margin-left: 5px; }
 
 /* ------------------------------------------------------------------ dashboard bits */

@@ -2,7 +2,7 @@
 import { api } from "../api.js";
 import { store } from "../store.js";
 import {
-  h, panel, pageHead, btn, input, field, select, loading, toast, fmt, badge,
+  h, panel, pageHead, btn, input, field, select, loading, toast, fmt, badge, tabs,
 } from "../components.js";
 import { calculatorGrid } from "../calculators.js";
 import {
@@ -81,7 +81,9 @@ function timeOrDash(v) {
   return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
 }
 
-export async function render(root, params) {
+let lastTab = "compass";
+
+export async function render(root, params = {}) {
   root.replaceChildren(loading("COMPUTING NAVIGATION PICTURE"));
   const s = store.settings || {};
   const positionInfo = positionConfidence(s);
@@ -113,6 +115,17 @@ export async function render(root, params) {
       btn("GPS FIX", { icon: "satellite", tone: "primary", onClick: () => getGps() }),
     ],
   }));
+
+  const tabDefs = [
+    { id: "compass", label: "COMPASS" },
+    { id: "gps", label: "GPS & RESECTION" },
+    { id: "celestial", label: "CELESTIAL" },
+    { id: "tides", label: "TIDES" },
+    { id: "tools", label: "TOOLS" },
+  ];
+  const tab = tabDefs.some((t) => t.id === params.tab) ? params.tab : lastTab;
+  lastTab = tab;
+  root.appendChild(tabs(tabDefs, tab, (id) => { lastTab = id; render(root, { ...params, tab: id }); }));
 
   /* ------------------------------------------------------------ coordinate */
   const convertInput = input({ placeholder: "e.g. 39.8283, -98.5795", autocomplete: "off" });
@@ -362,19 +375,26 @@ export async function render(root, params) {
   });
 
   /* ---------------------------------------------------------------- layout */
-  const top = h("div", { class: "grid grid-2 mt-14" }, converter, compassPanel);
-  root.appendChild(top);
-  root.appendChild(h("div", { class: "grid grid-2 mt-14" }, gpsPanel, resectionPanel));
-  root.appendChild(h("div", { class: "mt-14" }, celestialPanel));
-  root.appendChild(h("div", { class: "grid grid-2 mt-14" }, tidePanel, panel({
-    title: "Navigation calculators", icon: "compass",
-    sub: "Pace count, dead reckoning, slope distance and terrain estimates.",
-    body: await calculatorGrid(["NAV"], { openFirst: true }),
-  })));
-
-  const navCards = await referenceSection("NAVIGATION");
-  if (navCards) {
-    root.appendChild(panel({ title: "Navigation field cards", icon: "book", body: navCards }));
+  if (tab === "compass") {
+    root.appendChild(h("div", { class: "grid grid-2 mt-14" }, converter, compassPanel));
+  } else if (tab === "gps") {
+    root.appendChild(h("div", { class: "grid grid-2 mt-14" }, gpsPanel, resectionPanel));
+  } else if (tab === "celestial") {
+    root.appendChild(h("div", { class: "mt-14" }, celestialPanel));
+  } else if (tab === "tides") {
+    root.appendChild(h("div", { class: "grid grid-2 mt-14" }, tidePanel, panel({
+      title: "Navigation calculators", icon: "compass",
+      sub: "Pace count, dead reckoning, slope distance and terrain estimates.",
+      body: await calculatorGrid(["NAV"], { openFirst: true }),
+    })));
+  } else {
+    root.appendChild(panel({
+      title: "Navigation calculators", icon: "compass",
+      sub: "Pace count, dead reckoning, slope distance and terrain estimates.",
+      body: await calculatorGrid(["NAV"], { openFirst: true }),
+    }));
+    const navCards = await referenceSection("NAVIGATION");
+    if (navCards) root.appendChild(panel({ title: "Navigation field cards", icon: "book", cls: "mt-14", body: navCards }));
   }
 
   return () => { disposed = true; };

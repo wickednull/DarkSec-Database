@@ -2,7 +2,7 @@
 import { api } from "../api.js";
 import { store } from "../store.js";
 import {
-  h, panel, stat, badge, btn, pageHead, alertStrip, emptyState, loading, fmt, toast,
+  h, panel, stat, badge, btn, pageHead, alertStrip, emptyState, loading, fmt, toast, tabs,
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { calculatorGrid } from "../calculators.js";
@@ -12,6 +12,7 @@ import * as U from "../units.js";
 const CBRN_AUTO_MS = 60_000;
 let cbrnTimer = null;
 let cbrnBusy = false;
+let lastTab = "status";
 
 function radTone(rate) {
   if (rate == null) return "";
@@ -129,7 +130,7 @@ function cbrnLivePanel(live) {
   return panel({ title: "CBRN common operating picture", sub: "Auto-fetched public feeds · cached offline", icon: "radiation", cls: "mt-14", body });
 }
 
-export async function render(root) {
+export async function render(root, params = {}) {
   if (cbrnTimer) { clearInterval(cbrnTimer); cbrnTimer = null; }
   root.replaceChildren(loading("LOADING RADIOLOGICAL LOG"));
   let logs, live = null;
@@ -160,11 +161,20 @@ export async function render(root) {
     ],
   }));
 
-  root.appendChild(alertStrip(
+  const warning = alertStrip(
     "CBRN warning: this is not a substitute for calibrated instruments, dosimetry, public-health orders or hazardous-materials training. "
     + "Do not enter a contaminated area to take a reading. Time, distance and shielding are the primary protections. KI is not a general radiation antidote.",
     "",
-  ));
+  );
+  const tabDefs = [
+    { id: "status", label: "STATUS" },
+    { id: "log", label: "RADIATION LOG" },
+    { id: "protect", label: "PROTECT" },
+    { id: "tools", label: "TOOLS" },
+  ];
+  const tab = tabDefs.some((t) => t.id === params.tab) ? params.tab : lastTab;
+  lastTab = tab;
+  root.appendChild(tabs(tabDefs, tab, (id) => { lastTab = id; render(root, { ...params, tab: id }); }));
 
   const stats = h("div", { class: "grid grid-4 mt-14" });
   stats.appendChild(stat("Latest dose rate", latest?.dose_rate_usv_h != null ? `${fmt.num(latest.dose_rate_usv_h, 2)} µSv/h` : "—",
@@ -172,12 +182,15 @@ export async function render(root) {
   stats.appendChild(stat("Cumulative", cum != null ? usv(cum) : "—", "as recorded; not dosimetry-grade"));
   stats.appendChild(stat("24 h peak", day.length ? `${fmt.num(max24, 2)} µSv/h` : "—", `${day.length} reading(s) in 24 h`, max24 > 10 ? "warn" : ""));
   stats.appendChild(stat("Readings", String(items.length).padStart(2, "0"), "local rad log"));
-  root.appendChild(stats);
-
-  if (live) root.appendChild(cbrnLivePanel(live));
+  if (tab === "status") {
+    root.appendChild(stats);
+    if (live) root.appendChild(cbrnLivePanel(live));
+  }
 
   const grid = h("div", { class: "panel-grid grid-2 mt-14" });
-  root.appendChild(grid);
+  const protectGrid = h("div", { class: "panel-grid grid-2 mt-14" });
+  if (tab === "status") root.appendChild(grid);
+  if (tab === "protect") root.appendChild(protectGrid);
 
   /* --------------------------------------------------------------- current */
   const current = h("div", { class: "col" });
@@ -217,7 +230,7 @@ export async function render(root) {
   grid.appendChild(panel({ title: "Dose-rate trend", sub: `${items.length} readings`, icon: "activity", body: chartWrap }));
 
   /* ------------------------------------------------------------- read log */
-  root.appendChild(panel({
+  if (tab === "log") root.appendChild(panel({
     title: "Radiation log",
     sub: "Instrument readings and cumulative dose",
     icon: "note",
@@ -230,8 +243,8 @@ export async function render(root) {
       { label: "LOCATION", key: "location" },
       { label: "NOTE", key: "note", render: (r) => r.note || "—" },
       { label: "", key: "actions", render: (r) => rowActions({
-        onEdit: () => openRecordForm({ table: "rad_log", item: r, onSaved: () => render(root) }),
-        onDelete: () => deleteRecord("rad_log", r.id, "radiation reading", () => render(root)),
+        onEdit: () => openRecordForm({ table: "rad_log", item: r, onSaved: () => render(root, { tab: lastTab }) }),
+        onDelete: () => deleteRecord("rad_log", r.id, "radiation reading", () => render(root, { tab: lastTab })),
       }) },
     ], { empty: "No radiation readings recorded", emptyIcon: "radiation" }),
   }));
@@ -251,7 +264,7 @@ export async function render(root) {
     row.appendChild(h("div", { class: "small muted mt-6", text: body }));
     guide.appendChild(row);
   }
-  grid.appendChild(panel({ title: "Protect / monitor", sub: "Time, distance, shielding", icon: "shield", body: guide }));
+  protectGrid.appendChild(panel({ title: "Protect / monitor", sub: "Time, distance, shielding", icon: "shield", body: guide }));
 
   const ki = h("div", { class: "col" });
   ki.appendChild(h("div", { class: "callout danger",
@@ -262,9 +275,9 @@ export async function render(root) {
     ["Children/pregnancy", "Higher risk from thyroid exposure; follow specific official dosing."],
     ["Reference calc", "The CBRN calculator gives age-based reference doses; verify against current national guidance."],
   ]));
-  grid.appendChild(panel({ title: "Potassium iodide", sub: "Thyroid blocking — restricted indication", icon: "flask", body: ki }));
+  protectGrid.appendChild(panel({ title: "Potassium iodide", sub: "Thyroid blocking — restricted indication", icon: "flask", body: ki }));
 
-  root.appendChild(panel({
+  if (tab === "tools") root.appendChild(panel({
     title: "CBRN calculators",
     sub: "Fallout, shielding, decay and unit conversion",
     icon: "flask",
@@ -272,8 +285,11 @@ export async function render(root) {
     body: await calculatorGrid("CBRN"),
   }));
 
-  const refs = await referenceSection("CBRN");
-  if (refs) root.appendChild(panel({ title: "CBRN field cards", icon: "book", cls: "mt-14", body: refs }));
+  if (tab === "tools") {
+    root.appendChild(warning);
+    const refs = await referenceSection("CBRN");
+    if (refs) root.appendChild(panel({ title: "CBRN field cards", icon: "book", cls: "mt-14", body: refs }));
+  }
 
   cbrnTimer = setInterval(async () => {
     if (cbrnBusy || document.hidden) return;
@@ -283,7 +299,7 @@ export async function render(root) {
     cbrnBusy = true;
     const y = window.scrollY;
     try {
-      await render(root);
+      await render(root, { tab: lastTab });
       window.scrollTo(0, y);
     } catch {}
     finally { cbrnBusy = false; }
@@ -344,6 +360,6 @@ function addReading(root) {
     title: "Log radiation reading",
     intro: h("div", { class: "callout danger small",
       text: "Enter exactly what the instrument displays. Note the model/calibration if known. Do not extrapolate a reading to a different location or time without a documented method." }),
-    onSaved: () => render(root),
+    onSaved: () => render(root, { tab: lastTab }),
   });
 }

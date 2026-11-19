@@ -2,7 +2,7 @@ import { api } from "../api.js";
 import { store } from "../store.js";
 import {
   h, panel, stat, badge, btn, pageHead, alertStrip, emptyState, loading, fmt, toast,
-  modal, field, input, textarea, select, sparkline,
+  modal, field, input, textarea, select, sparkline, tabs,
 } from "../components.js";
 import { openRecordForm, deleteRecord, recordTable, rowActions } from "../records.js";
 import { calculatorGrid } from "../calculators.js";
@@ -14,10 +14,11 @@ let weatherTimer = null;
 let weatherBusy = false;
 let weatherAutoAttempted = false;
 let rerender = () => {};
+let lastTab = "now";
 
 const PINNED_WEATHER_FEEDS = ["open_meteo_weather", "open_meteo_air"];
 
-export async function render(root) {
+export async function render(root, params = {}) {
   if (weatherTimer) { clearInterval(weatherTimer); weatherTimer = null; }
   root.replaceChildren(loading("READING ENVIRONMENT"));
   let feedsOut, dash, logs, almanac;
@@ -74,12 +75,23 @@ export async function render(root) {
     ],
   }));
 
-  root.appendChild(alertStrip("Open-Meteo provides model forecasts for the configured position, not local sensor readings. Weather feeds require network and may be stale or incomplete. A barometer, thermometer and your own eyes are primary instruments.", ""));
+  const tabDefs = [
+    { id: "now", label: "NOW" },
+    { id: "forecast", label: "FORECAST" },
+    { id: "observations", label: "OBSERVATIONS" },
+    { id: "feeds", label: "FEEDS" },
+    { id: "tools", label: "TOOLS" },
+  ];
+  const tab = tabDefs.some((t) => t.id === params.tab) ? params.tab : lastTab;
+  lastTab = tab;
+  rerender = () => render(root, { tab: lastTab });
+  root.appendChild(tabs(tabDefs, tab, (id) => { lastTab = id; render(root, { tab: id }); }));
 
-  if (["unverified", "manual", "geocoded"].includes(String(store.settings?.position_source || "unverified").toLowerCase()) && (wx || aq)) {
+  const modelNote = alertStrip("Open-Meteo provides model forecasts for the configured position, not local sensor readings. Weather feeds require network and may be stale or incomplete. A barometer, thermometer and your own eyes are primary instruments.", "");
+  if (tab === "now" && ["unverified", "manual", "geocoded"].includes(String(store.settings?.position_source || "unverified").toLowerCase()) && (wx || aq)) {
     root.appendChild(alertStrip(`Conditions use the configured position (${positionInfo.mapLabel}). ${positionInfo.text}`, "amber"));
   }
-  if ((wx && ["NEVER", "ERROR", "STALE"].includes(wx.status)) || (aq && ["NEVER", "ERROR", "STALE"].includes(aq.status))) {
+  if (tab === "now" && ((wx && ["NEVER", "ERROR", "STALE"].includes(wx.status)) || (aq && ["NEVER", "ERROR", "STALE"].includes(aq.status)))) {
     root.appendChild(alertStrip("Current conditions or air quality are not freshly cached. Use REFRESH CONDITIONS while online; if position is missing/invalid, set latitude/longitude in settings.", "amber"));
   }
 
@@ -88,12 +100,14 @@ export async function render(root) {
   stats.appendChild(stat("Temperature", wxItem?.temperature_c != null ? U.tempC(wxItem.temperature_c) : (latest?.temp_c != null ? U.tempC(latest.temp_c) : "—"), wxItem?.temperature_c != null ? "Open-Meteo model" : (latest ? `local obs ${fmt.ago(latest.ts)}` : "no data")));
   stats.appendChild(stat("Air Quality", aqItem?.aqi != null ? `AQI ${aqItem.aqi}` : "—", aqItem ? `${aqItem.category || "unknown"} · ${fmt.ago(aq?.fetched_at)}` : "no AQ snapshot", ["UNHEALTHY", "VERY UNHEALTHY", "HAZARDOUS", "CRITICAL", "SEVERE"].some((s) => String(aqItem?.category || aqItem?.severity || "").toUpperCase().includes(s)) ? "acc" : ""));
   stats.appendChild(stat("Wind", wxItem?.wind_kmh != null ? U.speedKmh(wxItem.wind_kmh) : "—", wxItem?.gust_kmh != null ? `gust ${U.speedKmh(wxItem.gust_kmh)}` : "no model wind", wxItem?.gust_kmh != null && Number(wxItem.gust_kmh) >= 50 ? "acc" : ""));
-  root.appendChild(stats);
+  if (tab === "now") root.appendChild(stats);
 
-  const grid = h("div", { class: "panel-grid grid-2 mt-14" });
-  root.appendChild(grid);
+  const nowGrid = h("div", { class: "panel-grid grid-2 mt-14" });
+  const forecastGrid = h("div", { class: "panel-grid grid-2 mt-14" });
+  if (tab === "now") root.appendChild(nowGrid);
+  if (tab === "forecast") root.appendChild(forecastGrid);
 
-  grid.appendChild(panel({
+  nowGrid.appendChild(panel({
     title: "Current Conditions (Open-Meteo)",
     sub: `Model forecast for operator position · ${wx?.status || "NEVER"} · fetched ${fmt.ago(wx?.fetched_at)}`,
     icon: "cloud",
@@ -102,35 +116,35 @@ export async function render(root) {
     body: buildConditions(wx, wxItem, aq, aqItem, positionInfo),
   }));
 
-  grid.appendChild(panel({
+  forecastGrid.appendChild(panel({
     title: "3-Day Forecast (Open-Meteo)",
     sub: "Daily model outlook · not an observation",
     icon: "cloud",
     body: buildForecast(wxItem),
   }));
 
-  grid.appendChild(panel({
+  forecastGrid.appendChild(panel({
     title: "Air Quality Trend",
     sub: "Hourly US AQI model · next 72 h",
     icon: "activity",
     body: buildAqiTrend(aqItem),
   }));
 
-  grid.appendChild(panel({
+  nowGrid.appendChild(panel({
     title: "Local Instrument Observations",
     sub: "From your latest weather log entry",
     icon: "weather",
     body: buildLocalObs(latest),
   }));
 
-  grid.appendChild(panel({
+  forecastGrid.appendChild(panel({
     title: "Pressure & Temperature Trend",
     sub: "Last 40 local observations",
     icon: "activity",
     body: buildTrend(logs.items || []),
   }));
 
-  grid.appendChild(panel({
+  nowGrid.appendChild(panel({
     title: "Almanac",
     sub: "Local rise / set",
     icon: "moon",
@@ -143,7 +157,7 @@ export async function render(root) {
   feedWrap.appendChild(h("div", { class: "side-label", text: "WEATHER FEEDS" }));
   if (!pinned.length) feedWrap.appendChild(h("div", { class: "small muted", text: "No weather feeds cached." }));
   for (const feed of pinned) feedWrap.appendChild(feedCard(feed, () => refreshFeed(feed)));
-  grid.appendChild(panel({
+  if (tab === "feeds") root.appendChild(panel({
     title: "Weather Feeds",
     sub: "Local conditions and air quality only; official alerts live in Global Threat & Live Intel",
     icon: "cloud",
@@ -152,7 +166,7 @@ export async function render(root) {
     body: feedWrap,
   }));
 
-  root.appendChild(panel({
+  if (tab === "observations") root.appendChild(panel({
     title: "Observation Log",
     sub: `${logs.count || 0} records`,
     icon: "note",
@@ -173,16 +187,18 @@ export async function render(root) {
     ], { empty: "No observations logged" }),
   }));
 
-  root.appendChild(panel({
-    title: "Meteorological Calculators",
-    sub: "Estimates and standard formulas",
-    icon: "flask",
-    cls: "mt-14",
-    body: await calculatorGrid("WEATHER"),
-  }));
-
-  const cards = await referenceSection("WEATHER");
-  if (cards) root.appendChild(panel({ title: "Weather Field Card", icon: "book", cls: "mt-14", body: cards }));
+  if (tab === "tools") {
+    root.appendChild(modelNote);
+    root.appendChild(panel({
+      title: "Meteorological Calculators",
+      sub: "Estimates and standard formulas",
+      icon: "flask",
+      cls: "mt-14",
+      body: await calculatorGrid("WEATHER"),
+    }));
+    const cards = await referenceSection("WEATHER");
+    if (cards) root.appendChild(panel({ title: "Weather Field Card", icon: "book", cls: "mt-14", body: cards }));
+  }
 
   async function refreshWeatherFeeds(showToast) {
     if (showToast) toast("Refreshing Open-Meteo conditions and air quality", "warn");
