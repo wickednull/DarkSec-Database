@@ -361,6 +361,8 @@ body.no-scan .fx-scan { display: none; }
 .defcon-pill.warn #defconValue { color: var(--amber); }
 .defcon-pill.bad { border-color: rgba(var(--red-rgb), .55); }
 .defcon-pill.bad #defconValue { color: var(--red); }
+.defcon-pill.stale { border-style: dashed; opacity: .72; }
+.defcon-pill.stale #defconCode { color: var(--amber); }
 .net-pill #netText { color: var(--muted); }
 .net-pill.online #netText { color: var(--acc); }
 .vault-pill.unlocked { border-color: rgba(var(--amber-rgb), .5); }

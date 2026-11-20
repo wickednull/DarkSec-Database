@@ -374,6 +374,7 @@ def test_defcon_parser_extracts_current_level():
     <p class="hero-lead"><strong>DEFCON 3 (ROUND HOUSE):</strong> heightened
       readiness. Test situation summary. <a href="#">Read more &rarr;</a></p>
     <p class="hero-driver"><strong>Primary driver:</strong> <a href="#">Test driver</a></p>
+    <dt>Estimate last changed</dt><dd>Jan 2, 2026</dd>
     <p class="section-sub"><strong>2 of 2 commands currently raised.</strong></p>
     <a href="/commands/centcom" class="command-card">
       <img alt="CENTCOM - DEFCON 2">
@@ -386,6 +387,7 @@ def test_defcon_parser_extracts_current_level():
     assert data["readiness"] == "heightened readiness"
     assert data["summary"] == "Test situation summary."
     assert data["driver"] == "Test driver"
+    assert data["changed"] == "Jan 2, 2026"
     assert data["commands_raised"] == 2 and data["commands_total"] == 2
     assert data["commands"] == [{
         "slug": "centcom", "name": "CENTCOM",
@@ -1347,3 +1349,43 @@ def test_pwa_manifest_icons_and_service_worker_are_served(client):
     assert worker.status_code == 200
     assert worker.headers.get("service-worker-allowed") == "/"
     assert "skipWaiting" in worker.text
+
+
+def test_defcon_failure_marks_cached_value_stale_and_backs_off(monkeypatch):
+    import time
+    from darksec import defcon
+
+    saved = dict(defcon._cache)
+    cached = {
+        "source": "defconlevel.com", "url": defcon.URL, "level": 3,
+        "codename": "ROUND HOUSE", "readiness": "heightened readiness",
+        "summary": "cached summary", "driver": "cached driver",
+        "updated": "2026-11-20T20:47:28+00:00", "commands": [],
+        "commands_raised": 14, "commands_total": 14, "note": defcon.NOTE,
+        "fetched_at": "2026-11-20T20:48:00+00:00", "error": None, "stale": False,
+    }
+    calls = {"n": 0}
+
+    def offline(*_a, **_k):
+        calls["n"] += 1
+        raise OSError("network down")
+
+    try:
+        defcon._cache.update({"ts": time.time() - 400, "attempt": 0.0,
+                              "data": cached, "failure": None})
+        monkeypatch.setattr(defcon.requests, "get", offline)
+
+        out = defcon.fetch(force=True)
+        assert out["level"] == 3
+        assert out["stale"] is True
+        assert "network down" in out["error"]
+        assert out["cache_age_s"] >= 400
+        assert calls["n"] == 1
+
+        # The 30 s status poll must not hammer the site while it fails.
+        again = defcon.fetch()
+        assert calls["n"] == 1
+        assert again["stale"] is True and "network down" in again["error"]
+    finally:
+        defcon._cache.clear()
+        defcon._cache.update(saved)

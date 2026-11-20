@@ -19,10 +19,13 @@ URL = "https://www.defconlevel.com/current-level"
 UA = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.defconlevel.com/",
 }
 CACHE_TTL = 300
+RETRY_TTL = 60
 TIMEOUT = 8
-_cache: dict[str, Any] = {"ts": 0.0, "data": None}
+_cache: dict[str, Any] = {"ts": 0.0, "attempt": 0.0, "data": None, "failure": None}
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _LEAD_PREFIX_RE = re.compile(r"^DEFCON\s*\d+\s*\([^)]*\)\s*:?\s*", re.I)
@@ -77,6 +80,11 @@ def _parse(page: str) -> dict[str, Any]:
     driver_raw = _first(r'<p class="hero-driver">(.*?)</p>', page)
     driver = _DRIVER_PREFIX_RE.sub("", _text(driver_raw)) if driver_raw else ""
 
+    # The site's own "Estimate last changed" date answers "has the level moved?"
+    # independently of the page's rolling update timestamp.
+    changed = _first(r"<dt>\s*Estimate last changed\s*</dt>\s*<dd>\s*([^<]+?)\s*</dd>", page)
+    changed = " ".join(html_lib.unescape(changed).split()) if changed else ""
+
     raised = total = None
     m = re.search(r"(\d+)\s+of\s+(\d+)\s+commands currently raised", page, re.I)
     if m:
@@ -114,6 +122,7 @@ def _parse(page: str) -> dict[str, Any]:
         "summary": summary,
         "driver": driver,
         "updated": updated,
+        "changed": changed,
         "commands": commands,
         "commands_raised": raised,
         "commands_total": total,
@@ -121,38 +130,60 @@ def _parse(page: str) -> dict[str, Any]:
     }
 
 
+def _failure(exc: Exception) -> dict[str, Any]:
+    cached = _cache.get("data")
+    data = dict(cached) if cached else {
+        "source": "defconlevel.com",
+        "url": URL,
+        "level": None,
+        "codename": "",
+        "readiness": "",
+        "summary": "",
+        "driver": "",
+        "updated": None,
+        "changed": "",
+        "commands": [],
+        "commands_raised": None,
+        "commands_total": None,
+        "note": NOTE,
+        "fetched_at": None,
+    }
+    data["error"] = str(exc)[:200]
+    data["stale"] = bool(cached)
+    data["cache_age_s"] = int(max(0, time.time() - _cache["ts"])) if cached else None
+    return data
+
+
 def fetch(force: bool = False) -> dict[str, Any]:
+    """Return the current estimate, marking cached data clearly when stale.
+
+    A 5-minute success cache keeps the status poll light. Failures back off for
+    ``RETRY_TTL`` seconds so an unreachable site is not retried on every 30 s
+    status refresh; a manual refresh (``force=True``) always tries now.
+    """
     now = time.time()
-    if not force and _cache["data"] is not None and now - _cache["ts"] < CACHE_TTL:
-        return _cache["data"]
+    if not force:
+        if _cache["data"] is not None and now - _cache["ts"] < CACHE_TTL:
+            return _cache["data"]
+        failure = _cache.get("failure")
+        if failure and now - _cache.get("attempt", 0.0) < RETRY_TTL:
+            return dict(failure)
     try:
         resp = requests.get(URL, headers=UA, timeout=TIMEOUT)
         resp.raise_for_status()
-        data = _parse(resp.text)
+        page = resp.text
+        if resp.headers.get("cf-mitigated") or "<title>Just a moment..." in page:
+            raise ValueError("defconlevel.com returned a bot challenge; try again later")
+        data = _parse(page)
         if data["level"] is None:
             raise ValueError("DEFCON level not found in page")
         data["fetched_at"] = datetime.now(timezone.utc).isoformat()
         data["error"] = None
         data["stale"] = False
-        _cache.update(ts=now, data=data)
+        data["cache_age_s"] = 0
+        _cache.update(ts=now, attempt=now, data=data, failure=None)
         return data
     except Exception as exc:
-        cached = _cache["data"]
-        data = dict(cached) if cached else {
-            "source": "defconlevel.com",
-            "url": URL,
-            "level": None,
-            "codename": "",
-            "readiness": "",
-            "summary": "",
-            "driver": "",
-            "updated": None,
-            "commands": [],
-            "commands_raised": None,
-            "commands_total": None,
-            "note": NOTE,
-            "fetched_at": None,
-        }
-        data["error"] = str(exc)[:200]
-        data["stale"] = bool(cached)
-        return data
+        failure = _failure(exc)
+        _cache.update(attempt=now, failure=failure)
+        return failure

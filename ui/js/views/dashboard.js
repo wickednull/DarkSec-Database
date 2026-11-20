@@ -92,8 +92,9 @@ export async function render(root, params) {
       ? (sync.enabled === false ? "ONLINE · AUTO-SYNC OFF" : "LIVE · AUTO-SYNC ON")
       : "OFFLINE · CACHED DATA";
   const dc = (dash.readiness || {}).defcon || {};
+  const dcStale = !!dc.stale || !!dc.error;
   const dcBadge = dc.level != null
-    ? badge(`DEFCON ${dc.level}${dc.codename ? ` · ${dc.codename}` : ""}`,
+    ? badge(`DEFCON ${dc.level}${dc.codename ? ` · ${dc.codename}` : ""}${dcStale ? " · STALE" : ""}`,
         dc.level <= 2 ? "red" : dc.level === 3 ? "amber" : "green")
     : null;
   if (tab === "overview") root.appendChild(h("div", { class: "row gap-8 wrap mt-10" },

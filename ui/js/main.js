@@ -410,17 +410,28 @@ function updateStatusUI(status) {
   if (ready) ready.textContent = `READINESS ${readiness.score ?? "—"} // ${readiness.band || "NO DATA"}`;
 
   const defcon = readiness.defcon || {};
+  const defconStale = !!defcon.stale || !!defcon.error;
   const defconPill = document.getElementById("defconPill");
   const defconValue = document.getElementById("defconValue");
   const defconCode = document.getElementById("defconCode");
   if (defconValue) defconValue.textContent = defcon.level != null ? String(defcon.level) : "—";
-  if (defconCode) defconCode.textContent = defcon.level != null && defcon.codename ? ` · ${defcon.codename}` : "";
+  if (defconCode) {
+    defconCode.textContent = defcon.level != null && defcon.codename
+      ? ` · ${defcon.codename}${defconStale ? " · STALE" : ""}`
+      : (defconStale && defcon.level != null ? " · STALE" : "");
+  }
   if (defconPill) {
     const tone = defcon.level == null ? "" : defcon.level <= 2 ? "bad" : defcon.level === 3 ? "warn" : "ok";
-    defconPill.className = `top-pill defcon-pill ${tone}`.trim();
+    defconPill.className = `top-pill defcon-pill ${tone}${defconStale ? " stale" : ""}`.trim();
+    const updated = defcon.updated ? ` Data updated ${new Date(defcon.updated).toLocaleString()}.` : "";
+    const changed = defcon.changed ? ` Estimate last changed ${defcon.changed}.` : "";
+    const checked = defcon.fetched_at ? ` Last checked ${fmt.ago(defcon.fetched_at)}.` : "";
+    const problem = defconStale
+      ? ` STALE — showing the last value this console received${defcon.error ? ` (${defcon.error})` : ""}.`
+      : "";
     defconPill.title = defcon.level != null
-      ? `DEFCON ${defcon.level}${defcon.codename ? ` (${defcon.codename})` : ""} — ${defcon.readiness || "OSINT estimate"}${defcon.driver ? ` · ${defcon.driver}` : ""}. Source: defconlevel.com`
-      : "DEFCON estimate unavailable";
+      ? `DEFCON ${defcon.level}${defcon.codename ? ` (${defcon.codename})` : ""} — ${defcon.readiness || "OSINT estimate"}${defcon.driver ? ` · ${defcon.driver}` : ""}.${changed}${updated}${checked}${problem} Source: defconlevel.com`
+      : `DEFCON estimate unavailable.${problem || ""} Source: defconlevel.com`;
   }
 
   const vault = status.vault || {};

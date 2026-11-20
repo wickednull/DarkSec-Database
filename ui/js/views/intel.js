@@ -120,12 +120,21 @@ export async function render(root, params = {}) {
     const lvl = Number.isFinite(defcon.level) ? defcon.level : null;
     const tone = lvl == null ? "muted" : lvl <= 2 ? "red" : lvl === 3 ? "amber" : "green";
     const label = lvl != null ? `DEFCON ${lvl}${defcon.codename ? ` (${defcon.codename})` : ""}` : "DEFCON ?";
+    const stale = !!defcon.stale || !!defcon.error;
     const body = h("div", { class: "col gap-6" });
     body.appendChild(h("div", { class: "row gap-8 wrap items-center" },
       badge(label, tone),
+      badge(stale ? "STALE" : "LIVE", stale ? "amber" : "green"),
       defcon.readiness ? h("span", { class: "small", text: defcon.readiness }) : null,
-      defcon.updated ? h("span", { class: "tiny muted", text: `Updated ${fmt.date(defcon.updated)}` }) : null,
-      defcon.error ? h("span", { class: "tiny muted", text: `(${defcon.error})` }) : null));
+      defcon.changed ? h("span", { class: "tiny muted", text: `Estimate last changed ${defcon.changed}` }) : null,
+      defcon.updated ? h("span", { class: "tiny muted", text: `· data updated ${fmt.date(defcon.updated)}` }) : null,
+      defcon.fetched_at ? h("span", { class: "tiny muted", text: `· checked ${fmt.ago(defcon.fetched_at)}` }) : null));
+    if (defcon.error) {
+      body.appendChild(h("div", { class: "callout small amber" },
+        `Upstream fetch failed: ${defcon.error}. ` +
+        (defcon.stale ? "Showing the last value this console received; use REFRESH to retry."
+                      : "No value has been received yet; use REFRESH when the network is back.")));
+    }
     if (defcon.driver) {
       body.appendChild(h("div", { class: "small" },
         h("b", { text: "Primary driver: " }),
