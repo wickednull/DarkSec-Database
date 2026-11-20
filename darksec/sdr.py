@@ -50,7 +50,8 @@ _DETECT = {"at": 0.0, "data": None}
 _DETECT_TTL = 20.0
 HF_TUNER_MAX_HZ = 24_000_000
 _RTL_TCP_SERVER: dict = {"proc": None, "port": None, "bind": None, "started": None}
-_ADSB: dict = {"proc": None, "binary": None, "port": None, "started": None, "log": None}
+_ADSB: dict = {"proc": None, "binary": None, "port": None, "started": None,
+               "log": None, "warning": "", "dir": None, "last_error": ""}
 _ADSB_FEED_CACHE: dict = {"at": 0.0, "port": None, "data": None}
 
 
@@ -1271,9 +1272,9 @@ def _adsb_binary() -> str | None:
 def _adsb_settings() -> dict:
     s = _settings()
     try:
-        port = int(s.get("adsb_port") or 8080)
+        port = int(s.get("adsb_port") or 8081)
     except (TypeError, ValueError):
-        port = 8080
+        port = 8081
     try:
         gain = int(float(s.get("adsb_gain") or 40))
     except (TypeError, ValueError):
@@ -1291,10 +1292,24 @@ def _adsb_url(port: int | None = None) -> str:
     return f"http://{cfg['host']}:{int(port or cfg['port'])}/data/aircraft.json"
 
 
+def _adsb_json_dir() -> Path:
+    return Path(config.DATA_DIR) / "adsb"
+
+
 def _adsb_feed(port: int | None = None) -> dict | None:
     import requests
     cfg = _adsb_settings()
     target = int(port or cfg["port"])
+    managed_dir = _ADSB.get("dir")
+    if managed_dir:
+        path = Path(managed_dir) / "aircraft.json"
+        try:
+            if path.exists() and time.time() - path.stat().st_mtime <= 15:
+                data = json.loads(path.read_text(errors="replace"))
+                if isinstance(data, dict) and isinstance(data.get("aircraft"), list):
+                    return data
+        except Exception:
+            pass
     now = time.monotonic()
     if (_ADSB_FEED_CACHE["port"] == target and now - _ADSB_FEED_CACHE["at"] < 1.5):
         return _ADSB_FEED_CACHE["data"]
@@ -1315,6 +1330,15 @@ def adsb_status() -> dict:
     port = int(_ADSB.get("port") or cfg["port"])
     data = _adsb_feed(port)
     external = bool(data is not None and not ours)
+    exited = ""
+    if proc is not None and proc.poll() is not None:
+        tail = ""
+        try:
+            tail = " | ".join((_ADSB.get("log") and Path(_ADSB["log"]).read_text(errors="replace").splitlines()[-3:]) or [])
+        except Exception:
+            pass
+        exited = (f"dump1090 exited with code {proc.returncode}."
+                  + (f" {tail[:400]}" if tail else " Check the ADS-B log."))
     return {
         "available": data is not None,
         "running": bool(ours or external),
@@ -1327,10 +1351,15 @@ def adsb_status() -> dict:
         "device": cfg["device"],
         "started": _ADSB.get("started"),
         "log": str(_ADSB.get("log") or ""),
+        "warning": _ADSB.get("warning") or "",
+        "json_dir": str(_ADSB.get("dir") or ""),
+        "feed": (str(Path(_ADSB.get("dir")) / "aircraft.json") if ours and _ADSB.get("dir")
+                 else _adsb_url(port)),
         "aircraft_count": len((data or {}).get("aircraft") or []),
-        "note": ("A feed is already running outside DarkSec; showing it." if external
-                 else "Start dump1090 to receive ADS-B from an RTL-SDR." if not ours
-                 else "dump1090 is running under DarkSec."),
+        "note": (exited or _ADSB.get("last_error") or _ADSB.get("warning")
+                 or ("A feed is already running outside DarkSec; showing it." if external
+                     else "Start dump1090 to receive ADS-B from an RTL-SDR." if not ours
+                     else "dump1090 is running under DarkSec; reading its local JSON output.")),
     }
 
 
@@ -1344,23 +1373,30 @@ def start_adsb(port: int | None = None, gain: int | None = None,
         return adsb_status()
     binary = _adsb_binary()
     if not binary:
-        raise ValueError("dump1090/readsb is not installed. Install dump1090-mutability, dump1090-fa or readsb.")
+        message = ("dump1090/readsb is not installed. Install dump1090-mutability, "
+                   "dump1090-fa or readsb.")
+        _ADSB.update({"last_error": message})
+        raise ValueError(message)
     stop_adsb()
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.settimeout(0.4)
-        if probe.connect_ex(("127.0.0.1", port)) == 0:
-            raise ValueError(f"Port {port} is already in use; another feed or service is running.")
+    json_dir = _adsb_json_dir()
+    try:
+        json_dir.mkdir(parents=True, exist_ok=True)
+        (json_dir / "aircraft.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+    if not os.access(json_dir, os.W_OK):
+        raise ValueError(f"ADS-B data directory is not writable: {json_dir}")
     base = Path(binary).name.lower()
     if "readsb" in base:
         cmd = [binary, "--device-type", "rtlsdr", "--device", str(device),
-               "--gain", str(gain), "--net", "--net-http-port", str(port), "--quiet"]
+               "--gain", str(gain), "--write-json", str(json_dir), "--quiet"]
     else:
         cmd = [binary, "--device-index", str(device), "--gain", str(gain),
-               "--net", "--net-http-port", str(port), "--quiet"]
+               "--write-json", str(json_dir), "--quiet"]
     log_path = Path(config.LOG_DIR) / "dump1090.log"
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log = open(log_path, "ab")
+        log = open(log_path, "wb")
     except OSError:
         log = subprocess.DEVNULL
     try:
@@ -1378,9 +1414,14 @@ def start_adsb(port: int | None = None, gain: int | None = None,
             tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-8:])
         except OSError:
             pass
-        raise ValueError(f"dump1090 exited with code {proc.returncode}. {tail[:500]}")
+        message = f"dump1090 exited with code {proc.returncode}. {tail[:500]}".strip()
+        _ADSB.update({"proc": None, "binary": binary, "port": port, "started": None,
+                      "log": str(log_path), "warning": "", "dir": None,
+                      "last_error": message})
+        raise ValueError(message)
     _ADSB.update({"proc": proc, "binary": binary, "port": port,
-                  "started": utcnow(), "log": str(log_path)})
+                  "started": utcnow(), "log": str(log_path), "warning": "",
+                  "dir": str(json_dir), "last_error": ""})
     return adsb_status()
 
 
@@ -1395,7 +1436,8 @@ def stop_adsb() -> dict:
                 proc.kill()
             except Exception:
                 pass
-    _ADSB.update({"proc": None, "binary": None, "port": None, "started": None, "log": None})
+    _ADSB.update({"proc": None, "binary": None, "port": None, "started": None,
+                  "log": None, "warning": "", "dir": None, "last_error": ""})
     return adsb_status()
 
 

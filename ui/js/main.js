@@ -13,7 +13,7 @@ import * as library from "./views/library.js?v=better-1";
 import * as manual from "./views/manual.js";
 import * as navView from "./views/nav.js?v=opsec-1";
 import * as comms from "./views/comms.js?v=comms-1";
-import * as sdr from "./views/sdr.js?v=sdr-5";
+import * as sdr from "./views/sdr.js?v=sdr-8";
 import * as medical from "./views/medical.js";
 import * as supply from "./views/supply.js?v=better-5";
 import * as cbrn from "./views/cbrn.js?v=opsec-1";

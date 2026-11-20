@@ -94,7 +94,7 @@ If the receiver reports an error instead of audio, open **Diagnose receiver** (S
 
 ## ADS-B / dump1090
 
-Open **SDR → ADS-B** to start and stop a managed `dump1090`/`readsb` receiver, set the JSON port, tuner gain and device index, and watch the aircraft table. DarkSec reuses an existing feed if one is already running. Stop the live receiver or rtl_tcp first — one RTL-SDR cannot feed two programs at once. Logs are written to `fielddata/logs/dump1090.log`.
+Open **SDR → ADS-B** to start and stop a managed `dump1090`/`readsb` receiver, set tuner gain and device index, and watch the aircraft table. Managed mode uses dump1090's `--write-json` output under `fielddata/adsb/` and reads it directly, so it does **not** open an HTTP port and cannot collide with DarkSec's LAN server on 8080. The **EXTERNAL PORT** setting (default **8081**) is used only to detect and reuse a feed that another program already runs over HTTP. Stop the live receiver or rtl_tcp first — one RTL-SDR cannot feed two programs at once. Logs are written to `fielddata/logs/dump1090.log`.
 
 ## HackRF
 

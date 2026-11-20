@@ -1661,7 +1661,7 @@ export async function render(root, params = {}) {
 
   /* ---------------------------------------------------------------- ADS-B */
   const adsb0 = adsb.status || {};
-  const adsbPort = input({ type: "number", value: String(adsb0.port || 8080), min: "1", max: "65535" });
+  const adsbPort = input({ type: "number", value: String(adsb0.port || 8081), min: "1", max: "65535" });
   const adsbGain = input({ type: "number", value: String(adsb0.gain ?? 40), min: "0", max: "62" });
   const adsbDevice = input({ type: "number", value: String(adsb0.device ?? 0), min: "0", max: "8" });
   const adsbStatus = h("div", { class: "tiny muted", text: "Checking ADS-B manager…" });
@@ -1673,11 +1673,15 @@ export async function render(root, params = {}) {
   function paintAdsb(data) {
     const status = data?.status || {};
     const running = !!status.running;
-    adsbStatus.className = `tiny ${status.available ? "muted" : "danger-text"}`;
+    adsbStatus.className = `tiny ${status.warning ? "warn-text" : status.available ? "muted" : "danger-text"}`;
+    if (status.port && document.activeElement !== adsbPort) adsbPort.value = String(status.port);
     const mode = status.managed ? "MANAGED" : status.external ? "EXTERNAL FEED" : running ? "RUNNING" : "STOPPED";
     const binaryLabel = status.binary ? PathlessName(status.binary)
       : status.external ? "external feed" : "dump1090/readsb not installed";
-    adsbStatus.textContent = `${mode} · ${binaryLabel} · ${status.host || "127.0.0.1"}:${status.port || adsbPort.value} · ${status.aircraft_count ?? (data?.aircraft || []).length} aircraft`;
+    const feedLabel = status.managed && status.json_dir
+      ? "local JSON" : `${status.host || "127.0.0.1"}:${status.port || adsbPort.value}`;
+    adsbStatus.textContent = `${mode} · ${binaryLabel} · ${feedLabel} · ${status.aircraft_count ?? (data?.aircraft || []).length} aircraft`
+      + (status.warning ? ` · ${status.warning}` : "");
     adsbStart.disabled = running;
     adsbStopBtn.disabled = !status.managed;
     adsbTable.replaceChildren();
@@ -1726,20 +1730,26 @@ export async function render(root, params = {}) {
     adsbStart.disabled = true;
     try {
       const settings = {
-        adsb_port: Number(adsbPort.value) || 8080,
+        adsb_port: Number(adsbPort.value) || 8081,
         adsb_gain: Number(adsbGain.value) || 40,
         adsb_device: Number(adsbDevice.value) || 0,
       };
       try { await store.saveSettings(settings); } catch {}
-      await api.post("/api/sdr/adsb/start", {
+      const out = await api.post("/api/sdr/adsb/start", {
         port: settings.adsb_port,
         gain: settings.adsb_gain,
         device: settings.adsb_device,
       });
-      toast("dump1090 started");
+      if (out?.port && Number(adsbPort.value) !== Number(out.port)) {
+        adsbPort.value = String(out.port);
+        try { await store.saveSettings({ adsb_port: out.port }); } catch {}
+      }
+      toast(out?.external ? "Existing ADS-B feed detected; showing it"
+        : out?.warning || "dump1090 started");
       await loadAdsb();
     } catch (err) {
-      toast(err.message || "Could not start dump1090", "error");
+      toast(err.message || "Could not start dump1090", "error", 9000);
+      await loadAdsb();
     } finally {
       adsbStart.disabled = false;
     }
@@ -1758,7 +1768,7 @@ export async function render(root, params = {}) {
 
   const adsbBody = h("div", { class: "col" },
     h("div", { class: "form-grid" },
-      field("PORT", adsbPort),
+      field("EXTERNAL PORT", adsbPort, "Optional feed port. Managed dump1090 uses local JSON, so it cannot conflict with the LAN server."),
       field("GAIN", adsbGain),
       field("DEVICE", adsbDevice)),
     h("div", { class: "row wrap mt-8" }, adsbStart, adsbStopBtn),

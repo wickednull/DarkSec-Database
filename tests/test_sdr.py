@@ -538,3 +538,64 @@ def test_live_preflight_reports_busy_rtl(monkeypatch):
     with pytest.raises(ValueError) as caught:
         sdr.live_preflight("rtl")
     assert "busy" in str(caught.value).lower()
+
+
+def test_adsb_default_port_avoids_the_lan_web_port():
+    from darksec import config
+
+    assert config.default_settings()["adsb_port"] == 8081
+    assert config.default_settings()["lan_port"] == 8080
+
+
+def test_managed_adsb_uses_json_output_not_an_http_port(monkeypatch, tmp_path):
+    from darksec import sdr
+
+    captured = {}
+
+    class Proc:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return Proc()
+
+    monkeypatch.setattr(sdr, "_adsb_binary", lambda: "/usr/bin/dump1090")
+    monkeypatch.setattr(sdr, "_adsb_feed", lambda port=None: None)
+    monkeypatch.setattr(sdr, "_adsb_json_dir", lambda: tmp_path)
+    monkeypatch.setattr(sdr.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(sdr.time, "sleep", lambda _s: None)
+    try:
+        sdr.start_adsb(port=8080, gain=40, device=0)
+        cmd = captured["cmd"]
+        assert "--write-json" in cmd and str(tmp_path) in cmd
+        assert "--net-http-port" not in cmd
+        assert "--net" not in cmd
+    finally:
+        sdr.stop_adsb()
+
+
+def test_managed_adsb_reads_json_directory(monkeypatch, tmp_path):
+    import json
+    from darksec import sdr
+
+    (tmp_path / "aircraft.json").write_text(json.dumps({
+        "aircraft": [{"hex": "abc123", "flight": "TEST1", "alt_baro": 10000}],
+    }))
+    sdr._ADSB["dir"] = str(tmp_path)
+    try:
+        data = sdr._adsb_feed()
+        assert data and data["aircraft"][0]["hex"] == "abc123"
+    finally:
+        sdr._ADSB["dir"] = None

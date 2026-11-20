@@ -103,7 +103,7 @@ def default_settings() -> dict:
         "sdr_server_bind": "0.0.0.0",
         "sdr_server_port": 1234,
         "adsb_host": "127.0.0.1",
-        "adsb_port": 8080,
+        "adsb_port": 8081,
         "adsb_gain": 40,
         "adsb_device": 0,
         "adsb_auto_start": False,
