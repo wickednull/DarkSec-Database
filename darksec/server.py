@@ -6612,7 +6612,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         require(0.1 <= start_mhz < end_mhz <= 6000, "Sweep range must be 0.1-6000 MHz")
         require(10 <= bin_khz <= 5000, "Bin width must be 10-5000 kHz")
         require(0 <= lna <= 40 and 0 <= vga <= 62, "Gain out of range")
-        if request.app.state.sweep_active:
+        if request.app.state.sweep_active and sdr.sweep_running():
             raise HTTPException(status_code=409, detail="A sweep is already running")
         request.app.state.sweep_active = True
 
@@ -6628,6 +6628,13 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
 
         return StreamingResponse(generate(), media_type="application/x-ndjson",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    @app.post("/api/sdr/sweep/stop")
+    def sdr_sweep_stop(request: Request):
+        out = sdr.stop_sweep()
+        request.app.state.sweep_active = False
+        db(request).audit("SDR_SWEEP_STOP", out.get("note") or "sweep stopped")
+        return out
 
     @app.post("/api/sdr/capture")
     def sdr_capture(request: Request, payload: dict = Body(...)):

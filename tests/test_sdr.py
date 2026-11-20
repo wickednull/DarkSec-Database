@@ -599,3 +599,46 @@ def test_managed_adsb_reads_json_directory(monkeypatch, tmp_path):
         assert data and data["aircraft"][0]["hex"] == "abc123"
     finally:
         sdr._ADSB["dir"] = None
+
+
+def test_stop_sweep_terminates_the_receiver():
+    from darksec import sdr
+
+    class Proc:
+        def __init__(self):
+            self.returncode = None
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+    proc = Proc()
+    sdr._track_sweep(proc)
+    try:
+        assert sdr.sweep_running() is True
+        out = sdr.stop_sweep()
+        assert out["stopped"] is True
+        assert proc.terminated is True
+        assert sdr.sweep_running() is False
+    finally:
+        sdr._untrack_sweep()
+
+    assert sdr.stop_sweep()["stopped"] is False
+
+
+def test_sweep_stop_endpoint_is_safe_without_a_sweep(client):
+    r = client.post("/api/sdr/sweep/stop", json={})
+    assert r.status_code == 200
+    assert r.json()["stopped"] is False

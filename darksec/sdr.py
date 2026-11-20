@@ -45,6 +45,7 @@ MAX_SWEEP_SPAN_HZ = 6_000_000_000
 
 _JOBS: dict[str, dict] = {}
 _PROCS: dict[str, subprocess.Popen] = {}
+_SWEEP: dict = {"proc": None, "started": None}
 _LOCK = threading.RLock()
 _DETECT = {"at": 0.0, "data": None}
 _DETECT_TTL = 20.0
@@ -461,6 +462,54 @@ def _downsample(values: list[float], target: int = 1024) -> list[float]:
     return out
 
 
+def _track_sweep(proc: subprocess.Popen) -> None:
+    """Remember the running sweep so it can be stopped from another request."""
+    with _LOCK:
+        _SWEEP["proc"] = proc
+        _SWEEP["started"] = utcnow()
+
+
+def _untrack_sweep(proc: subprocess.Popen | None = None) -> None:
+    with _LOCK:
+        if proc is None or _SWEEP.get("proc") is proc:
+            _SWEEP["proc"] = None
+            _SWEEP["started"] = None
+
+
+def sweep_running() -> bool:
+    with _LOCK:
+        proc = _SWEEP.get("proc")
+    return bool(proc and proc.poll() is None)
+
+
+def stop_sweep() -> dict:
+    """Terminate the wideband sweep receiver, if one is running.
+
+    Closing the browser stream is not reliable enough on its own: a proxy can
+    keep the response open, and rtl_power keeps the dongle claimed until the
+    process is actually gone.
+    """
+    with _LOCK:
+        proc = _SWEEP.get("proc")
+    if not proc or proc.poll() is not None:
+        _untrack_sweep()
+        return {"stopped": False, "note": "No sweep is running"}
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=3)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+    _untrack_sweep(proc)
+    return {"stopped": True, "note": "Sweep stopped"}
+
+
 def _hackrf_sweep_stream(start_hz: float, end_hz: float, bin_hz: float = 100_000,
                          lna: int = 32, vga: int = 40, amp: bool = False):
     """Yield NDJSON-ready sweep frames from hackrf_sweep."""
@@ -489,6 +538,7 @@ def _hackrf_sweep_stream(start_hz: float, end_hz: float, bin_hz: float = 100_000
     except Exception as exc:
         yield {"type": "error", "error": str(exc)}
         return
+    _track_sweep(proc)
     current = None
     frames = 0
     try:
@@ -520,6 +570,7 @@ def _hackrf_sweep_stream(start_hz: float, end_hz: float, bin_hz: float = 100_000
                 proc.kill()
             except Exception:
                 pass
+        _untrack_sweep(proc)
     err = ""
     try:
         err = (proc.stderr.read() or "").strip()
@@ -572,6 +623,7 @@ def _rtl_sweep_stream(start_hz: float, end_hz: float, bin_hz: float = 100_000,
     except Exception as exc:
         yield {"type": "error", "error": str(exc)}
         return
+    _track_sweep(proc)
     frames = 0
     try:
         for line in proc.stdout:
@@ -591,6 +643,7 @@ def _rtl_sweep_stream(start_hz: float, end_hz: float, bin_hz: float = 100_000,
                 proc.kill()
             except Exception:
                 pass
+        _untrack_sweep(proc)
     err = ""
     try:
         err = (proc.stderr.read() or "").strip()
@@ -1769,11 +1822,24 @@ def diagnose(freq_hz: float = 100_000_000.0, backend: str = "auto",
     if usb_root.exists():
         rows = []
         denied = 0
-        for bus in sorted(usb_root.iterdir())[:12]:
+        try:
+            buses = sorted(usb_root.iterdir())[:12]
+        except OSError:
+            buses = []
+        for bus in buses:
             if not bus.is_dir():
                 continue
-            for dev in sorted(bus.iterdir())[:32]:
-                if not dev.is_file():
+            try:
+                devices = sorted(bus.iterdir())[:32]
+            except OSError:
+                continue
+            for dev in devices:
+                # usbfs entries are character devices, not regular files.
+                try:
+                    if dev.is_dir():
+                        continue
+                    dev.stat()
+                except OSError:
                     continue
                 readable = os.access(dev, os.R_OK | os.W_OK)
                 if not readable:
@@ -1815,6 +1881,7 @@ def diagnose(freq_hz: float = 100_000_000.0, backend: str = "auto",
                  f"device: {rtl.get('device_name') or 'not reported'}",
                  f"tuner: {rtl.get('tuner') or 'not reported'}",
                  f"direct sampling seen in output: {rtl.get('direct_sampling') or 0}",
+                 "note: -t is a tuner benchmark; it never streams samples",
                  *out.strip().splitlines()[-14:]])
     else:
         section("rtl_test", "error", ["rtl_test is not installed (package: rtl-sdr)."])
@@ -1843,8 +1910,16 @@ def diagnose(freq_hz: float = 100_000_000.0, backend: str = "auto",
             ])
         except subprocess.TimeoutExpired:
             section("Short RTL capture", "error", [
-                f"Timed out: {' '.join(cmd)}",
-                "The dongle did not deliver samples. It is busy, not enumerated, or lacks permissions.",
+                f"Timed out after 15 s: {' '.join(cmd)}",
+                "The device opened but the USB bulk transfer never delivered samples.",
+                "rtl_test -t passing is not proof of streaming: -t only benchmarks the tuner.",
+                "Check, in this order:",
+                "  1. Nothing else owns it: rtl_tcp, rtl_power, dump1090, gqrx, SDR++, or a sweep left running.",
+                "  2. Power and cabling: USB-A on the uConsole, powered hub on a Pi, short cable.",
+                "  3. Re-plug and wait 15-30 s; the dongle will not re-initialise immediately.",
+                "  4. Streaming test by hand: rtl_test -s 2400000 (Ctrl-C after a few seconds).",
+                "     'lost at least N bytes' means data flows; silence with no error means a stalled endpoint.",
+                "  5. uConsole AIO V2: confirm the SDR rail (pinctrl 7 op; pinctrl 7 dh).",
             ])
         except Exception as exc:
             section("Short RTL capture", "error", [str(exc)])

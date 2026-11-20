@@ -539,12 +539,16 @@ export async function render(root, params = {}) {
   }
 
   function stopSweep(message = "") {
-    stopSweep();
+    const ac = sweepAbort;
     sweepAbort = null;
+    if (ac) { try { ac.abort(); } catch {} }
     sweepRunning = false;
     sweepBtn.disabled = false;
     stopSweepBtn.disabled = true;
     if (message) paintSweepStatus(`IDLE // ${message}`);
+    // Aborting the fetch is not always enough (proxies can hold the stream),
+    // so also terminate the rtl_power/hackrf_sweep process on the server.
+    api.post("/api/sdr/sweep/stop", {}).catch(() => {});
   }
 
   async function startSweep() {
@@ -1949,7 +1953,7 @@ export async function render(root, params = {}) {
   loadRecordings();
 
   return () => {
-    if (sweepAbort) { try { sweepAbort.abort(); } catch {} }
+    if (sweepAbort) stopSweep();
     if (pollTimer) clearInterval(pollTimer);
     window.removeEventListener("keydown", liveKeyHandler);
     if (adsbPoll) { clearInterval(adsbPoll); adsbPoll = null; }
