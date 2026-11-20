@@ -21,11 +21,19 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 import uuid
 import wave
+from collections import deque
 from pathlib import Path
+
+try:
+    import pwd
+    import grp
+except Exception:  # Windows has no pwd/grp; SDR still works elsewhere.
+    pwd = grp = None
 
 import numpy as np
 
@@ -40,6 +48,7 @@ _PROCS: dict[str, subprocess.Popen] = {}
 _LOCK = threading.RLock()
 _DETECT = {"at": 0.0, "data": None}
 _DETECT_TTL = 20.0
+HF_TUNER_MAX_HZ = 24_000_000
 _RTL_TCP_SERVER: dict = {"proc": None, "port": None, "bind": None, "started": None}
 _ADSB: dict = {"proc": None, "binary": None, "port": None, "started": None, "log": None}
 _ADSB_FEED_CACHE: dict = {"at": 0.0, "port": None, "data": None}
@@ -56,6 +65,98 @@ def _run(cmd: list[str], timeout: float = 8) -> tuple[int, str]:
         return 124, "timeout"
     except Exception as exc:
         return 1, str(exc)
+
+
+class LiveSourceError(RuntimeError):
+    """A receiver process failed before or during a live stream."""
+
+    def __init__(self, message: str, fatal: bool = True, detail: str = ""):
+        super().__init__(message)
+        self.fatal = fatal
+        self.detail = detail
+
+
+def _direct_requested(value) -> str:
+    """Normalise AUTO / tuner / HF-Q values coming from settings or the UI."""
+    if value is None:
+        return "auto"
+    text = str(value).strip().lower()
+    if text in ("", "auto", "automatic", "-1"):
+        return "auto"
+    if text in ("2", "q", "hf", "hfq", "hf q", "direct", "true", "yes", "on"):
+        return "2"
+    return "0"
+
+
+def resolve_direct_sampling(backend: str, freq_hz: float, requested="auto") -> dict:
+    """Pick tuner vs RTL direct-sampling Q for the frequency actually tuned.
+
+    The R820T tuner used by most RTL-SDRs (including the HackerGadgets AIO V2)
+    cannot tune below 24 MHz. AUTO therefore selects the Q branch for HF and
+    the tuner at/above 24 MHz. An impossible explicit choice is corrected with
+    a warning instead of silently delivering an empty spectrum.
+    """
+    backend = str(backend or "auto").lower()
+    req = _direct_requested(requested)
+    if backend not in ("rtl", "rtl_tcp"):
+        return {"mode": 0, "requested": req, "auto": req == "auto",
+                "warning": "", "hf": float(freq_hz) < HF_TUNER_MAX_HZ}
+    hf = float(freq_hz) < HF_TUNER_MAX_HZ
+    desired = 2 if hf else 0
+    mode = desired if req == "auto" else int(req)
+    warning = ""
+    if mode != desired:
+        if hf:
+            warning = ("TUNER cannot receive below 24 MHz on an R820T. Using HF direct-sampling Q "
+                       "for this frequency; connect an HF antenna to the Q branch.")
+        else:
+            warning = ("HF direct-sampling Q does not cover VHF/UHF. Using the R820T tuner "
+                       "for this frequency.")
+        mode = desired
+    return {"mode": mode, "requested": req, "auto": req == "auto",
+            "warning": warning, "hf": hf}
+
+
+def _friendly_receiver_error(text: str) -> str:
+    low = (text or "").lower()
+    if "usb_claim_interface" in low or "device is busy" in low or "resource busy" in low:
+        return ("The RTL-SDR is busy: another program (live receiver, rtl_tcp, dump1090, gqrx or SDR++) "
+                "already owns it. Stop the other receiver and retry.")
+    if "no supported devices" in low or "no matching devices" in low or "no devices found" in low:
+        return ("No RTL-SDR was found. Re-seat it in the USB-A port, wait 15-30 s after re-plugging, "
+                "and check USB permissions (plugdev/udev).")
+    if "failed to open" in low or "open() failed" in low or "permission denied" in low:
+        return ("Cannot open the SDR device (permissions or another program). Check the udev rules, "
+                "add your user to plugdev, and stop other SDR software.")
+    if "no hackrf boards found" in low:
+        return "No HackRF found. Check the USB cable, use a powered hub and verify udev permissions."
+    if "address already in use" in low:
+        return "The rtl_tcp port is already in use by another process."
+    return ""
+
+
+def _spawn_stream(cmd: list[str]) -> tuple[subprocess.Popen, deque]:
+    """Start a streaming receiver and drain its stderr without blocking.
+
+    rtl_sdr and hackrf_transfer explain real failures (busy dongle, permissions,
+    missing device) on stderr. Dropping that text is why the UI could only say
+    "reconnecting", so keep the last lines and surface them on failure.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL)
+    lines: deque = deque(maxlen=60)
+
+    def drain():
+        try:
+            for raw in iter(proc.stderr.readline, b""):
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    lines.append(line)
+        except Exception:
+            pass
+
+    threading.Thread(target=drain, daemon=True).start()
+    return proc, lines
 
 
 def _quantize_gain(value, maximum: int, step: int) -> int:
@@ -505,14 +606,24 @@ def _rtl_sweep_stream(start_hz: float, end_hz: float, bin_hz: float = 100_000,
 def sweep_stream(start_hz: float, end_hz: float, bin_hz: float = 100_000,
                  lna: int = 32, vga: int = 40, amp: bool = False,
                  backend: str = "auto", gain: int = 40, ppm: int = 0,
-                 device: int = 0, direct: bool = False):
+                 device: int = 0, direct="auto"):
     """Yield sweep frames from the best available local receiver."""
     backend = choose_backend(backend)
     if backend == "hackrf":
         yield from _hackrf_sweep_stream(start_hz, end_hz, bin_hz, lna, vga, amp)
         return
     if backend == "rtl":
-        yield from _rtl_sweep_stream(start_hz, end_hz, bin_hz, gain, ppm, device, direct)
+        req = _direct_requested(direct)
+        if req == "auto" and start_hz < HF_TUNER_MAX_HZ < end_hz:
+            yield {"type": "error", "error": (
+                "This sweep crosses 24 MHz. RTL-SDR needs HF Q below 24 MHz and the tuner above it, "
+                "so scan 0.1-24 MHz and 24-1766 MHz as two separate sweeps (or choose a mode explicitly).")}
+            return
+        resolved = resolve_direct_sampling("rtl", (start_hz + end_hz) / 2.0, direct)
+        if resolved["warning"]:
+            yield {"type": "notice", "message": resolved["warning"]}
+        yield from _rtl_sweep_stream(start_hz, end_hz, bin_hz, gain, ppm, device,
+                                     bool(resolved["mode"]))
         return
     info = detect()
     if backend == "rtl_tcp":
@@ -704,7 +815,7 @@ def probe_rtl_tcp(host: str, port: int = 1234) -> dict:
 def start_capture(freq_hz: float, seconds: float = 5.0, rate: float = 2_400_000,
                   demod: str = "nfm", lna: int = 32, vga: int = 40, amp: bool = False,
                   keep_iq: bool = False, name: str = "", backend: str = "auto",
-                  host: str = "", port: int = 0, direct: bool = False) -> dict:
+                  host: str = "", port: int = 0, direct="auto") -> dict:
     freq_hz = float(freq_hz)
     rate = float(rate)
     seconds = float(seconds)
@@ -750,7 +861,7 @@ def start_capture(freq_hz: float, seconds: float = 5.0, rate: float = 2_400_000,
                    rtl_gain=int(settings.get("sdr_rtl_gain") or 40),
                    host=str(host or settings.get("sdr_rtl_tcp_host") or "").strip(),
                    port=int(port or settings.get("sdr_rtl_tcp_port") or 1234),
-                   direct=bool(direct or str(settings.get("sdr_direct_sampling") or "0") != "0"))
+                   direct=bool(resolve_direct_sampling(backend, freq_hz, direct)["mode"]))
     thread = threading.Thread(target=_capture_worker, args=(job["id"],), daemon=True)
     thread.start()
     return get_job(job["id"])
@@ -1432,43 +1543,60 @@ class _LiveDemod:
 
 def _live_source(backend: str, freq_hz: float, rate: float, gain: float,
                  ppm: int, host: str, port: int, lna: int, vga: int,
-                 amp: bool, device: int = 0, stop_event=None, direct: bool = False):
-    """Yield (bytes, sample_format) IQ blocks from a live receiver."""
+                 amp: bool, device: int = 0, stop_event=None, direct=False):
+    """Yield (bytes, sample_format) IQ blocks from a live receiver.
+
+    A process that dies without producing samples raises LiveSourceError with
+    the receiver's own stderr, so the UI can show the real fault instead of an
+    endless "reconnecting" loop.
+    """
     backend = choose_backend(backend)
     block = max(4096, int(rate * 0.05)) * 2
     proc = None
     client = None
+    errors: deque = deque(maxlen=60)
+    produced = False
+    ended = False
+    stopped = False
+    direct_mode = resolve_direct_sampling(backend, freq_hz, direct)["mode"]
     try:
         if backend == "hackrf":
             cmd = ["hackrf_transfer", "-r", "-", "-f", str(int(freq_hz)),
                    "-s", str(int(rate)), "-l", str(int(lna)), "-g", str(int(vga)),
                    "-a", "1" if amp else "0", "-p", "0"]
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            proc, errors = _spawn_stream(cmd)
         elif backend == "rtl":
             cmd = ["rtl_sdr", "-f", str(int(freq_hz)), "-s", str(int(rate)),
                    "-g", str(int(gain)), "-d", str(int(device))]
-            if direct:
+            if direct_mode:
                 cmd.append("-D")
             if ppm:
                 cmd += ["-p", str(int(ppm))]
             cmd.append("-")
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            proc, errors = _spawn_stream(cmd)
         elif backend == "rtl_tcp":
             client = RTLTCPClient(host, int(port), timeout=5.0)
-            client.connect()
+            try:
+                client.connect()
+            except Exception as exc:
+                raise LiveSourceError(
+                    f"rtl_tcp {host or '(unset)'}:{int(port)} did not answer: {exc}",
+                    fatal=True) from exc
             client.set_sample_rate(int(rate))
             client.set_frequency(int(freq_hz))
             client.set_gain_mode(True)
             client.set_gain(float(gain))
-            if direct:
+            if direct_mode:
                 client.set_direct_sampling(2)
             if ppm:
                 client.set_ppm(int(ppm))
         else:
-            return
+            raise LiveSourceError("No SDR receiver is available. Connect an RTL-SDR, "
+                                  "HackRF or rtl_tcp server.", fatal=True)
         sample_format = "i8" if backend == "hackrf" else "u8"
         while True:
             if stop_event is not None and stop_event.is_set():
+                stopped = True
                 break
             if proc is not None:
                 data = proc.stdout.read(block) if proc.stdout else b""
@@ -1477,12 +1605,15 @@ def _live_source(backend: str, freq_hz: float, rate: float, gain: float,
             else:
                 break
             if not data:
+                ended = True
                 break
+            produced = True
             yield data, sample_format
     finally:
         if proc is not None:
             try:
-                proc.terminate()
+                if proc.poll() is None:
+                    proc.terminate()
                 proc.wait(timeout=2)
             except Exception:
                 try:
@@ -1491,23 +1622,52 @@ def _live_source(backend: str, freq_hz: float, rate: float, gain: float,
                     pass
         if client is not None:
             client.close()
+        if stop_event is not None and stop_event.is_set():
+            stopped = True
+        if proc is not None and ended and not stopped:
+            rc = proc.returncode
+            detail = " | ".join(list(errors)[-5:])[:900]
+            friendly = _friendly_receiver_error(detail)
+            if friendly or (not produced and rc not in (0, None)):
+                reason = friendly or f"Receiver exited with code {rc}."
+                raise LiveSourceError(
+                    f"{reason}" + (f" {detail}" if detail else ""),
+                    fatal=True, detail=detail)
+            if not produced:
+                raise LiveSourceError(
+                    "The receiver started but produced no IQ samples. " +
+                    (detail or "Check the antenna, gain and USB connection."),
+                    fatal=True, detail=detail)
+            if detail and rc not in (0, -15, 143, None):
+                raise LiveSourceError(
+                    f"Receiver stopped unexpectedly (exit {rc}). {detail}",
+                    fatal=False, detail=detail)
 
 
 def live_preflight(backend: str = "auto", host: str = "", port: int = 1234) -> dict:
     chosen = choose_backend(backend)
+    info = detect()
+    rtl_raw = str((info.get("rtl") or {}).get("raw") or "").lower()
+    rtl_busy = ("usb_claim_interface" in rtl_raw or "failed to open" in rtl_raw
+                or "resource busy" in rtl_raw)
     if chosen == "none":
-        info = detect()
+        if rtl_busy:
+            raise ValueError("The RTL-SDR is busy: another program (rtl_tcp, dump1090, gqrx, SDR++ or "
+                             "a second DarkSec receiver) already owns it. Stop it and retry.")
         notes = " ".join(n["text"] for n in (info.get("guidance") or [])[:3])
         raise ValueError("No SDR receiver found. " + notes[:400])
     if chosen == "hackrf":
         if not shutil.which("hackrf_transfer"):
             raise ValueError("hackrf_transfer is not installed")
-        if not detect().get("hackrf", {}).get("connected"):
+        if not info.get("hackrf", {}).get("connected"):
             raise ValueError("No HackRF detected. Connect it, use a powered hub and check USB permissions.")
     elif chosen == "rtl":
         if not shutil.which("rtl_sdr"):
             raise ValueError("rtl_sdr is not installed (package: rtl-sdr)")
-        if not detect().get("rtl", {}).get("connected"):
+        if not info.get("rtl", {}).get("connected"):
+            if rtl_busy:
+                raise ValueError("The RTL-SDR is busy: another program already owns it. "
+                                 "Stop rtl_tcp, dump1090, gqrx or SDR++ and retry.")
             raise ValueError("No RTL-SDR detected. On a uConsole use USB-A and wait 15-30 s after re-plugging.")
     elif chosen == "rtl_tcp":
         if not host:
@@ -1516,6 +1676,200 @@ def live_preflight(backend: str = "auto", host: str = "", port: int = 1234) -> d
         if not probe.get("ok"):
             raise ValueError(f"rtl_tcp {host}:{port} did not answer: {probe.get('error')}")
     return {"backend": chosen}
+
+
+def diagnose(freq_hz: float = 100_000_000.0, backend: str = "auto",
+             direct="auto") -> dict:
+    """Build a copyable report explaining why a receiver is or is not working."""
+    info = detect(force=True)
+    settings = _settings()
+    chosen = choose_backend(backend)
+    resolved = resolve_direct_sampling(chosen, freq_hz, direct)
+    sections: list[dict] = []
+
+    def section(title: str, status: str = "info", lines=None) -> None:
+        clean = [str(line) for line in (lines or []) if str(line).strip()]
+        sections.append({"title": title, "status": status, "lines": clean})
+
+    try:
+        uid = os.getuid()
+    except Exception:
+        uid = 0
+    try:
+        user = pwd.getpwuid(uid).pw_name if pwd else os.environ.get("USER", "?")
+    except Exception:
+        user = os.environ.get("USER", "?")
+    try:
+        groups = ", ".join(sorted({grp.getgrgid(g).gr_name for g in os.getgroups()})) if grp else "?"
+    except Exception:
+        groups = "?"
+    section("Process", "info", [
+        f"User: {user} (uid {uid})",
+        f"Groups: {groups}",
+        f"Working directory: {os.getcwd()}",
+        f"Python: {sys.version.split()[0]}",
+    ])
+    if "plugdev" not in groups.split(", ") and uid != 0:
+        sections[-1]["status"] = "warn"
+        sections[-1]["lines"].append("WARN: user is not in plugdev; RTL-SDR access may fail.")
+
+    # USB inventory and permissions.
+    lsusb = shutil.which("lsusb")
+    if lsusb:
+        _rc, out = _run([lsusb], 6)
+        rtl_lines = [ln for ln in out.splitlines()
+                     if any(k in ln.lower() for k in ("realtek", "0bda:2838", "0bda:2832", "hackrf", "1d50:6089"))]
+        section("USB devices", "ok" if rtl_lines else "warn",
+                rtl_lines or ["No RTL-SDR/HackRF USB entry found in lsusb."])
+    else:
+        section("USB devices", "warn", ["lsusb is not installed (package: usbutils)."])
+    usb_root = Path("/dev/bus/usb")
+    if usb_root.exists():
+        rows = []
+        denied = 0
+        for bus in sorted(usb_root.iterdir())[:12]:
+            if not bus.is_dir():
+                continue
+            for dev in sorted(bus.iterdir())[:32]:
+                if not dev.is_file():
+                    continue
+                readable = os.access(dev, os.R_OK | os.W_OK)
+                if not readable:
+                    denied += 1
+                rows.append(f"{dev} {'rw' if readable else 'NO ACCESS'}")
+        section("USB device nodes", "warn" if (denied or not rows) else "ok",
+                rows[:24] or ["No device nodes under /dev/bus/usb; the dongle is not enumerated here."])
+        if denied:
+            section("USB permissions", "warn", [
+                f"{denied} USB node(s) are not writable by this user.",
+                "Install the rtl-sdr udev rules (or add your user to plugdev) and re-plug the dongle.",
+            ])
+    else:
+        section("/dev/bus/usb", "warn", ["Not present; USB devices cannot be opened from this environment."])
+
+    mods = shutil.which("lsmod")
+    if mods:
+        _rc, out = _run([mods], 6)
+        dvb = [ln.strip() for ln in out.splitlines() if "dvb_usb_rtl28xxu" in ln or ln.startswith("rtl283")]
+        if dvb:
+            section("Kernel drivers", "warn", dvb + [
+                "A DVB kernel driver owns the dongle. Blacklist dvb_usb_rtl28xxu and re-plug."])
+
+    # Installed tools.
+    tools = info.get("tools") or {}
+    tool_lines = []
+    for name in ("rtl_test", "rtl_sdr", "rtl_power", "rtl_tcp", "hackrf_info",
+                 "hackrf_transfer", "SoapySDRUtil", "dump1090", "readsb"):
+        tool_lines.append(f"{name}: {tools.get(name) or 'NOT INSTALLED'}")
+    section("SDR tools", "ok" if tools.get("rtl_test") or tools.get("hackrf_info") else "warn", tool_lines)
+
+    # Full rtl_test output.
+    rtl = info.get("rtl") or {}
+    if tools.get("rtl_test"):
+        rc, out = _run([tools["rtl_test"], "-t"], 10)
+        ok = bool(rtl.get("connected"))
+        section("rtl_test", "ok" if ok else "error",
+                [f"exit code: {rc}",
+                 f"device: {rtl.get('device_name') or 'not reported'}",
+                 f"tuner: {rtl.get('tuner') or 'not reported'}",
+                 f"direct sampling seen in output: {rtl.get('direct_sampling') or 0}",
+                 *out.strip().splitlines()[-14:]])
+    else:
+        section("rtl_test", "error", ["rtl_test is not installed (package: rtl-sdr)."])
+
+    # Short real capture at the requested frequency.
+    if chosen == "rtl" and tools.get("rtl_sdr"):
+        cmd = [tools["rtl_sdr"], "-f", str(int(freq_hz)), "-s", "1024000",
+               "-g", str(int(float(settings.get("sdr_rtl_gain") or 40))),
+               "-d", "0", "-n", "262144"]
+        if resolved["mode"]:
+            cmd.append("-D")
+        ppm = int(settings.get("sdr_ppm") or 0)
+        if ppm:
+            cmd += ["-p", str(ppm)]
+        cmd.append("-")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=15)
+            err = proc.stderr.decode("utf-8", "replace").strip()
+            ok = proc.returncode == 0 and len(proc.stdout or b"") > 4096
+            friendly = _friendly_receiver_error(err)
+            section("Short RTL capture", "ok" if ok else "error", [
+                f"command: {' '.join(cmd)}",
+                f"exit code: {proc.returncode}; bytes: {len(proc.stdout or b'')}",
+                *(friendly or "").splitlines(),
+                *err.splitlines()[-8:],
+            ])
+        except subprocess.TimeoutExpired:
+            section("Short RTL capture", "error", [
+                f"Timed out: {' '.join(cmd)}",
+                "The dongle did not deliver samples. It is busy, not enumerated, or lacks permissions.",
+            ])
+        except Exception as exc:
+            section("Short RTL capture", "error", [str(exc)])
+    elif chosen == "hackrf":
+        section("HackRF info", "ok" if info.get("hackrf", {}).get("connected") else "error",
+                (info.get("hackrf", {}).get("raw") or "No hackrf_info output").splitlines()[-12:])
+    elif chosen == "rtl_tcp":
+        host = str(settings.get("sdr_rtl_tcp_host") or "").strip()
+        port = int(settings.get("sdr_rtl_tcp_port") or 1234)
+        probe = probe_rtl_tcp(host, port) if host else {"ok": False, "error": "host not configured"}
+        detail = probe.get("error") or (
+            f"RTL0 handshake · tuner type {probe.get('tuner_type')} · "
+            f"{probe.get('gain_count')} gain steps")
+        section("rtl_tcp", "ok" if probe.get("ok") else "error",
+                [f"{host or '(unset)'}:{port}", str(detail)])
+
+    # Busy processes and receivers owned outside DarkSec.
+    pg = shutil.which("pgrep")
+    busy = []
+    if pg:
+        for name in ("rtl_sdr", "rtl_tcp", "rtl_power", "rtl_fm", "dump1090",
+                     "dump1090-fa", "readsb", "gqrx", "hackrf_transfer", "SDR++"):
+            _rc, out = _run([pg, "-x", "-a", name], 4)
+            for line in out.splitlines():
+                line = line.strip()
+                if line and line not in busy:
+                    busy.append(line)
+    section("Other SDR processes", "warn" if busy else "ok",
+            busy[:10] or ["None found. Only one program can own the dongle."])
+
+    effective = {
+        "requested backend": backend,
+        "chosen backend": chosen,
+        "frequency_hz": int(freq_hz),
+        "direct requested": resolved["requested"],
+        "direct effective": "Q (2)" if resolved["mode"] else "tuner (0)",
+        "hf": resolved["hf"],
+        "warning": resolved["warning"] or "none",
+        "rtl gain": settings.get("sdr_rtl_gain"),
+        "ppm": settings.get("sdr_ppm"),
+        "live rate Msps": settings.get("sdr_live_rate"),
+        "rtl_tcp": f"{settings.get('sdr_rtl_tcp_host') or ''}:{settings.get('sdr_rtl_tcp_port') or 1234}",
+    }
+    section("Effective settings", "warn" if resolved["warning"] else "ok",
+            [f"{k}: {v}" for k, v in effective.items()])
+
+    guidance = info.get("guidance") or []
+    if guidance:
+        has_warn = any(note.get("level") == "warn" for note in guidance)
+        section("Platform guidance", "warn" if has_warn else "info",
+                [note.get("text", "") for note in guidance[:10]])
+
+    text_lines = []
+    for item in sections:
+        text_lines.append(f"[{item['status'].upper()}] {item['title']}")
+        for line in item["lines"]:
+            text_lines.append(f"  {line}")
+        text_lines.append("")
+    return {
+        "generated": utcnow(),
+        "platform": info.get("platform") or {},
+        "backend": chosen,
+        "frequency_hz": int(freq_hz),
+        "direct": resolved,
+        "sections": sections,
+        "text": "\n".join(text_lines)[:16000],
+    }
 
 
 def live_audio_stream(freq_hz: float, mode: str = "nfm", backend: str = "auto",
@@ -1602,20 +1956,21 @@ def stop_rtl_tcp_server() -> dict:
 def start_rtl_tcp_server(bind: str = "0.0.0.0", port: int = 1234,
                          freq_hz: float = 100_000_000, rate: float = 2_400_000,
                          gain: float = 40, ppm: int = 0, bias: bool = False,
-                         direct: bool = False) -> dict:
+                         direct="auto") -> dict:
     if not shutil.which("rtl_tcp"):
         raise ValueError("rtl_tcp is not installed (package: rtl-sdr)")
     info = detect()
     if not info.get("rtl", {}).get("connected"):
         raise ValueError("No RTL-SDR detected. Connect it (USB-A on uConsole) and rescan.")
     stop_rtl_tcp_server()
+    resolved = resolve_direct_sampling("rtl", float(freq_hz), direct)
     cmd = ["rtl_tcp", "-a", str(bind or "0.0.0.0"), "-p", str(int(port)),
            "-f", str(int(freq_hz)), "-s", str(int(rate)), "-g", str(int(gain))]
     if ppm:
         cmd += ["-P", str(int(ppm))]
     if bias:
         cmd += ["-T"]
-    if direct:
+    if resolved["mode"]:
         cmd += ["-D"]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.6)

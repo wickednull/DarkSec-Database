@@ -93,7 +93,7 @@ def default_settings() -> dict:
         "sdr_backend": "auto",
         "sdr_ppm": 0,
         "sdr_rtl_gain": 40,
-        "sdr_direct_sampling": "0",
+        "sdr_direct_sampling": "auto",
         "sdr_bias_tee": False,
         "sdr_rtl_tcp_host": "",
         "sdr_rtl_tcp_port": 1234,

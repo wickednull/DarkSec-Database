@@ -838,6 +838,8 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 .sdr-vfo-main { flex: 1 1 420px; min-width: 260px; }
 .sdr-vfo-digits { font-family: "JetBrains Mono", monospace; font-size: clamp(34px, 5.6vw, 60px); letter-spacing: .04em; line-height: 1; color: var(--text-strong); text-shadow: 0 0 18px rgba(var(--acc-rgb),.22); white-space: nowrap; overflow: hidden; }
 .sdr-vfo-sub { margin-top: 5px; font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; }
+.sdr-live-status { display: inline-block; max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.sdr-live-warning { line-height: 1.45; }
 .sdr-vfo-actions { display: flex; gap: 6px; align-items: center; margin-top: 9px; flex-wrap: wrap; }
 .sdr-vfo-actions .select, .sdr-vfo-actions .input { width: auto; min-width: 96px; }
 .sdr-vfo-actions .btn { flex: 0 0 auto; }

@@ -86,9 +86,11 @@ does not require SDR++; it uses `rtl_sdr`, `rtl_power` and `rtl_tcp` directly.
 
 ## RTL-SDR HF direct sampling and the HackerGadgets AIO V2
 
-The AIO V2 uses an RTL2832U + R820T with an HF path wired to the **Q** direct-sampling input. In the receiver select **HF Q** for 0.1–24 MHz shortwave and **TUNER 24M+** for VHF/UHF. The same selector exists in Scan, Capture and Share this SDR.
+The AIO V2 uses an RTL2832U + R820T with an HF path wired to the **Q** direct-sampling input. Leave **HF MODE** on **AUTO**: DarkSec selects **HF Q** below 24 MHz and the **R820T tuner** at 24 MHz and above, including while tuning across the boundary. The same selector exists in Scan, Capture and Share this SDR. An explicit **TUNER** or **HF Q** choice is corrected when it cannot work at the tuned frequency, and the receiver panel shows a warning explaining the switch.
 
 `rtl_test` reporting `No E4000 tuner found, aborting.` is normal for an R820T; it is not a fault. The useful lines are the device name, `R820T tuner`, the gain list and `Sampling at ...`.
+
+If the receiver reports an error instead of audio, open **Diagnose receiver** (SYSTEM tab or **DIAGNOSE** in the page header). It reports the process user and groups, USB nodes, `lsusb`, the full `rtl_test`/`hackrf_info` output, a short real capture at the tuned frequency, other programs that own the dongle, and the effective HF/tuner mode. **COPY** or **SAVE TXT** produces a report you can send without guessing.
 
 ## ADS-B / dump1090
 

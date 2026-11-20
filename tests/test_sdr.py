@@ -273,6 +273,13 @@ def test_rtl_tcp_server_command_uses_bias_tee_flag(monkeypatch):
         assert "-T" in cmd
         assert "-P" in cmd and "5" in cmd
         assert "-a" in cmd and "127.0.0.1" in cmd
+        assert "-D" not in cmd  # AUTO at 100 MHz uses the tuner
+        sdr.start_rtl_tcp_server(bind="127.0.0.1", port=1234, freq_hz=7.1e6,
+                                 rate=2.4e6, gain=40, direct="auto")
+        assert "-D" in captured["cmd"]  # AUTO at 7.1 MHz uses HF Q
+        sdr.start_rtl_tcp_server(bind="127.0.0.1", port=1234, freq_hz=100e6,
+                                 rate=2.4e6, gain=40, direct="2")
+        assert "-D" not in captured["cmd"]  # impossible HF Q at VHF corrected
     finally:
         sdr.stop_rtl_tcp_server()
 
@@ -407,3 +414,127 @@ def test_rtl_tcp_direct_sampling_command(monkeypatch):
     client.connect()
     client.set_direct_sampling(2)
     assert fake.sent[-1] == b"\x09" + struct.pack(">I", 2)
+
+
+def test_direct_sampling_auto_and_conflicts():
+    from darksec import sdr
+
+    hf = sdr.resolve_direct_sampling("rtl", 7_100_000, "auto")
+    assert hf["mode"] == 2 and hf["warning"] == ""
+    vhf = sdr.resolve_direct_sampling("rtl", 100_100_000, "auto")
+    assert vhf["mode"] == 0 and vhf["warning"] == ""
+    tuned_hf = sdr.resolve_direct_sampling("rtl", 7_100_000, "0")
+    assert tuned_hf["mode"] == 2 and "TUNER cannot receive below 24 MHz" in tuned_hf["warning"]
+    direct_vhf = sdr.resolve_direct_sampling("rtl", 100_100_000, "2")
+    assert direct_vhf["mode"] == 0 and "HF direct-sampling Q does not cover" in direct_vhf["warning"]
+    assert sdr.resolve_direct_sampling("hackrf", 7_100_000, "2")["mode"] == 0
+
+
+def test_live_source_surfaces_receiver_stderr(monkeypatch):
+    import io
+    from collections import deque
+    import pytest
+    from darksec import sdr
+
+    class FakeProc:
+        returncode = 1
+        stdout = io.BytesIO(b"")
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            pass
+
+    lines = deque(["usb_claim_interface error -6", "Failed to open rtlsdr device #0."])
+    monkeypatch.setattr(sdr, "_spawn_stream", lambda cmd: (FakeProc(), lines))
+    with pytest.raises(sdr.LiveSourceError) as caught:
+        list(sdr._live_source("rtl", 100_000_000, 1_024_000, 40, 0, "", 1234, 32, 40, False))
+    message = str(caught.value).lower()
+    assert caught.value.fatal is True
+    assert "busy" in message
+    assert "usb_claim_interface" in message
+
+
+def test_diagnose_endpoint_returns_report(client, monkeypatch):
+    from darksec import sdr
+
+    monkeypatch.setattr(sdr, "diagnose", lambda *a, **k: {
+        "text": "[OK] Process\n  user: test",
+        "sections": [{"title": "Process", "status": "ok", "lines": ["user: test"]}],
+        "backend": "rtl", "frequency_hz": 7_100_000, "direct": {"mode": 2},
+    })
+    r = client.get("/api/sdr/diagnose?freq_mhz=7.1&backend=rtl&direct=auto")
+    assert r.status_code == 200
+    out = r.json()
+    assert out["backend"] == "rtl"
+    assert out["direct"]["mode"] == 2
+    assert "Process" in out["text"]
+
+
+def test_live_websocket_reports_busy_rtl_and_stops(client, monkeypatch):
+    import io
+    from collections import deque
+    from darksec import sdr
+
+    class FakeProc:
+        returncode = 1
+        stdout = io.BytesIO(b"")
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(sdr, "detect", lambda force=False: {
+        "rtl": {"connected": True, "device_name": "Fake RTL", "tuner": "R820T"},
+        "hackrf": {"connected": False}, "rtl_tcp": {"configured": False},
+        "guidance": [],
+    })
+    monkeypatch.setattr(sdr.shutil, "which",
+                        lambda name: "/usr/bin/" + name if name in ("rtl_sdr", "rtl_test") else None)
+    monkeypatch.setattr(sdr, "_spawn_stream", lambda cmd: (
+        FakeProc(), deque(["usb_claim_interface error -6", "Failed to open rtlsdr device #0."])))
+
+    messages = []
+    with client.websocket_connect(
+            "/api/sdr/ws?backend=rtl&freq_mhz=100&rate=1.024&direct=auto") as ws:
+        for _ in range(4):
+            messages.append(ws.receive_json())
+            if messages[-1].get("type") == "status" and messages[-1].get("status") == "stopped":
+                break
+    first = messages[0]
+    assert first["type"] == "status" and first["direct_mode"] == 0
+    errors = [m for m in messages if m.get("type") == "error"]
+    assert errors and errors[0]["fatal"] is True
+    assert "busy" in errors[0]["error"].lower()
+    assert messages[-1].get("status") == "stopped"
+
+
+def test_live_preflight_reports_busy_rtl(monkeypatch):
+    import pytest
+    from darksec import sdr
+
+    monkeypatch.setattr(sdr, "detect", lambda force=False: {
+        "rtl": {"connected": False, "present": True,
+                "raw": "usb_claim_interface error -6: LIBUSB_ERROR_BUSY"},
+        "hackrf": {"connected": False}, "rtl_tcp": {"configured": False},
+        "guidance": [],
+    })
+    monkeypatch.setattr(sdr.shutil, "which", lambda name: "/usr/bin/rtl_sdr")
+    with pytest.raises(ValueError) as caught:
+        sdr.live_preflight("rtl")
+    assert "busy" in str(caught.value).lower()

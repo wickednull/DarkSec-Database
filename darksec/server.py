@@ -6284,6 +6284,11 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
+    @app.get("/api/sdr/diagnose")
+    def sdr_diagnose(freq_mhz: float = 100.0, backend: str = "auto", direct: str = "auto"):
+        require(0.1 <= freq_mhz <= 6000.0, "Frequency must be 0.1-6000 MHz")
+        return sdr.diagnose(float(freq_mhz) * 1e6, backend=backend, direct=direct)
+
     @app.get("/api/sdr/network/probe")
     def sdr_network_probe(host: str = "", port: int = 1234):
         require(bool(host.strip()), "host is required")
@@ -6294,7 +6299,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                  backend: str = "auto", rate: float = 1.024, gain: float = 40,
                  squelch: float = 0, host: str = "", port: int = 1234,
                  lna: int = 32, vga: int = 40, amp: bool = False,
-                 direct: bool = False):
+                 direct: str = "auto"):
         require(1.0 <= freq_mhz <= 6000.0, "Frequency must be 1-6000 MHz")
         require(0.25 <= rate <= 3.2, "Live sample rate must be 0.25-3.2 Msps")
         settings = db(request).all_settings()
@@ -6304,6 +6309,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         rate_hz = float(rate) * 1e6
         pre = sdr.live_preflight(backend, host, port)
         chosen = pre["backend"]
+        resolved = sdr.resolve_direct_sampling(
+            chosen, float(freq_mhz) * 1e6,
+            direct if str(direct).strip() else settings.get("sdr_direct_sampling"))
         if chosen == "hackrf":
             rate_hz = max(2_000_000.0, min(20_000_000.0, rate_hz))
         else:
@@ -6326,7 +6334,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     rate=rate_hz, gain=float(gain or settings.get("sdr_rtl_gain") or 40),
                     ppm=int(settings.get("sdr_ppm") or 0), squelch=float(squelch or 0),
                     host=host, port=port, lna=int(lna), vga=int(vga), amp=bool(amp),
-                    direct=bool(direct or str(settings.get("sdr_direct_sampling") or "0") != "0"),
+                    direct=resolved["mode"],
                     stop_event=stop_event,
                 )
             finally:
@@ -6338,6 +6346,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no",
                      "X-Audio-Rate": str(out_rate), "X-SDR-Backend": chosen,
                      "X-SDR-Session": session_id,
+                     "X-SDR-Direct": str(resolved["mode"]),
+                     "X-SDR-Warning": resolved["warning"][:180],
                      "X-Audio-Channels": "1", "X-Audio-Format": "s16le"},
         )
 
@@ -6370,7 +6380,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             lna = int(ws.query_params.get("lna", "32") or 32)
             vga = int(ws.query_params.get("vga", "40") or 40)
             amp = str(ws.query_params.get("amp", "false")).lower() in ("1", "true", "yes")
-            direct = str(ws.query_params.get("direct", "0")).lower() in ("1", "true", "yes", "2")
+            direct = str(ws.query_params.get("direct", "auto")).strip().lower()
             pre = sdr.live_preflight(backend, host, port)
             chosen = pre["backend"]
             if chosen == "hackrf":
@@ -6391,7 +6401,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             ppm = int(settings.get("sdr_ppm") or 0)
         except Exception as exc:
             try:
-                await ws.send_json({"type": "error", "error": str(exc)[:400]})
+                await ws.send_json({"type": "error", "error": str(exc)[:400], "fatal": True})
             except Exception:
                 pass
             await ws.close()
@@ -6428,12 +6438,17 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 rate = float(params["rate_hz"])
                 demod = sdr._LiveDemod(params["mode"], rate, squelch=params["squelch"])
                 spectrum = sdr._LiveSpectrum()
+                resolved = sdr.resolve_direct_sampling(
+                    chosen, center,
+                    direct if direct else str(settings.get("sdr_direct_sampling") or "auto"))
                 push({"type": "status", "backend": chosen, "center_hz": center,
                       "rate": rate, "audio_rate": sdr.live_audio_rate(rate),
-                      "mode": params["mode"]})
+                      "mode": params["mode"], "direct_mode": resolved["mode"],
+                      "direct_requested": resolved["requested"],
+                      "warning": resolved["warning"]})
                 source = sdr._live_source(chosen, center, rate, params["gain"], ppm,
                                           host, port, lna, vga, amp, 0, stop_event=stop,
-                                          direct=direct or str(settings.get("sdr_direct_sampling") or "0") != "0")
+                                          direct=resolved["mode"])
                 frame = 0
                 try:
                     for data, sample_format in source:
@@ -6451,10 +6466,18 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 except Exception as exc:
                     now = time.monotonic()
                     consecutive_errors += 1
-                    if now - last_error_at > 5.0:
+                    fatal = bool(getattr(exc, "fatal", False))
+                    message = str(exc)[:700]
+                    if fatal or now - last_error_at > 5.0:
                         last_error_at = now
-                        push({"type": "error", "error": str(exc)[:300]})
-                    if consecutive_errors >= 4:
+                        push({"type": "error", "error": message, "fatal": fatal})
+                    if fatal:
+                        push({"type": "status", "status": "stopped", "backend": chosen,
+                              "rate": rate, "audio_rate": sdr.live_audio_rate(rate),
+                              "center_hz": center, "mode": params["mode"],
+                              "direct_mode": resolved["mode"], "fatal": True})
+                        stop.set()
+                    elif consecutive_errors >= 4:
                         push({"type": "error", "error": "Receiver disconnected repeatedly; press PLAY to retry."})
                         stop.set()
                 else:
@@ -6468,7 +6491,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     now = time.monotonic()
                     if now - last_reconnect_at > 5.0:
                         last_reconnect_at = now
-                        push({"type": "status", "status": "reconnecting",
+                        push({"type": "status",
+                              "status": "retuning" if restart.is_set() else "reconnecting",
                               "backend": chosen, "rate": rate,
                               "audio_rate": sdr.live_audio_rate(rate),
                               "center_hz": control.get("freq_hz"),
@@ -6567,7 +6591,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 gain=float(payload.get("gain") or 40),
                 ppm=int(payload.get("ppm") or 0),
                 bias=bool(payload.get("bias", False)),
-                direct=bool(payload.get("direct", False)),
+                direct=str(payload.get("direct", "auto")),
             )
             db(request).audit("SDR_SERVER_START", f"port={out.get('port')} bind={out.get('bind')}")
             return out
@@ -6584,7 +6608,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     def sdr_sweep_stream(request: Request, start_mhz: float = 88.0, end_mhz: float = 108.0,
                          bin_khz: float = 100.0, lna: int = 32, vga: int = 40, amp: bool = False,
                          backend: str = "auto", gain: int = 40, ppm: int = 0,
-                         device: int = 0, direct: bool = False):
+                         device: int = 0, direct: str = "auto"):
         require(0.1 <= start_mhz < end_mhz <= 6000, "Sweep range must be 0.1-6000 MHz")
         require(10 <= bin_khz <= 5000, "Bin width must be 10-5000 kHz")
         require(0 <= lna <= 40 and 0 <= vga <= 62, "Gain out of range")

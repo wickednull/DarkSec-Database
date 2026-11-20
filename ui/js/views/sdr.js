@@ -34,6 +34,19 @@ function mhz(hz) {
   return hz == null ? "—" : `${fmt.num(Number(hz) / 1e6, 4)} MHz`;
 }
 
+function directValue(settings) {
+  const value = String(settings?.sdr_direct_sampling ?? "auto").toLowerCase();
+  return value === "2" ? "2" : value === "0" ? "0" : "auto";
+}
+
+function directOptions() {
+  return [
+    { value: "auto", label: "AUTO · HF/VHF" },
+    { value: "0", label: "TUNER 24M+" },
+    { value: "2", label: "HF Q" },
+  ];
+}
+
 function accentColor() {
   try {
     return getComputedStyle(document.documentElement).getPropertyValue("--acc").trim() || "#5fe0a0";
@@ -112,6 +125,7 @@ export async function render(root, params = {}) {
     desc: "Live receiver, wideband scan, IQ capture and public WebSDR. Click the spectrum to tune; every local value comes from the radio.",
     actions: [
       btn("CHECK HARDWARE", { icon: "refresh", onClick: () => rescan() }),
+      btn("DIAGNOSE", { icon: "terminal", onClick: () => runDiagnose() }),
       btn("FIELD MANUAL", { icon: "book", onClick: () => { location.hash = "#/manual?doc=sdr"; } }),
       btn("SETTINGS", { icon: "settings", tone: "ghost", onClick: () => { location.hash = "#/settings"; } }),
     ],
@@ -409,7 +423,9 @@ export async function render(root, params = {}) {
   rf.appendChild(kv([
     ["HackRF", hackrf.connected ? (hackrf.board_id || "connected") : tools.hackrf_info ? "tools installed / no device" : "not installed"],
     ["RTL-SDR", rtl.connected ? [rtl.device_name || "RTL-SDR", rtl.tuner].filter(Boolean).join(" · ") : rtl.present || tools.rtl_test ? "tools installed / no device" : "not installed"],
-    ["HF mode", rtl.direct_sampling === 2 || String(store.settings?.sdr_direct_sampling || "0") === "2" ? "DIRECT Q / HF" : "TUNER"],
+    ["HF mode", directValue(store.settings) === "auto"
+      ? "AUTO · HF Q <24 MHz"
+      : (directValue(store.settings) === "2" || rtl.direct_sampling === 2) ? "DIRECT Q / HF" : "TUNER"],
     ["RTL gains", (rtl.gains || []).length ? `${rtl.gains.length} steps` : "—"],
     ["SoapySDR", soapy.connected ? `${(soapy.devices || []).length} device(s)` : soapy.present ? "no device" : "not installed"],
     ["Network", network.configured ? `${network.host}:${network.port}` : "not configured"],
@@ -478,9 +494,7 @@ export async function render(root, params = {}) {
   ], String(store.settings?.sdr_backend || "auto"));
   const sweepGain = input({ type: "number", value: String(store.settings?.sdr_rtl_gain ?? 40), min: "0", max: "62" });
   const sweepPpm = input({ type: "number", value: String(store.settings?.sdr_ppm ?? 0), min: "-1000", max: "1000" });
-  const sweepDirect = select([
-    { value: "0", label: "TUNER" }, { value: "2", label: "HF Q" },
-  ], String(store.settings?.sdr_direct_sampling || "0") === "2" ? "2" : "0");
+  const sweepDirect = select(directOptions(), directValue(store.settings));
   controls.append(
     field("START (MHz)", startInput),
     field("END (MHz)", endInput),
@@ -495,6 +509,128 @@ export async function render(root, params = {}) {
   );
   const sweepBtn = btn("START SWEEP", { tone: "primary", icon: "play" });
   const stopSweepBtn = btn("STOP", { icon: "stop", tone: "danger", disabled: true });
+  let sweepAbort = null;
+  let sweepRunning = false;
+  let sweepHistory = [];
+  let sweepBounds = { min: -110, max: -10 };
+
+  function paintSweepStatus(left, right = "—") {
+    spectrumReadout.replaceChildren(
+      h("span", { text: left }),
+      h("span", { text: right }),
+    );
+  }
+
+  function acceptSweep(frame) {
+    const db = frame.db || [];
+    if (!db.length) return;
+    const lo = Math.min(...db), hi = Math.max(...db);
+    sweepBounds.min = sweepBounds.min * 0.85 + (lo - 6) * 0.15;
+    sweepBounds.max = sweepBounds.max * 0.85 + (hi + 6) * 0.15;
+    sweepHistory.push(db);
+    if (sweepHistory.length > 90) sweepHistory.shift();
+    drawSpectrum(spectrumCanvas, frame, sweepBounds);
+    drawWaterfall(waterfallCanvas, sweepHistory, sweepBounds);
+    const peak = peakFrequency(frame);
+    paintSweepStatus(
+      `SCANNING // ${fmt.num(frame.start_hz / 1e6, 3)}–${fmt.num(frame.end_hz / 1e6, 3)} MHz · ${frame.count || db.length} bins`,
+      `PEAK ${peak == null ? "—" : `${fmt.num(peak / 1e6, 4)} MHz / ${fmt.num(frame.peak_db, 1)} dB`}`,
+    );
+  }
+
+  function stopSweep(message = "") {
+    stopSweep();
+    sweepAbort = null;
+    sweepRunning = false;
+    sweepBtn.disabled = false;
+    stopSweepBtn.disabled = true;
+    if (message) paintSweepStatus(`IDLE // ${message}`);
+  }
+
+  async function startSweep() {
+    if (sweepRunning) return;
+    const s1 = Number(startInput.value);
+    const s2 = Number(endInput.value);
+    if (!(s1 > 0 && s2 > s1)) { toast("Sweep start must be lower than sweep end", "warn"); return; }
+    sweepRunning = true;
+    sweepBtn.disabled = true;
+    stopSweepBtn.disabled = false;
+    sweepHistory = [];
+    sweepBounds = { min: -110, max: -10 };
+    paintSweepStatus("CONNECTING // starting sweep");
+    drawSpectrum(spectrumCanvas, null, sweepBounds);
+    drawWaterfall(waterfallCanvas, [], sweepBounds);
+    const ac = new AbortController();
+    sweepAbort = ac;
+    const qs = new URLSearchParams({
+      start_mhz: String(s1), end_mhz: String(s2),
+      bin_khz: String(Number(binInput.value) || 100),
+      backend: sweepBackend.value,
+      gain: String(Number(sweepGain.value) || 40),
+      ppm: String(Number(sweepPpm.value) || 0),
+      device: "0",
+      direct: sweepDirect.value,
+      lna: String(Number(lnaInput.value) || 32),
+      vga: String(Number(vgaInput.value) || 40),
+      amp: String(!!ampInput.querySelector("input")?.checked),
+    });
+    let gotData = false;
+    let lastError = "";
+    try {
+      const res = await fetch(`/api/sdr/sweep?${qs}`, {
+        signal: ac.signal,
+        headers: { Accept: "application/x-ndjson" },
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        let detail = res.statusText || `HTTP ${res.status}`;
+        try { const body = await res.json(); detail = body.detail || detail; } catch {}
+        throw new Error(detail);
+      }
+      if (!res.body) throw new Error("The browser cannot stream this response");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let cut;
+        while ((cut = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, cut).trim();
+          buffer = buffer.slice(cut + 1);
+          if (!line) continue;
+          let frame;
+          try { frame = JSON.parse(line); } catch { continue; }
+          if (frame.type === "sweep") { gotData = true; acceptSweep(frame); }
+          else if (frame.type === "error") {
+            lastError = frame.error || "Sweep failed";
+            toast(lastError, "error", 8000);
+            paintSweepStatus(`ERROR // ${lastError}`);
+          } else if (frame.type === "notice" && frame.message) {
+            toast(frame.message, "warn", 7000);
+          }
+        }
+      }
+      if (!gotData && !lastError) paintSweepStatus("IDLE // no sweep data; check the radio and range");
+    } catch (err) {
+      if (err.name !== "AbortError") {
+        lastError = err.message || "Sweep failed";
+        toast(lastError, "error", 8000);
+        paintSweepStatus(`ERROR // ${lastError}`);
+      }
+    } finally {
+      if (sweepAbort === ac) {
+        sweepAbort = null;
+        sweepRunning = false;
+        sweepBtn.disabled = false;
+        stopSweepBtn.disabled = true;
+      }
+    }
+  }
+
+  sweepBtn.addEventListener("click", startSweep);
+  stopSweepBtn.addEventListener("click", () => stopSweep("sweep stopped"));
   spectrumBody.append(
     spectrumShell,
     waterfallShell,
@@ -521,6 +657,8 @@ export async function render(root, params = {}) {
   let liveModeValue = DEMODS.some((d) => d.value === paramMode)
     && ["nfm","wfm","am","usb","lsb"].includes(paramMode) ? paramMode : "nfm";
   let liveBackendValue = String(store.settings?.sdr_backend || "auto");
+  let liveDirectMode = null;
+  let liveFatal = false;
   let liveAudioRate = 48000;
   let liveRunning = false;
   let liveWs = null;
@@ -548,10 +686,7 @@ export async function render(root, params = {}) {
     { value: "rtl_tcp", label: "NETWORK" },
   ], liveBackendValue);
   liveBackendSel.classList.add("sdr-inline-select");
-  const liveDirect = select([
-    { value: "0", label: "TUNER 24M+" },
-    { value: "2", label: "HF Q" },
-  ], String(store.settings?.sdr_direct_sampling || "0") === "2" ? "2" : "0");
+  const liveDirect = select(directOptions(), directValue(store.settings));
   liveDirect.classList.add("sdr-inline-select");
   const liveRateIn = input({ type: "number", value: String(store.settings?.sdr_live_rate ?? 1.024), step: "0.025", min: "0.25", max: "3.2" });
   liveRateIn.classList.add("sdr-small-input");
@@ -572,7 +707,8 @@ export async function render(root, params = {}) {
   const liveRecBtn = btn("REC", { icon: "mic", tone: "ghost" });
   const liveFull = btn("FULL", { icon: "maximize", tone: "ghost" });
   const liveScanBtn = btn("SCAN", { icon: "search", tone: "ghost" });
-  const liveStatus = h("span", { class: "tiny muted", text: "IDLE" });
+  const liveStatus = h("span", { class: "tiny muted sdr-live-status", text: "IDLE" });
+  const liveWarning = h("div", { class: "callout warn small mt-8 sdr-live-warning", style: "display:none" });
   const liveModeRow = h("div", { class: "sdr-mode-row" });
   const liveBandRow = h("div", { class: "sdr-band-row" });
   const liveSpectrum = h("canvas", { class: "sdr-live-spectrum" });
@@ -588,9 +724,16 @@ export async function render(root, params = {}) {
     const [whole, frac] = text.split(".");
     return `${whole}.${frac.slice(0, 3)} ${frac.slice(3)}`;
   }
+  function directLabel() {
+    const chosen = liveDirect.value === "2" ? "HF Q" : liveDirect.value === "0" ? "TUNER" : "AUTO";
+    if (liveDirectMode == null) return chosen;
+    const effective = liveDirectMode ? "HF Q" : "TUNER";
+    if (liveDirect.value === "auto") return `AUTO · ${effective}`;
+    return chosen === effective ? chosen : `${chosen} → ${effective}`;
+  }
   function paintVfo() {
     liveVfo.textContent = formatVfo(liveCenter);
-    liveSub.textContent = `${backendName(liveBackendValue)} · ${liveModeValue.toUpperCase()} · ${liveDirect.value === "2" ? "HF Q" : "TUNER"} · step ${fmt.num(liveStep, 0)} Hz`;
+    liveSub.textContent = `${backendName(liveBackendValue)} · ${liveModeValue.toUpperCase()} · ${directLabel()} · step ${fmt.num(liveStep, 0)} Hz`;
   }
   function paintModeButtons() {
     for (const button of liveModeRow.querySelectorAll("button")) {
@@ -605,6 +748,7 @@ export async function render(root, params = {}) {
     paintModeButtons();
     paintVfo();
     liveSend({ cmd: "tune", freq_mhz: liveCenter / 1e6, mode: liveModeValue,
+      rate: Number(liveRateIn.value) || 1.024,
       squelch: Number(liveSquelchIn.value) || 0, gain: Number(liveGainIn.value) || 40 });
   }
   for (const [value, label] of liveModes) {
@@ -903,6 +1047,10 @@ export async function render(root, params = {}) {
     liveHistory = [];
     liveSpec = null;
     liveBounds = { min: -120, max: -10 };
+    liveDirectMode = null;
+    liveFatal = false;
+    liveWarning.style.display = "none";
+    liveWarning.textContent = "";
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const qs = new URLSearchParams({
       backend: liveBackendValue, freq_mhz: String(liveCenter / 1e6), mode: liveModeValue,
@@ -927,16 +1075,34 @@ export async function render(root, params = {}) {
         if (frame.type === "status") {
           liveAudioRate = Number(frame.audio_rate) || 48000;
           liveBackendValue = frame.backend || liveBackendValue;
-          if (frame.status === "reconnecting") {
+          if (frame.direct_mode !== undefined && frame.direct_mode !== null) {
+            liveDirectMode = Number(frame.direct_mode) || 0;
+          }
+          if (frame.status === "retuning") {
+            liveStatus.textContent = "TUNING…";
+          } else if (frame.status === "reconnecting") {
             liveStatus.textContent = "RECONNECTING…";
+          } else if (frame.status === "stopped") {
+            stopLive();
+            liveStatus.textContent = liveFatal ? "STOPPED · receiver error" : "STOPPED";
           } else {
             liveStatus.textContent = `LIVE · ${backendName(liveBackendValue)} · ${fmt.num(frame.rate / 1e6, 3)} Msps`;
+          }
+          if (frame.warning) {
+            liveWarning.textContent = frame.warning;
+            liveWarning.style.display = "";
+          } else if (!liveFatal) {
+            liveWarning.style.display = "none";
           }
           paintVfo();
         } else if (frame.type === "spectrum") {
           acceptLiveSpectrum(frame);
         } else if (frame.type === "error") {
-          liveStatus.textContent = `ERROR · ${frame.error}`;
+          liveFatal = !!frame.fatal;
+          const shortError = String(frame.error || "SDR error");
+          liveStatus.textContent = "ERROR";
+          liveWarning.textContent = shortError + (frame.fatal ? " Open DIAGNOSE for the full report." : "");
+          liveWarning.style.display = "";
           toast(frame.error || "SDR error", "error");
         }
       } else {
@@ -982,10 +1148,14 @@ export async function render(root, params = {}) {
     paintVfo();
   });
   liveDirect.addEventListener("change", () => {
+    liveDirectMode = null;
+    paintVfo();
     if (liveRunning) { stopLive(); setTimeout(startLive, 250); }
-    toast(liveDirect.value === "2"
-      ? "HF direct sampling Q selected — use 0.1–24 MHz with an HF antenna"
-      : "Tuner mode selected — 24 MHz and above");
+    toast(liveDirect.value === "auto"
+      ? "AUTO: HF direct-sampling Q below 24 MHz, R820T tuner at 24 MHz and above"
+      : liveDirect.value === "2"
+        ? "HF direct sampling Q selected — 0.1–24 MHz with an HF antenna on the Q branch"
+        : "Tuner mode selected — 24 MHz and above");
   });
   liveStepSel.addEventListener("change", () => { liveStep = Number(liveStepSel.value) || 1000; paintVfo(); });
   liveVolumeIn.addEventListener("input", () => {
@@ -1027,6 +1197,7 @@ export async function render(root, params = {}) {
     h("div", { class: "sdr-vfo-row" },
       h("div", { class: "sdr-vfo-main" },
         liveVfo,
+        liveSub,
         h("div", { class: "sdr-vfo-actions" },
           btn("◀", { size: "sm", tone: "ghost", onClick: () => tuneBy(-liveStep) }),
           btn("▶", { size: "sm", tone: "ghost", onClick: () => tuneBy(liveStep) }),
@@ -1038,8 +1209,10 @@ export async function render(root, params = {}) {
         liveSBox,
         h("div", { class: "row wrap gap-6 mt-6" }, livePlay, liveStopBtn, liveScanBtn, liveRecBtn, liveFull))),
     liveModeRow,
+    liveBandRow,
     liveGrid,
     liveReadout,
+    liveWarning,
     h("div", { class: "sdr-cockpit-controls" },
       field("RATE (Msps)", liveRateIn),
       field("RTL GAIN", liveGainIn),
@@ -1064,7 +1237,7 @@ export async function render(root, params = {}) {
     h("div", { class: "sdr-keyhint tiny muted" },
       "CLICK FREQUENCY TO TYPE · CLICK SPECTRUM TO TUNE · WHEEL = STEP · ↑/↓ OR ←/→ = STEP · M = MODE · SPACE = STOP"),
     h("div", { class: "tiny muted" },
-      "R820T tuner: 24 MHz and above · HF Q direct: 0.1–24 MHz with an HF antenna. AIO V2 uses the Q branch."),
+      "AUTO selects HF Q below 24 MHz and the R820T tuner at 24 MHz and above. HF Q needs an HF antenna on the Q branch; AIO V2 uses that path."),
   );
   paneReceiver.appendChild(panel({
     title: "Receiver",
@@ -1085,9 +1258,7 @@ export async function render(root, params = {}) {
     { value: "rtl", label: "RTL-SDR (0.9–3.2 Msps)" },
     { value: "rtl_tcp", label: "Network rtl_tcp" },
   ], String(store.settings?.sdr_backend || "auto"));
-  const capDirect = select([
-    { value: "0", label: "Tuner 24 MHz+" }, { value: "2", label: "HF direct Q" },
-  ], String(store.settings?.sdr_direct_sampling || "0") === "2" ? "2" : "0");
+  const capDirect = select(directOptions(), directValue(store.settings));
   const capDemod = select(DEMODS, DEMODS.some((d) => d.value === paramMode) ? paramMode : "nfm");
   const capName = input({ type: "text", placeholder: "optional label", maxlength: "120" });
   const capKeepIq = checkbox("Keep IQ file (large; enables TX replay)", false);
@@ -1175,9 +1346,7 @@ export async function render(root, params = {}) {
   const srvFreq = input({ type: "number", value: "100.0", step: "0.0001", min: "0.1", max: "6000" });
   const srvRate = input({ type: "number", value: "2.4", step: "0.05", min: "0.9", max: "3.2" });
   const srvGain = input({ type: "number", value: String(store.settings?.sdr_rtl_gain ?? 40), min: "0", max: "62" });
-  const srvDirect = select([
-    { value: "0", label: "Tuner 24 MHz+" }, { value: "2", label: "HF direct Q" },
-  ], String(store.settings?.sdr_direct_sampling || "0") === "2" ? "2" : "0");
+  const srvDirect = select(directOptions(), directValue(store.settings));
   const srvStatus = h("div", { class: "tiny muted", text: "Not running." });
   const srvStart = btn("SHARE RTL-SDR", { size: "sm", tone: "primary", icon: "play", onClick: async () => {
     try {
@@ -1186,7 +1355,7 @@ export async function render(root, params = {}) {
         freq_hz: Number(srvFreq.value) * 1e6, rate: Number(srvRate.value) * 1e6,
         gain: Number(srvGain.value) || 40, ppm: Number(store.settings?.sdr_ppm) || 0,
         bias: !!store.settings?.sdr_bias_tee,
-        direct: srvDirect.value === "2",
+        direct: srvDirect.value,
       });
       paintServer(out);
     } catch (err) { toast(err.message, "error"); }
@@ -1396,7 +1565,7 @@ export async function render(root, params = {}) {
         name: capName.value.trim(),
         backend: capBackend.value,
         host: netHost.value.trim(), port: Number(netPort.value) || 1234,
-        direct: capDirect.value === "2",
+        direct: capDirect.value,
       });
       showJob(job);
       clearInterval(pollTimer);
@@ -1618,6 +1787,78 @@ export async function render(root, params = {}) {
       txBody.appendChild(btn("ARM REPLAY", { tone: "danger", icon: "send", onClick: () => openTx(iqRecs.find((r) => String(r.id) === sel.value) || iqRecs[0]) }));
     }
   }
+  /* ------------------------------------------------------------ diagnose */
+  const diagBtn = btn("RUN SDR DIAGNOSE", { tone: "primary", icon: "terminal" });
+  const diagOut = h("div", { class: "tiny muted mt-8",
+    text: "Collects the exact RTL/HackRF error: process user and groups, USB nodes, rtl_test output, a short real capture, busy SDR processes and the effective HF/tuner mode." });
+  let diagBusy = false;
+
+  function showDiagnose(out) {
+    const errors = (out.sections || []).filter((s) => s.status === "error").length;
+    const warnings = (out.sections || []).filter((s) => s.status === "warn").length;
+    const pre = h("pre", {
+      style: "white-space:pre-wrap;word-break:break-word;max-height:62vh;overflow:auto;font-size:11px;line-height:1.45;margin:0",
+      text: out.text || "No diagnostic output",
+    });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const m = modal({
+      title: "SDR diagnostic report",
+      sub: `${out.backend || "auto"} · ${fmt.num((out.frequency_hz || 0) / 1e6, 4)} MHz · ${errors} error(s), ${warnings} warning(s)`,
+      wide: true,
+      body: h("div", { class: "col" },
+        h("div", { class: "row wrap gap-6" },
+          badge(`${errors} ERRORS`, errors ? "red" : "green"),
+          badge(`${warnings} WARNINGS`, warnings ? "amber" : "muted")),
+        pre),
+      actions: [
+        btn("COPY", { icon: "copy", onClick: async () => {
+          try { await navigator.clipboard.writeText(out.text || ""); toast("Diagnostic report copied"); }
+          catch { toast("Clipboard unavailable; use SAVE TXT", "warn"); }
+        } }),
+        btn("SAVE TXT", { icon: "download", onClick: () => {
+          const url = URL.createObjectURL(new Blob([out.text || ""], { type: "text/plain" }));
+          const a = h("a", { href: url, download: `darksec-sdr-diagnose-${stamp}.txt` });
+          document.body.appendChild(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
+        } }),
+        btn("CLOSE", { tone: "ghost", onClick: () => m.close() }),
+      ],
+    });
+  }
+
+  async function runDiagnose() {
+    if (diagBusy) return;
+    diagBusy = true;
+    diagBtn.disabled = true;
+    diagOut.className = "tiny muted mt-8";
+    diagOut.textContent = "Running rtl_test and a short capture…";
+    try {
+      const out = await api.get(`/api/sdr/diagnose?freq_mhz=${encodeURIComponent(liveCenter / 1e6)}`
+        + `&backend=${encodeURIComponent(liveBackendValue)}&direct=${encodeURIComponent(liveDirect.value)}`);
+      const errors = (out.sections || []).filter((s) => s.status === "error").length;
+      const warnings = (out.sections || []).filter((s) => s.status === "warn").length;
+      diagOut.className = `tiny mt-8 ${errors ? "danger-text" : "muted"}`;
+      diagOut.textContent = `${errors} error(s), ${warnings} warning(s) · ${out.backend || "auto"} · ${fmt.num((out.frequency_hz || 0) / 1e6, 4)} MHz · ${out.direct?.mode ? "HF Q" : "tuner"}`;
+      showDiagnose(out);
+    } catch (err) {
+      diagOut.className = "tiny danger-text mt-8";
+      diagOut.textContent = err.message || "Diagnose failed";
+      toast(err.message || "Diagnose failed", "error");
+    } finally {
+      diagBusy = false;
+      diagBtn.disabled = false;
+    }
+  }
+  diagBtn.addEventListener("click", runDiagnose);
+  lower.appendChild(panel({
+    title: "Diagnose receiver",
+    sub: "Exact rtl_sdr / rtl_test / USB failure report",
+    icon: "terminal",
+    body: h("div", { class: "col" },
+      h("div", { class: "row wrap" }, diagBtn),
+      diagOut),
+  }));
+
   lower.appendChild(panel({ title: "Transmit gate", sub: "Audited and confirmation-gated", icon: "warning", cls: "tx-gate", body: txBody }));
 
   function openTx(rec) {
