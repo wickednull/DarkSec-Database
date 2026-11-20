@@ -642,3 +642,34 @@ def test_sweep_stop_endpoint_is_safe_without_a_sweep(client):
     r = client.post("/api/sdr/sweep/stop", json={})
     assert r.status_code == 200
     assert r.json()["stopped"] is False
+
+
+def test_sdr_usb_ids_are_recognized():
+    from darksec import sdr
+
+    assert sdr._is_sdr_usb_id("1d50:6089")      # HackRF One
+    assert sdr._is_sdr_usb_id("0bda:2838")      # RTL2838
+    assert sdr._is_sdr_usb_id("0bda:2832")      # RTL2832
+    assert not sdr._is_sdr_usb_id("0bda:0129")  # Realtek card reader
+    assert not sdr._is_sdr_usb_id("8087:0026")  # Intel Bluetooth
+    assert not sdr._is_sdr_usb_id("")
+
+
+def test_guidance_does_not_warn_about_the_radio_that_is_connected():
+    from darksec import sdr
+
+    tools = {"rtl_test": "/usr/bin/rtl_test", "hackrf_info": "/usr/bin/hackrf_info",
+             "SoapySDRUtil": "/usr/bin/SoapySDRUtil"}
+    notes = sdr._platform_guidance({}, {"present": True, "connected": False},
+                                   {"present": True, "connected": True}, tools)
+    text = " ".join(n["text"] for n in notes)
+    assert "No RTL-SDR detected" in text
+    assert "no dongle was detected" not in text
+    assert all(n["level"] != "warn" for n in notes)
+
+    notes = sdr._platform_guidance({}, {"present": True, "connected": True},
+                                   {"present": True, "connected": False}, tools)
+    text = " ".join(n["text"] for n in notes)
+    assert "No HackRF detected" in text
+    assert "no HackRF responded" not in text
+    assert all(n["level"] != "warn" for n in notes)

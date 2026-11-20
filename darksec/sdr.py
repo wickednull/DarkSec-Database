@@ -281,13 +281,19 @@ def _platform_guidance(platform: dict, rtl: dict, hackrf: dict, tools: dict) -> 
     if not tools.get("rtl_test"):
         add("info", "RTL-SDR tools not installed. Debian/Ubuntu/Pi: `sudo apt install rtl-sdr`; Fedora: `sudo dnf install rtl-sdr`; Arch: `sudo pacman -S rtl-sdr`.")
     elif rtl.get("present") and not rtl.get("connected"):
-        add("warn", "RTL-SDR tools are installed but no dongle was detected. Check the USB-A port, cable and `lsusb` (look for 0bda:2838).")
-        add("info", "If the dongle is present but busy, stop gqrx/SDR++/rtl_tcp and add your user to `plugdev`. RTL-SDR udev rules come with the rtl-sdr package.")
-        add("info", "If `rtl_test` reports a DVB driver claim error, blacklist `dvb_usb_rtl28xxu` (and optionally `rtl2832`/`rtl2830`) in /etc/modprobe.d/ and replug.")
+        if hackrf.get("connected"):
+            add("info", "No RTL-SDR detected; the connected HackRF is used instead. RTL-SDR support stays available if one is plugged in.")
+        else:
+            add("warn", "RTL-SDR tools are installed but no dongle was detected. Check the USB-A port, cable and `lsusb` (look for 0bda:2838).")
+            add("info", "If the dongle is present but busy, stop gqrx/SDR++/rtl_tcp and add your user to `plugdev`. RTL-SDR udev rules come with the rtl-sdr package.")
+            add("info", "If `rtl_test` reports a DVB driver claim error, blacklist `dvb_usb_rtl28xxu` (and optionally `rtl2832`/`rtl2830`) in /etc/modprobe.d/ and replug.")
     if not tools.get("hackrf_info"):
         add("info", "HackRF tools not installed. Debian/Ubuntu: `sudo apt install hackrf`; build from greatscottgadgets/hackrf for the newest firmware tools.")
     elif hackrf.get("present") and not hackrf.get("connected"):
-        add("warn", "HackRF tools are installed but no HackRF responded. Check the USB cable, use a powered hub, and verify udev permissions.")
+        if rtl.get("connected"):
+            add("info", "No HackRF detected; the connected RTL-SDR is used instead.")
+        else:
+            add("warn", "HackRF tools are installed but no HackRF responded. Check the USB cable, use a powered hub, and verify udev permissions.")
     if not tools.get("SoapySDRUtil"):
         add("info", "Optional: install SoapySDR (`soapysdr-tools` plus a device module) for SDRplay, Airspy, LimeSDR and PlutoSDR inventory.")
     add("info", "Network SDR: on a Pi/uConsole run `rtl_tcp -a 0.0.0.0 -p 1234`, then point another DarkSec instance at its IP and port.")
@@ -324,6 +330,13 @@ def _parse_rtl_test(out: str) -> dict:
         "direct_sampling": int(direct.group(1)) if direct else 0,
         "error": error,
     }
+
+
+_SDR_USB_VIDPIDS = ("0bda:283", "1d50:60", "1d50:cc15")
+
+
+def _is_sdr_usb_id(vidpid: str) -> bool:
+    return any((vidpid or "").lower().startswith(prefix) for prefix in _SDR_USB_VIDPIDS)
 
 
 def detect(force: bool = False) -> dict:
@@ -1809,18 +1822,25 @@ def diagnose(freq_hz: float = 100_000_000.0, backend: str = "auto",
         sections[-1]["lines"].append("WARN: user is not in plugdev; RTL-SDR access may fail.")
 
     # USB inventory and permissions.
+    usb_map: dict[tuple[int, int], tuple[str, str]] = {}
     lsusb = shutil.which("lsusb")
     if lsusb:
-        _rc, out = _run([lsusb], 6)
-        rtl_lines = [ln for ln in out.splitlines()
-                     if any(k in ln.lower() for k in ("realtek", "0bda:2838", "0bda:2832", "hackrf", "1d50:6089"))]
-        section("USB devices", "ok" if rtl_lines else "warn",
-                rtl_lines or ["No RTL-SDR/HackRF USB entry found in lsusb."])
+        _rc, usb_out = _run([lsusb], 6)
+        for line in usb_out.splitlines():
+            m = re.match(r"Bus (\d+) Device (\d+): ID ([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\s*(.*)",
+                         line.strip())
+            if m:
+                usb_map[(int(m.group(1)), int(m.group(2)))] = (
+                    f"{m.group(3).lower()}:{m.group(4).lower()}", m.group(5).strip())
+        sdr_lines = [ln for ln in usb_out.splitlines()
+                     if any(k in ln.lower() for k in ("realtek", "0bda:283", "hackrf", "1d50:"))]
+        section("USB devices", "ok" if sdr_lines else "warn",
+                sdr_lines or ["No RTL-SDR/HackRF USB entry found in lsusb."])
     else:
         section("USB devices", "warn", ["lsusb is not installed (package: usbutils)."])
     usb_root = Path("/dev/bus/usb")
     if usb_root.exists():
-        rows = []
+        radio_rows = []
         denied = 0
         try:
             buses = sorted(usb_root.iterdir())[:12]
@@ -1839,18 +1859,37 @@ def diagnose(freq_hz: float = 100_000_000.0, backend: str = "auto",
                     if dev.is_dir():
                         continue
                     dev.stat()
-                except OSError:
+                    busno, devno = int(bus.name), int(dev.name)
+                except (OSError, ValueError):
                     continue
                 readable = os.access(dev, os.R_OK | os.W_OK)
+                if usb_map:
+                    vidpid, desc = usb_map.get((busno, devno), ("", ""))
+                    if not _is_sdr_usb_id(vidpid):
+                        # Root hubs, webcams, Bluetooth, fingerprint readers and
+                        # other root-only nodes are normal; listing them as
+                        # permission failures just buries the radio.
+                        continue
+                    radio_rows.append(
+                        f"{dev} {vidpid} {desc or 'SDR'} [{'rw' if readable else 'NO ACCESS'}]")
+                else:
+                    if devno == 1:
+                        continue
+                    radio_rows.append(f"{dev} [{'rw' if readable else 'NO ACCESS'}]")
                 if not readable:
                     denied += 1
-                rows.append(f"{dev} {'rw' if readable else 'NO ACCESS'}")
-        section("USB device nodes", "warn" if (denied or not rows) else "ok",
-                rows[:24] or ["No device nodes under /dev/bus/usb; the dongle is not enumerated here."])
+        if radio_rows:
+            section("USB device nodes", "warn" if denied else "ok", radio_rows)
+        else:
+            section("USB device nodes", "warn", [
+                "No RTL-SDR/HackRF device node: the radio is not enumerated.",
+                "Built-in devices and root hubs are root-only by design and are omitted here.",
+            ])
         if denied:
             section("USB permissions", "warn", [
-                f"{denied} USB node(s) are not writable by this user.",
-                "Install the rtl-sdr udev rules (or add your user to plugdev) and re-plug the dongle.",
+                f"{denied} SDR USB node(s) are not writable by this user.",
+                "Install the rtl-sdr udev rules (RTL-SDR) or the libhackrf udev rules (HackRF),",
+                "add your user to plugdev, then re-plug the radio.",
             ])
     else:
         section("/dev/bus/usb", "warn", ["Not present; USB devices cannot be opened from this environment."])
@@ -1876,12 +1915,13 @@ def diagnose(freq_hz: float = 100_000_000.0, backend: str = "auto",
     if tools.get("rtl_test"):
         rc, out = _run([tools["rtl_test"], "-t"], 10)
         ok = bool(rtl.get("connected"))
-        section("rtl_test", "ok" if ok else "error",
+        section("rtl_test", "ok" if ok else ("error" if chosen == "rtl" else "info"),
                 [f"exit code: {rc}",
                  f"device: {rtl.get('device_name') or 'not reported'}",
                  f"tuner: {rtl.get('tuner') or 'not reported'}",
                  f"direct sampling seen in output: {rtl.get('direct_sampling') or 0}",
                  "note: -t is a tuner benchmark; it never streams samples",
+                 *([] if ok else ["No RTL-SDR enumerated; informational when the chosen backend is not rtl."]),
                  *out.strip().splitlines()[-14:]])
     else:
         section("rtl_test", "error", ["rtl_test is not installed (package: rtl-sdr)."])
@@ -1924,8 +1964,36 @@ def diagnose(freq_hz: float = 100_000_000.0, backend: str = "auto",
         except Exception as exc:
             section("Short RTL capture", "error", [str(exc)])
     elif chosen == "hackrf":
-        section("HackRF info", "ok" if info.get("hackrf", {}).get("connected") else "error",
-                (info.get("hackrf", {}).get("raw") or "No hackrf_info output").splitlines()[-12:])
+        hk = info.get("hackrf") or {}
+        section("HackRF info", "ok" if hk.get("connected") else "error",
+                (hk.get("raw") or "No hackrf_info output").splitlines()[-12:])
+        if hk.get("connected") and tools.get("hackrf_transfer"):
+            rate = 2_000_000
+            cmd = [tools["hackrf_transfer"], "-r", os.devnull, "-f", str(int(freq_hz)),
+                   "-s", str(rate), "-n", str(rate * 2),
+                   "-l", str(int(float(settings.get("sdr_lna_gain") or 32))),
+                   "-g", str(int(float(settings.get("sdr_rx_gain") or 40))), "-a", "0"]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, timeout=12)
+                err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+                ok = proc.returncode == 0 and "MB/second" in err
+                friendly = _friendly_receiver_error(err)
+                section("Short HackRF capture", "ok" if ok else "error", [
+                    f"command: {' '.join(cmd)}",
+                    f"exit code: {proc.returncode}",
+                    *(friendly.splitlines() if friendly else []),
+                    *err.splitlines()[-6:],
+                ])
+            except subprocess.TimeoutExpired:
+                section("Short HackRF capture", "error", [
+                    f"Timed out after 12 s: {' '.join(cmd)}",
+                    "hackrf_info listed the board but no samples arrived.",
+                    "Stop any live receiver or ADS-B process, check the USB cable,",
+                    "and prefer a port on a different USB controller (hackrf_info",
+                    "warns when other devices share the bus).",
+                ])
+            except Exception as exc:
+                section("Short HackRF capture", "error", [str(exc)])
     elif chosen == "rtl_tcp":
         host = str(settings.get("sdr_rtl_tcp_host") or "").strip()
         port = int(settings.get("sdr_rtl_tcp_port") or 1234)

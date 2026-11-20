@@ -90,7 +90,15 @@ The AIO V2 uses an RTL2832U + R820T with an HF path wired to the **Q** direct-sa
 
 `rtl_test` reporting `No E4000 tuner found, aborting.` is normal for an R820T; it is not a fault. The useful lines are the device name, `R820T tuner`, the gain list and `Sampling at ...`.
 
-If the receiver reports an error instead of audio, open **Diagnose receiver** (SYSTEM tab or **DIAGNOSE** in the page header). It reports the process user and groups, USB nodes, `lsusb`, the full `rtl_test`/`hackrf_info` output, a short real capture at the tuned frequency, other programs that own the dongle, and the effective HF/tuner mode. **COPY** or **SAVE TXT** produces a report you can send without guessing.
+If the receiver reports an error instead of audio, open **Diagnose receiver** (SYSTEM tab or **DIAGNOSE** in the page header). It reports the process user and groups, USB nodes, `lsusb`, the full `rtl_test`/`hackrf_info` output, a short real capture at the tuned frequency (RTL-SDR or HackRF), other programs that own the dongle, and the effective HF/tuner mode. **COPY** or **SAVE TXT** produces a report you can send without guessing.
+
+`rtl_test -t` only benchmarks the tuner and never streams samples, so a passing `-t` does not prove the USB data path works. Test streaming on its own:
+
+```bash
+rtl_test -s 2400000        # Ctrl-C after a few seconds
+```
+
+`lost at least N bytes` means samples are flowing; silence plus no error means the endpoint is stalled (re-plug, wait 15–30 s, check power/cable).
 
 ## ADS-B / dump1090
 
