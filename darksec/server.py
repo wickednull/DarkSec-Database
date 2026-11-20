@@ -7415,4 +7415,14 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             return FileResponse(path, media_type="image/svg+xml")
         return Response(status_code=404)
 
+    @app.get("/sw.js")
+    def service_worker():
+        """No-cache install worker, allowed to control the whole origin."""
+        path = ui_dir / "sw.js"
+        if not path.exists():
+            return Response(status_code=404)
+        return FileResponse(path, media_type="application/javascript",
+                            headers={"Service-Worker-Allowed": "/",
+                                     "Cache-Control": "no-cache"})
+
     return app

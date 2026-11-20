@@ -1,21 +1,14 @@
 {
   "name": "DarkSec Survival Database",
-  "short_name": "SurvivalDB",
+  "short_name": "DarkSec",
   "start_url": ".",
   "display": "standalone",
-  "background_color": "#0d1117",
-  "theme_color": "#0d1117",
+  "background_color": "#050806",
+  "theme_color": "#050806",
   "description": "An offline-first survival database.",
   "icons": [
-    {
-      "src": "guide.png",
-      "sizes": "192x192",
-      "type": "image/png"
-    },
-    {
-      "src": "guide.png",
-      "sizes": "512x512",
-      "type": "image/png"
-    }
+    { "src": "ui/img/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "ui/img/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "ui/img/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

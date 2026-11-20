@@ -7,6 +7,13 @@
   <meta name="theme-color" content="#050806">
   <title>DARKSEC // NIGHTWATCH</title>
   <link rel="icon" href="/ui/img/favicon.svg" type="image/svg+xml">
+  <link rel="icon" type="image/png" sizes="192x192" href="/ui/img/icon-192.png">
+  <link rel="manifest" href="/ui/manifest.json">
+  <link rel="apple-touch-icon" sizes="180x180" href="/ui/img/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="DarkSec">
   <link rel="stylesheet" href="/ui/css/app.css?v=toggle-15">
 </head>
 <body>
@@ -118,5 +125,13 @@
   <div id="paletteRoot"></div>
 
   <script type="module" src="/ui/js/main.js?v=sdr-8"></script>
+  <script>
+    // Enables the Android "Install app" flow. No caching; see /sw.js.
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {});
+      });
+    }
+  </script>
 </body>
 </html>

@@ -256,6 +256,14 @@ code. **Easy access** is on by default: any device on the same private LAN can
 open the console without a token. Turn it off to require the printed token
 URL again. LAN ports and transport changes apply when saved.
 
+**Save it as an app.** The console ships a web app manifest and home-screen
+icons, so **Add to Home Screen** on iOS and **Install app / Add to Home screen**
+on Android uses the DarkSec emblem, opens without browser chrome (`standalone`)
+and keeps the dark theme. iOS uses the 180×180 `apple-touch-icon`; Android uses
+the 192/512 px icons plus a maskable icon for adaptive shapes. On plain-HTTP LAN
+addresses Android treats it as a bookmark shortcut (service workers need a
+secure context); use `--lan-tls` for a full installable app on the phone.
+
 Do **not** expose this to the public internet or run it on shared Wi-Fi. Easy
 access trusts every device on the LAN; there is no account system. OPSEC mode
 disables LAN access. For a Pi, run it on a private network/hotspot and use a

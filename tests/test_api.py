@@ -1317,3 +1317,33 @@ def test_delamain_personalities_are_selectable_and_editable(client):
                                     if p["id"] != "dispatcher"],
         "assistant_personality": "field",
     })
+
+
+def test_pwa_manifest_icons_and_service_worker_are_served(client):
+    manifest = client.get("/ui/manifest.json")
+    assert manifest.status_code == 200
+    data = manifest.json()
+    assert data["display"] == "standalone"
+    assert data["start_url"] == "/"
+    assert data["theme_color"] == "#050806"
+    sources = {icon["src"] for icon in data["icons"]}
+    assert {"/ui/img/icon-192.png", "/ui/img/icon-512.png",
+            "/ui/img/icon-maskable-512.png"} <= sources
+
+    for src in sources:
+        icon = client.get(src)
+        assert icon.status_code == 200
+        assert icon.headers["content-type"].startswith("image/png")
+
+    touch = client.get("/ui/img/apple-touch-icon.png")
+    assert touch.status_code == 200
+
+    page = client.get("/").text
+    assert 'rel="manifest" href="/ui/manifest.json"' in page
+    assert "apple-touch-icon" in page
+    assert "apple-mobile-web-app-capable" in page
+
+    worker = client.get("/sw.js")
+    assert worker.status_code == 200
+    assert worker.headers.get("service-worker-allowed") == "/"
+    assert "skipWaiting" in worker.text
