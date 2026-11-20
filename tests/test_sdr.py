@@ -721,6 +721,9 @@ def test_managed_adsb_drives_a_hackrf_through_readsb(monkeypatch, tmp_path):
         assert "--device-type=hackrf" in cmd
         assert "--device=ABC123" in cmd
         assert "--hackrf-vgagain=40" in cmd  # 41 dB quantised to the 2 dB VGA steps
+        # libhackrf uses 256 KiB transfers; readsb's 128 KiB default would
+        # discard half of every block and decode almost nothing.
+        assert "--sdr-buffer-size=256" in cmd
         assert "--write-json" in cmd and str(tmp_path) in cmd
         assert "--net-http-port" not in cmd and "--net" not in cmd
     finally:
@@ -771,3 +774,96 @@ def test_missing_websocket_backend_quiets_uvicorn_noise(monkeypatch):
     filters = [f for f in logger.filters if type(f).__name__ == "_DropWsNoise"]
     assert all(f.filter(other) for f in filters)
     assert not all(f.filter(noise) for f in filters)
+
+
+def test_adsb_status_surfaces_a_recent_wedge(monkeypatch, tmp_path):
+    from darksec import sdr
+
+    log = tmp_path / "dump1090.log"
+    log.write_text("readsb starting up.\n"
+                   "Lost 275 packets (-14993748.0 us) on USB\n"
+                   "SDR wedged, exiting!\n"
+                   "Abnormal exit. uptime: 0d 0h 17m 0.2s\n")
+    monkeypatch.setattr(sdr, "_adsb_feed", lambda port=None: None)
+    saved = dict(sdr._ADSB)
+    sdr._ADSB.update({"proc": None, "log": str(log), "dir": None,
+                      "last_error": "", "warning": ""})
+    try:
+        status = sdr.adsb_status()
+        assert "stopped unexpectedly" in status["note"]
+        assert "wedged" in status["note"].lower()
+    finally:
+        sdr._ADSB.clear()
+        sdr._ADSB.update(saved)
+
+
+def test_adsb_status_hints_when_no_messages_arrive(monkeypatch):
+    import time
+
+    from darksec import sdr
+
+    class Proc:
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(sdr, "_adsb_feed",
+                        lambda port=None: {"messages": 0, "aircraft": []})
+    saved = dict(sdr._ADSB)
+    sdr._ADSB.update({"proc": Proc(), "dir": "/tmp", "log": None, "warning": "",
+                      "last_error": "", "started_at": time.monotonic() - 300})
+    try:
+        status = sdr.adsb_status()
+        assert "No ADS-B messages" in status["hint"]
+        assert "1090 MHz antenna" in status["hint"]
+        assert status["messages"] == 0
+    finally:
+        sdr._ADSB.clear()
+        sdr._ADSB.update(saved)
+
+
+def test_adsb_spots_survive_stop_and_save_to_vault(client, monkeypatch):
+    from darksec import sdr
+
+    monkeypatch.setattr(sdr, "_last_spotted_write", 0.0)
+    monkeypatch.setattr(sdr, "_last_spotted_cleanup", 0.0)
+    client.post("/api/sdr/adsb/spotted/clear", json={})
+
+    sdr._remember_spotted([
+        {"hex": "abc123", "flight": "TEST1", "alt_baro": 10000, "gs": 250,
+         "track": 90, "lat": 40.0, "lon": -105.0},
+        {"hex": "def456", "flight": "", "alt_baro": "ground", "gs": 10,
+         "track": 180, "lat": 40.1, "lon": -105.1},
+    ])
+    rows = sdr.spotted_aircraft()
+    assert {r["hex"] for r in rows} == {"ABC123", "DEF456"}
+    assert any(r["alt_baro"] == "ground" for r in rows)
+
+    # Stopping the receiver no longer blanks the table.
+    monkeypatch.setattr(sdr, "_adsb_feed", lambda port=None: None)
+    snapshot = sdr.adsb_snapshot()
+    assert snapshot["live"] is False
+    assert {a["hex"] for a in snapshot["aircraft"]} == {"ABC123", "DEF456"}
+    assert snapshot["spotted_at"]
+
+    status = client.get("/api/vault/status").json()
+    if not status.get("configured"):
+        client.post("/api/vault/setup", json={"passphrase": "correct horse battery"})
+    client.post("/api/vault/unlock", json={"passphrase": "correct horse battery"})
+
+    saved = client.post("/api/sdr/adsb/save", json={"title": "test adsb spots"})
+    assert saved.status_code == 200
+    body = saved.json()
+    assert body["count"] == 2
+    notes = client.get("/api/notes").json()["items"]
+    note = next(n for n in notes if n["title"] == "test adsb spots")
+    assert "ABC123" in note["body"] and "DEF456" in note["body"]
+    assert "ground" in note["body"]
+
+    try:
+        cleared = client.post("/api/sdr/adsb/spotted/clear", json={})
+        assert cleared.status_code == 200
+        assert cleared.json()["deleted"] >= 2
+        assert sdr.spotted_aircraft() == []
+    finally:
+        client.delete(f"/api/notes/{body['id']}")
+        client.post("/api/vault/lock")

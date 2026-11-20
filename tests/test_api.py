@@ -1286,3 +1286,34 @@ def test_space_background_setting(client):
         assert client.get("/api/settings").json()["map_space_background"] is False
     finally:
         client.put("/api/settings", json={"map_space_background": old})
+
+
+def test_delamain_personalities_are_selectable_and_editable(client):
+    settings = client.get("/api/settings").json()
+    people = settings["assistant_personalities"]
+    assert isinstance(people, list) and len(people) >= 3
+    names = {p["name"] for p in people}
+    assert {"Field standard", "Dry wit", "Mentor"} <= names
+    assert settings["assistant_personality"] in {p["id"] for p in people}
+
+    dry = next(p for p in people if p["name"] == "Dry wit")
+    switched = client.put("/api/settings", json={"assistant_personality": dry["id"]}).json()
+    assert switched["assistant_system_prompt"] == dry["prompt"]
+
+    people.append({"id": "dispatcher", "name": "Dispatcher",
+                   "prompt": "Speak like a calm 1970s radio dispatcher."})
+    created = client.put("/api/settings", json={
+        "assistant_personalities": people,
+        "assistant_personality": "dispatcher",
+    }).json()
+    assert created["assistant_system_prompt"] == "Speak like a calm 1970s radio dispatcher."
+    assert any(p["id"] == "dispatcher" for p in created["assistant_personalities"])
+
+    assert client.put("/api/settings", json={"assistant_personalities": []}).status_code == 400
+
+    # Leave the shared test app on the default personality and list.
+    client.put("/api/settings", json={
+        "assistant_personalities": [p for p in created["assistant_personalities"]
+                                    if p["id"] != "dispatcher"],
+        "assistant_personality": "field",
+    })

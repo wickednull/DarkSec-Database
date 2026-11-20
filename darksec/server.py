@@ -2713,6 +2713,38 @@ def _announce_when_ready(port: int, token: str, handshake: bool, browser_url: st
             print(f"DarkSec: could not open browser: {exc}", flush=True)
 
 
+def _clean_personalities(value: Any) -> list[dict]:
+    """Validate and normalise Delamain personalities from the settings API."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            raise HTTPException(status_code=400,
+                                detail="assistant_personalities must be a JSON array")
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="assistant_personalities must be a list")
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in value[:12]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()[:60]
+        prompt = str(item.get("prompt") or "").strip()[:8000]
+        if not name or not prompt:
+            continue
+        pid = re.sub(r"[^a-z0-9_-]", "-", str(item.get("id") or "").strip().lower()).strip("-")[:40]
+        if not pid or pid in seen:
+            pid = f"p-{secrets.token_hex(3)}"
+            while pid in seen:
+                pid = f"p-{secrets.token_hex(3)}"
+        seen.add(pid)
+        out.append({"id": pid, "name": name, "prompt": prompt})
+    if not out:
+        raise HTTPException(status_code=400,
+                            detail="At least one personality with a name and prompt is required")
+    return out
+
+
 def create_app(port: int = 0, token: str | None = None, open_browser: bool = False,
                handshake: bool = False, no_index: bool = False,
                lan: bool = False, lan_ip: str | None = None,
@@ -3877,6 +3909,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 value = str(value)[:500]
             if key == "assistant_system_prompt":
                 value = str(value or "")[:8000]
+            if key == "assistant_personalities":
+                value = _clean_personalities(value)
+            if key == "assistant_personality":
+                value = str(value or "").strip()[:40]
             if key in ("assistant_timeout_sec", "assistant_num_ctx", "assistant_max_tokens"):
                 try:
                     iv = int(float(value))
@@ -3958,6 +3994,22 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 _tilecache.invalidate_cache_path(str(value or ""))
             if key == "lan_easy_access":
                 request.app.state.lan_easy_access = bool(value)
+        if {"assistant_personality", "assistant_personalities"} & set(payload):
+            items = d.get_setting("assistant_personalities") or []
+            if isinstance(items, str):
+                try:
+                    items = json.loads(items)
+                except Exception:
+                    items = []
+            items = [p for p in items if isinstance(p, dict)] if isinstance(items, list) else []
+            active_id = str(d.get_setting("assistant_personality") or "")
+            match = next((p for p in items if str(p.get("id") or "") == active_id), None)
+            if match is None and items:
+                match = items[0]
+                d.set_setting("assistant_personality", match.get("id"))
+            if match:
+                # The selected personality is the effective system prompt.
+                d.set_setting("assistant_system_prompt", str(match.get("prompt") or ""))
         if ({"lan_port", "lan_tls"} & set(payload)
                 and d.get_setting("lan_access_enabled")
                 and not d.get_setting("opsec_mode")):
@@ -6764,6 +6816,36 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         out = sdr.stop_adsb()
         db(request).audit("ADSB_STOP", "dump1090 stopped")
         return out
+
+    @app.get("/api/sdr/adsb/spotted")
+    def sdr_adsb_spotted():
+        items = sdr.spotted_aircraft()
+        return {"items": items, "count": len(items),
+                "spotted_at": items[0].get("last_seen") if items else ""}
+
+    @app.post("/api/sdr/adsb/spotted/clear")
+    def sdr_adsb_spotted_clear(request: Request):
+        out = sdr.clear_spotted()
+        db(request).audit("ADSB_SPOTTED_CLEAR", f"{out.get('deleted', 0)} aircraft")
+        return out
+
+    @app.post("/api/sdr/adsb/save")
+    def sdr_adsb_save(request: Request, payload: dict = Body(default={})):
+        """Save the spotted-aircraft table as an encrypted vault note."""
+        rows = sdr.spotted_aircraft()
+        require(bool(rows), "No spotted aircraft to save yet", 400)
+        v = vault(request)
+        require(v.unlocked(), "Vault is locked", 403)
+        title = str(payload.get("title") or "").strip()[:200] or f"ADS-B spots {utcnow()}"
+        body = sdr.spotted_markdown(rows, title=title)
+        cipher = v.encrypt(json.dumps({"title": title, "body": body,
+                                       "tags": "adsb,sdr,spots"}))
+        new_id = db(request).insert("notes", {"ts": utcnow(), "updated": utcnow(),
+                                              "title": "ENCRYPTED", "cipher": cipher,
+                                              "tags": ""})
+        db(request).audit("ADSB_SAVE_VAULT", f"{len(rows)} aircraft -> note #{new_id}")
+        return {"id": new_id, "count": len(rows),
+                "last_seen": rows[0].get("last_seen") if rows else ""}
 
     @app.post("/api/sdr/tx")
     def sdr_tx(request: Request, payload: dict = Body(...)):

@@ -1695,22 +1695,33 @@ export async function render(root, params = {}) {
   const adsbTable = h("div", { class: "col" });
   const adsbStart = btn("START ADS-B", { tone: "primary", icon: "play" });
   const adsbStopBtn = btn("STOP", { icon: "stop", tone: "danger" });
+  const adsbVaultBtn = btn("SAVE TO VAULT", { tone: "ghost", icon: "lock", disabled: true });
+  const adsbClearBtn = btn("CLEAR SPOTS", { tone: "ghost", icon: "trash", disabled: true });
   let adsbPoll = null;
+  let lastAdsb = null;
 
   function paintAdsb(data) {
+    lastAdsb = data;
     const status = data?.status || {};
     const running = !!status.running;
+    const saved = data?.live === false;
     adsbStatus.className = `tiny ${status.warning ? "warn-text" : status.available ? "muted" : "danger-text"}`;
     if (status.port && document.activeElement !== adsbPort) adsbPort.value = String(status.port);
-    const mode = status.managed ? "MANAGED" : status.external ? "EXTERNAL FEED" : running ? "RUNNING" : "STOPPED";
+    const mode = status.managed ? "MANAGED" : status.external ? "EXTERNAL FEED"
+      : saved ? "LAST SPOTTED" : running ? "RUNNING" : "STOPPED";
     const binaryLabel = status.binary ? PathlessName(status.binary)
       : status.external ? "external feed" : "dump1090/readsb not installed";
     const feedLabel = status.managed && status.json_dir
       ? "local JSON" : `${status.host || "127.0.0.1"}:${status.port || adsbPort.value}`;
+    const spottedLabel = saved && data?.spotted_at ? ` · last ${fmt.ago(data.spotted_at)}` : "";
     adsbStatus.textContent = `${mode} · ${binaryLabel} · ${feedLabel} · ${status.aircraft_count ?? (data?.aircraft || []).length} aircraft`
+      + (status.messages != null && running ? ` · ${status.messages} msgs` : "")
+      + spottedLabel
       + (status.warning ? ` · ${status.warning}` : "");
     adsbStart.disabled = running;
     adsbStopBtn.disabled = !status.managed;
+    adsbVaultBtn.disabled = !(data?.aircraft || []).length;
+    adsbClearBtn.disabled = saved ? !(data?.aircraft || []).length : false;
     adsbTable.replaceChildren();
     const aircraft = data?.aircraft || [];
     if (!status.available) {
@@ -1718,7 +1729,9 @@ export async function render(root, params = {}) {
       return;
     }
     if (!aircraft.length) {
-      adsbTable.appendChild(emptyState("No aircraft heard", "The receiver is running; waiting for ADS-B messages. Reception needs a 1090 MHz antenna with a clear view of the sky.", "satellite"));
+      adsbTable.appendChild(emptyState("No aircraft heard",
+        status.hint || "The receiver is running; waiting for ADS-B messages. Reception needs a 1090 MHz antenna with a clear view of the sky.",
+        "satellite"));
       return;
     }
     const table = h("table", { class: "data" });
@@ -1784,12 +1797,49 @@ export async function render(root, params = {}) {
   async function stopAdsb() {
     try {
       await api.post("/api/sdr/adsb/stop", {});
-      toast("ADS-B receiver stopped");
+      toast("ADS-B receiver stopped; spotted aircraft are kept");
+      await loadAdsb();
+    } catch (err) { toast(err.message, "error"); }
+  }
+  function saveAdsbToVault() {
+    const count = (lastAdsb?.aircraft || []).length;
+    if (!count) { toast("No spotted aircraft to save", "warn"); return; }
+    const title = input({ value: `ADS-B spots ${new Date().toISOString().slice(0, 16).replace("T", " ")}` });
+    const m = modal({
+      title: "Save spotted aircraft",
+      sub: `${count} aircraft · encrypted vault note`,
+      narrow: true,
+      body: h("div", { class: "col" },
+        field("TITLE", title),
+        h("div", { class: "hint", text: "Saves the full spot table (ICAO, flight, altitude, speed, track, position, last seen) as an encrypted vault note. The vault must be unlocked." })),
+      actions: [
+        btn("CANCEL", { tone: "ghost", onClick: () => m.close() }),
+        btn("SAVE TO VAULT", { tone: "primary", icon: "lock", onClick: async () => {
+          try {
+            const out = await api.post("/api/sdr/adsb/save", { title: title.value.trim() });
+            m.close();
+            toast(`Saved ${out.count} aircraft to the vault (note #${out.id})`);
+          } catch (err) { toast(err.message, "error", 9000); }
+        } }),
+      ],
+    });
+  }
+  async function clearAdsbSpots() {
+    const ok = await confirmDialog({
+      title: "Clear spotted aircraft", confirmText: "CLEAR", danger: true,
+      message: "Delete the saved ADS-B spot history? Vault notes are not affected.",
+    });
+    if (!ok) return;
+    try {
+      const out = await api.post("/api/sdr/adsb/spotted/clear", {});
+      toast(`Cleared ${out.deleted || 0} spotted aircraft`);
       await loadAdsb();
     } catch (err) { toast(err.message, "error"); }
   }
   adsbStart.addEventListener("click", startAdsb);
   adsbStopBtn.addEventListener("click", stopAdsb);
+  adsbVaultBtn.addEventListener("click", saveAdsbToVault);
+  adsbClearBtn.addEventListener("click", clearAdsbSpots);
   paintAdsb(adsb);
   if (adsb?.status?.running) adsbPoll = setInterval(loadAdsb, 5000);
 
@@ -1798,7 +1848,7 @@ export async function render(root, params = {}) {
       field("EXTERNAL PORT", adsbPort, "Optional feed port. Managed dump1090 uses local JSON, so it cannot conflict with the LAN server."),
       field("GAIN", adsbGain),
       field("DEVICE", adsbDevice)),
-    h("div", { class: "row wrap mt-8" }, adsbStart, adsbStopBtn),
+    h("div", { class: "row wrap mt-8" }, adsbStart, adsbStopBtn, adsbVaultBtn, adsbClearBtn),
     adsbStatus,
     h("div", { class: "mt-8" }, adsbTable),
     h("div", { class: "hint mt-10",

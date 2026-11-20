@@ -111,7 +111,16 @@ DarkSec picks the backend from the connected radio:
 | RTL-SDR | `dump1090-fa` / `dump1090-mutability` / `readsb` | Native 2.4 Msps decoding; gain is the RTL tuner gain. |
 | HackRF | `readsb` (3.14+) | `dump1090` has no HackRF backend. readsb uses `--device-type=hackrf`; the **GAIN** field maps to the HackRF VGA (0–62, 2 dB steps) and LNA is fixed at 40 dB. |
 
-A managed start fails with a readable message instead of a bare "no supported devices" when the radio and the decoder do not match. Reception needs a **1090 MHz** antenna with a clear view of the sky; a 2 m/70 cm whip will hear only nearby aircraft. For more range on a HackRF, run readsb with `--hackrf-enable-ampgain` (≈11 dB, can overload near strong transmitters).
+A managed start fails with a readable message instead of a bare "no supported devices" when the radio and the decoder do not match.
+
+Two HackRF-specific details matter:
+
+* **Buffer size.** libhackrf hands over 256 KiB transfers, but readsb's default SDR buffer is 128 KiB. Without `--sdr-buffer-size=256`, readsb discards half of every block, logs `weirdness: ... unusual size` and `Lost N packets ... (ppm: -500000)`, and decodes almost nothing. DarkSec passes the flag automatically; if you run readsb by hand, include it.
+* **Gain.** readsb fixes the HackRF LNA at 40 dB (max) and maps DarkSec's **GAIN** to the VGA stage. In a strong-signal city, `--hackrf-enable-ampgain` usually makes things worse; leave it off unless the antenna is weak and distant.
+
+Reception needs a **dedicated 1090 MHz antenna** with a clear view of the sky. A 2 m/70 cm whip is a poor match at 1090 MHz and can yield only a message or two per minute with no positions. The ADS-B panel shows the live message count and warns after two minutes without messages.
+
+Spotted aircraft are **kept after you stop the receiver**. Every aircraft seen is upserted into the local `adsb_spotted` table (last 7 days, up to 2,000 aircraft), so pressing **STOP** shows `LAST SPOTTED · …` with the previous table instead of a blank panel, and the history survives a restart. **SAVE TO VAULT** writes the whole table (ICAO, flight, altitude, speed, track, position, last seen) as an encrypted vault note; **CLEAR SPOTS** deletes only the local history, never vault notes. The spot history is removed by a panic purge. Check the log for `Lost packets`/`SDR wedged` (USB power, a shared hub, or an extension cable) before blaming the decoder.
 
 ## HackRF
 

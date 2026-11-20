@@ -162,7 +162,7 @@ class Vault:
             "patients", "vitals", "medication_log", "weather_log", "water_log", "power_log", "rad_log",
             "waypoints", "tracks", "radio_log", "notes", "incidents", "inventory",
             "caches", "comms_plans", "opords", "trip_plans", "sdr_jobs", "sdr_recordings",
-            "checklist_state", "assistant_messages", "assistant_conversations",
+            "adsb_spotted", "checklist_state", "assistant_messages", "assistant_conversations",
         ]
         for table in tables:
             self.db.execute(f"DELETE FROM {table}")

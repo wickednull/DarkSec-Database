@@ -252,6 +252,19 @@ CREATE TABLE IF NOT EXISTS sdr_recordings (
     size INTEGER DEFAULT 0, note TEXT DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS adsb_spotted (
+    hex TEXT PRIMARY KEY,
+    flight TEXT,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    alt_baro REAL,
+    gs REAL,
+    track REAL,
+    lat REAL,
+    lon REAL,
+    messages INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS feeds (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -371,6 +384,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_waypoints_created ON waypoints(created DESC)",
     "CREATE INDEX IF NOT EXISTS idx_trip_status ON trip_plans(status, departure_at)",
     "CREATE INDEX IF NOT EXISTS idx_sdr_recordings_ts ON sdr_recordings(ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_adsb_spotted_last ON adsb_spotted(last_seen DESC)",
     "CREATE INDEX IF NOT EXISTS idx_library_category ON library_docs(category)",
     "CREATE INDEX IF NOT EXISTS idx_library_rel_path ON library_docs(rel_path)",
     "CREATE INDEX IF NOT EXISTS idx_feeds_kind ON feeds(kind)",
@@ -684,6 +698,41 @@ class Database:
             except Exception:
                 pass
             self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_prompt_v5',?)",
+                         (utcnow(),))
+
+        # Named Delamain personalities: three editable prompts. Seed once,
+        # keeping an operator's existing custom prompt as the first one.
+        if self.one("SELECT 1 FROM meta WHERE key='assistant_personalities_v1'") is None:
+            try:
+                items = self.get_setting("assistant_personalities")
+                if isinstance(items, str):
+                    try:
+                        items = json.loads(items)
+                    except Exception:
+                        items = []
+                defaults = config.default_personalities()
+                if not isinstance(items, list) or not items:
+                    items = defaults
+                else:
+                    items = [p for p in items if isinstance(p, dict)]
+                # _seed adds the new key with the defaults before migrations
+                # run. In that case keep the operator's existing prompt as the
+                # first personality instead of silently replacing it.
+                cur = str(self.get_setting("assistant_system_prompt", "") or "").strip()
+                standard = config.default_settings()["assistant_system_prompt"]
+                if items == defaults and cur and cur != standard:
+                    items = [dict(p) for p in items]
+                    items[0]["prompt"] = cur
+                    self.set_setting("assistant_personalities", items)
+                elif not self.get_setting("assistant_personalities"):
+                    self.set_setting("assistant_personalities", items)
+                active = str(self.get_setting("assistant_personality", "") or "").strip()
+                if not any(str(p.get("id") or "") == active for p in items if isinstance(p, dict)):
+                    self.set_setting("assistant_personality", items[0]["id"])
+                    self.set_setting("assistant_system_prompt", items[0].get("prompt", ""))
+            except Exception:
+                pass
+            self.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_personalities_v1',?)",
                          (utcnow(),))
 
         # Longer answers by default: early installs saved 512 tokens, which cuts

@@ -27,6 +27,7 @@ import time
 import uuid
 import wave
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -52,7 +53,8 @@ _DETECT_TTL = 20.0
 HF_TUNER_MAX_HZ = 24_000_000
 _RTL_TCP_SERVER: dict = {"proc": None, "port": None, "bind": None, "started": None}
 _ADSB: dict = {"proc": None, "binary": None, "port": None, "started": None,
-               "log": None, "warning": "", "dir": None, "last_error": ""}
+               "started_at": None, "log": None, "warning": "", "dir": None,
+               "last_error": ""}
 _ADSB_FEED_CACHE: dict = {"at": 0.0, "port": None, "data": None}
 
 
@@ -1417,6 +1419,8 @@ def adsb_status() -> dict:
     port = int(_ADSB.get("port") or cfg["port"])
     data = _adsb_feed(port)
     external = bool(data is not None and not ours)
+    if data and ours:
+        _remember_spotted(data.get("aircraft") or [])
     exited = ""
     if proc is not None and proc.poll() is not None:
         tail = ""
@@ -1426,6 +1430,31 @@ def adsb_status() -> dict:
             pass
         exited = (f"The ADS-B receiver exited with code {proc.returncode}."
                   + (f" {tail[:400]}" if tail else " Check the ADS-B log."))
+    elif proc is None and not external:
+        # The process object is gone after a restart, but the log still shows
+        # the last failure. Surface a recent crash instead of pretending idle.
+        log_path = Path(_ADSB.get("log") or (Path(config.LOG_DIR) / "dump1090.log"))
+        try:
+            if log_path.exists() and time.time() - log_path.stat().st_mtime < 3600:
+                tail_lines = log_path.read_text(errors="replace").splitlines()[-4:]
+                if any(("wedged" in ln.lower()) or ("abnormal exit" in ln.lower())
+                       for ln in tail_lines):
+                    exited = ("The last ADS-B receiver run stopped unexpectedly: "
+                              + " | ".join(tail_lines)[-400:])
+        except OSError:
+            pass
+
+    hint = ""
+    messages = int((data or {}).get("messages") or 0)
+    aircraft = len((data or {}).get("aircraft") or [])
+    if ours and data is not None and messages == 0 and not external:
+        started_at = _ADSB.get("started_at")
+        if started_at and time.monotonic() - started_at > 120:
+            hint = ("No ADS-B messages after two minutes. 1090 MHz needs a dedicated "
+                    "1090 MHz antenna with a clear view of the sky; a VHF/UHF whip or a "
+                    "disconnected antenna hears almost nothing. Keep the HackRF away "
+                    "from strong FM/TV transmitters and check that readsb reports "
+                    "samples without 'Lost packets' in the log.")
     return {
         "available": data is not None,
         "running": bool(ours or external),
@@ -1442,7 +1471,9 @@ def adsb_status() -> dict:
         "json_dir": str(_ADSB.get("dir") or ""),
         "feed": (str(Path(_ADSB.get("dir")) / "aircraft.json") if ours and _ADSB.get("dir")
                  else _adsb_url(port)),
-        "aircraft_count": len((data or {}).get("aircraft") or []),
+        "aircraft_count": aircraft,
+        "messages": messages,
+        "hint": hint,
         "note": (exited or _ADSB.get("last_error") or _ADSB.get("warning")
                  or ("A feed is already running outside DarkSec; showing it." if external
                      else "Start the ADS-B receiver (dump1090 for an RTL-SDR, readsb for a HackRF)." if not ours
@@ -1488,7 +1519,11 @@ def start_adsb(port: int | None = None, gain: int | None = None,
         cmd = [binary, "--device-type=hackrf"]
         if serial:
             cmd.append(f"--device={serial}")
+        # libhackrf hands over 256 KiB transfers; readsb's default 128 KiB SDR
+        # buffer makes it throw away half of every block (and report -500000 ppm
+        # "Lost N packets" while decoding almost nothing).
         cmd += [f"--hackrf-vgagain={_quantize_gain(gain, 62, 2)}",
+                "--sdr-buffer-size=256",
                 "--write-json", str(json_dir), "--quiet"]
     elif "readsb" in base:
         cmd = [binary, "--device-type", "rtlsdr", "--device", str(device),
@@ -1519,11 +1554,12 @@ def start_adsb(port: int | None = None, gain: int | None = None,
             pass
         message = f"The ADS-B receiver exited with code {proc.returncode}. {tail[:500]}".strip()
         _ADSB.update({"proc": None, "binary": binary, "port": port, "started": None,
-                      "log": str(log_path), "warning": "", "dir": None,
-                      "last_error": message})
+                      "started_at": None, "log": str(log_path), "warning": "",
+                      "dir": None, "last_error": message})
         raise ValueError(message)
     _ADSB.update({"proc": proc, "binary": binary, "port": port,
-                  "started": utcnow(), "log": str(log_path), "warning": "",
+                  "started": utcnow(), "started_at": time.monotonic(),
+                  "log": str(log_path), "warning": "",
                   "dir": str(json_dir), "last_error": ""})
     return adsb_status()
 
@@ -1540,24 +1576,145 @@ def stop_adsb() -> dict:
             except Exception:
                 pass
     _ADSB.update({"proc": None, "binary": None, "port": None, "started": None,
-                  "log": None, "warning": "", "dir": None, "last_error": ""})
+                  "started_at": None, "log": None, "warning": "", "dir": None,
+                  "last_error": ""})
     return adsb_status()
 
 
+ADSB_SPOTTED_KEEP_DAYS = 7
+ADSB_SPOTTED_MAX = 2000
+_last_spotted_write = 0.0
+_last_spotted_cleanup = 0.0
+
+
+def _remember_spotted(aircraft: list[dict]) -> None:
+    """Persist every aircraft seen so the table survives stopping the receiver."""
+    global _last_spotted_write
+    if not aircraft:
+        return
+    now = time.monotonic()
+    if now - _last_spotted_write < 3.0:
+        return
+    _last_spotted_write = now
+    stamp = utcnow()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=ADSB_SPOTTED_KEEP_DAYS))
+    cutoff = cutoff.replace(microsecond=0).isoformat()
+    try:
+        db = Database()
+        try:
+            for a in aircraft:
+                hexid = str(a.get("hex") or "").strip().upper()
+                if not hexid:
+                    continue
+                alt = a.get("alt_baro")
+                if not isinstance(alt, (int, float)):
+                    alt = str(alt) if alt == "ground" else None
+                db.execute(
+                    "INSERT INTO adsb_spotted(hex,flight,first_seen,last_seen,alt_baro,gs,track,lat,lon,messages) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,1) "
+                    "ON CONFLICT(hex) DO UPDATE SET "
+                    "flight=COALESCE(NULLIF(excluded.flight,''),adsb_spotted.flight),"
+                    "last_seen=excluded.last_seen,"
+                    "alt_baro=COALESCE(excluded.alt_baro,adsb_spotted.alt_baro),"
+                    "gs=COALESCE(excluded.gs,adsb_spotted.gs),"
+                    "track=COALESCE(excluded.track,adsb_spotted.track),"
+                    "lat=COALESCE(excluded.lat,adsb_spotted.lat),"
+                    "lon=COALESCE(excluded.lon,adsb_spotted.lon),"
+                    "messages=adsb_spotted.messages+1",
+                    (hexid, str(a.get("flight") or "").strip(), stamp, stamp, alt,
+                     a.get("gs"), a.get("track"), a.get("lat"), a.get("lon")),
+                )
+            global _last_spotted_cleanup
+            if now - _last_spotted_cleanup > 60.0:
+                _last_spotted_cleanup = now
+                db.execute("DELETE FROM adsb_spotted WHERE last_seen < ?", (cutoff,))
+                db.execute(
+                    "DELETE FROM adsb_spotted WHERE hex IN ("
+                    "SELECT hex FROM adsb_spotted ORDER BY last_seen DESC "
+                    "LIMIT -1 OFFSET ?)", (ADSB_SPOTTED_MAX,))
+        finally:
+            db.close()
+    except Exception:
+        # A spot history is a convenience; never break the live feed for it.
+        pass
+
+
+def spotted_aircraft(limit: int = 300) -> list[dict]:
+    """Aircraft seen recently, newest last-seen first (survives a stop/restart)."""
+    try:
+        db = Database()
+        try:
+            rows = db.query(
+                "SELECT hex,flight,first_seen,last_seen,alt_baro,gs,track,lat,lon,messages "
+                "FROM adsb_spotted ORDER BY last_seen DESC LIMIT ?", (int(limit),))
+        finally:
+            db.close()
+    except Exception:
+        return []
+    return [dict(r) for r in rows]
+
+
+def clear_spotted() -> dict:
+    """Delete the saved ADS-B spot history (vault notes are untouched)."""
+    try:
+        db = Database()
+        try:
+            with db.transaction() as conn:
+                before = conn.execute("SELECT COUNT(*) FROM adsb_spotted").fetchone()[0]
+                conn.execute("DELETE FROM adsb_spotted")
+        finally:
+            db.close()
+    except Exception:
+        return {"deleted": 0}
+    return {"deleted": int(before or 0)}
+
+
+def spotted_markdown(rows: list[dict], title: str = "", saved_at: str | None = None) -> str:
+    """Render the spot history as a vault note body."""
+    saved = saved_at or utcnow()
+    lines = [f"# {title or 'ADS-B spotted aircraft'}", "",
+             f"Saved: {saved}", f"Aircraft: {len(rows)}"]
+    if rows:
+        lines.append(f"Last spot: {rows[0].get('last_seen') or '—'}")
+    lines += ["", "| ICAO | Flight | Altitude | GS | Track | Position | Last seen |",
+              "| --- | --- | --- | --- | --- | --- | --- |"]
+    for r in rows:
+        alt = r.get("alt_baro")
+        alt_text = f"{alt} ft" if isinstance(alt, (int, float)) else (str(alt) if alt else "—")
+        gs = r.get("gs")
+        gs_text = f"{round(float(gs))} kt" if isinstance(gs, (int, float)) else "—"
+        trk = r.get("track")
+        trk_text = f"{round(float(trk))}°" if isinstance(trk, (int, float)) else "—"
+        lat, lon = r.get("lat"), r.get("lon")
+        pos = (f"{float(lat):.4f}, {float(lon):.4f}"
+               if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) else "—")
+        lines.append(f"| {r.get('hex') or '—'} | {(r.get('flight') or '—')} | {alt_text} | "
+                     f"{gs_text} | {trk_text} | {pos} | {r.get('last_seen') or '—'} |")
+    return "\n".join(lines)
+
+
 def adsb_snapshot() -> dict:
-    """Read the local dump1090/readsb JSON feed and include manager status."""
+    """Read the live dump1090/readsb feed, or the last saved spot history."""
     status = adsb_status()
     data = _adsb_feed(status.get("port"))
-    if not data:
-        return {"available": False, "aircraft": [], "status": status,
-                "note": "Start the ADS-B receiver from the ADS-B tab "
-                        "(dump1090 for an RTL-SDR, readsb for a HackRF)."}
-    aircraft = []
-    for a in data.get("aircraft", [])[:100]:
-        aircraft.append({"hex": a.get("hex"), "flight": (a.get("flight") or "").strip(),
-                         "alt_baro": a.get("alt_baro"), "gs": a.get("gs"),
-                         "track": a.get("track"), "lat": a.get("lat"), "lon": a.get("lon")})
-    return {"available": True, "aircraft": aircraft, "source": "dump1090", "status": status}
+    if data:
+        aircraft = []
+        for a in data.get("aircraft", [])[:200]:
+            aircraft.append({"hex": a.get("hex"), "flight": (a.get("flight") or "").strip(),
+                             "alt_baro": a.get("alt_baro"), "gs": a.get("gs"),
+                             "track": a.get("track"), "lat": a.get("lat"), "lon": a.get("lon")})
+        return {"available": True, "live": True, "aircraft": aircraft,
+                "source": "dump1090", "status": status}
+    spotted = spotted_aircraft()
+    if spotted:
+        return {"available": True, "live": False, "aircraft": spotted,
+                "source": "saved", "spotted_at": spotted[0].get("last_seen") or "",
+                "note": (f"Receiver stopped. Showing {len(spotted)} aircraft last spotted "
+                         "while it was running."),
+                "status": status}
+    return {"available": False, "live": False, "aircraft": [], "status": status,
+            "note": "Start the ADS-B receiver from the ADS-B tab "
+                    "(dump1090 for an RTL-SDR, readsb for a HackRF)."}
 
 
 # --------------------------------------------------------------------------

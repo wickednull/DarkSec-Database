@@ -48,7 +48,7 @@ export async function render(root) {
     { id: "position", num: "02", label: "Position", icon: "compass", title: "Position & GPS",
       desc: "Manual coordinates, verified fixes and browser-assisted phone GPS." },
     { id: "radio", num: "03", label: "Radio & network", icon: "radio", title: "Radio & network",
-      desc: "LAN/mobile listeners, SDR gain defaults and the transmit interlock." },
+      desc: "SDR gain defaults, the transmit interlock and LAN/mobile listeners." },
     { id: "maps", num: "04", label: "Maps & library", icon: "map", title: "Maps & library",
       desc: "Offline tile sources, vector layers and the document archive." },
     { id: "intel", num: "05", label: "Feeds & overlays", icon: "globe", title: "Feeds & overlays",
@@ -355,7 +355,8 @@ export async function render(root) {
     ),
   });
   addSectionHead("radio");
-  grid.appendChild(lanPanel);
+  // lanPanel is appended after the SDR column below, so the receiver and its
+  // transmit interlock are the first thing in the Radio section.
   lanInput.disabled = !!settings.opsec_mode;
 
   async function saveLanSettings() {
@@ -467,7 +468,7 @@ export async function render(root) {
     title: "Transmit gate",
     sub: "Hard interlock · audited",
     icon: "warning",
-    cls: "tx-gate span-2",
+    cls: "tx-gate",
     body: h("div", { class: "col" },
       h("div", { class: "tx-warning" },
         h("strong", { text: "TRANSMITTING IS A LEGAL ACT. " }),
@@ -480,7 +481,10 @@ export async function render(root) {
         btn("APPLY TX SETTINGS", { tone: "danger", icon: "lock", onClick: () => saveTx(txEnabled, txAttested) })),
       h("div", { class: "tiny muted", text: "Every individual transmission still requires the exact word TRANSMIT plus a fresh attestation in the SDR module." })),
   });
-  grid.appendChild(txPanel);
+  // Keep the transmit interlock directly under the receiver settings. A nested
+  // column means it follows the receiver even when the LAN panel is taller.
+  grid.appendChild(h("div", { class: "col gap-14" }, radioPanel, txPanel));
+  grid.appendChild(lanPanel);
 
   /* ---------------------------------------------------------------- map */
   const tileSource = select([
@@ -710,8 +714,115 @@ export async function render(root) {
   const assistantTimeout = input({ type: "number", step: "1", min: "5", max: "1800", value: settings.assistant_timeout_sec ?? 300 });
   const assistantCtx = input({ type: "number", step: "512", min: "512", max: "32768", value: settings.assistant_num_ctx ?? 4096 });
   const assistantMaxTokens = input({ type: "number", step: "512", min: "128", max: "8192", value: settings.assistant_max_tokens ?? 2048 });
-  const assistantPrompt = h("textarea", { class: "input mono", rows: "5", style: { width: "100%", resize: "vertical" } });
-  assistantPrompt.value = settings.assistant_system_prompt || "";
+  function parsePersonalities(raw) {
+    let list = raw;
+    if (typeof list === "string") {
+      try { list = JSON.parse(list); } catch { list = []; }
+    }
+    if (!Array.isArray(list)) list = [];
+    return list
+      .filter((p) => p && typeof p === "object" && p.name && p.prompt)
+      .map((p) => ({ id: String(p.id || ""), name: String(p.name), prompt: String(p.prompt) }));
+  }
+  let personalities = parsePersonalities(settings.assistant_personalities);
+  if (!personalities.length) {
+    personalities = [{ id: "field", name: "Field standard", prompt: String(settings.assistant_system_prompt || "") }];
+  }
+  let activePersonalityId = String(settings.assistant_personality || personalities[0].id);
+  if (!personalities.some((p) => p.id === activePersonalityId)) activePersonalityId = personalities[0].id;
+  const activePersonality = () => personalities.find((p) => p.id === activePersonalityId) || personalities[0];
+
+  const personalitySelect = select(personalities.map((p) => ({ value: p.id, label: p.name })), activePersonalityId);
+  const personalityEdit = btn("EDIT", { size: "sm", icon: "edit", onClick: () => editPersonality() });
+  const personalityNew = btn("NEW", { size: "sm", icon: "plus", onClick: () => newPersonality() });
+  const personalityDelete = btn("DELETE", { size: "sm", tone: "ghost", icon: "trash", onClick: () => deletePersonality() });
+  const assistantPrompt = h("textarea", { class: "input mono", rows: "7", style: { width: "100%", resize: "vertical" } });
+  assistantPrompt.value = activePersonality().prompt;
+
+  function paintPersonality() {
+    personalitySelect.replaceChildren(...personalities.map((p) => h("option", { value: p.id, text: p.name })));
+    personalitySelect.value = activePersonalityId;
+    assistantPrompt.value = activePersonality().prompt;
+    personalityDelete.disabled = personalities.length <= 1;
+  }
+  async function persistPersonalities(label) {
+    try {
+      await store.saveSettings({
+        assistant_personalities: personalities.map((p) => ({ id: p.id, name: p.name, prompt: p.prompt })),
+        assistant_personality: activePersonalityId,
+        assistant_system_prompt: activePersonality().prompt,
+      });
+      toast(label);
+      status = await store.loadStatus({ force: true });
+    } catch (err) { toast(err.message || "Could not save personality", "error"); }
+  }
+  function personalityDialog({ title, sub, name = "", prompt = "", onSave }) {
+    const nameIn = input({ value: name, maxlength: 60 });
+    const promptIn = h("textarea", { class: "input mono", rows: "10", style: { width: "100%", resize: "vertical" } });
+    promptIn.value = prompt;
+    const m = modal({
+      title, sub,
+      body: h("div", { class: "col gap-10" },
+        field("NAME", nameIn, "Shown in the personality selector."),
+        field("SYSTEM PROMPT", promptIn, "How Delamain should sound and what to prioritise. Safety and tool rules still apply.")),
+      actions: [
+        btn("CANCEL", { tone: "ghost", onClick: () => m.close() }),
+        btn("SAVE", { tone: "primary", icon: "save", onClick: () => {
+          const nm = nameIn.value.trim();
+          const pr = promptIn.value.trim();
+          if (!nm || !pr) { toast("Personality name and prompt are both required", "warn"); return; }
+          m.close();
+          onSave(nm, pr);
+        } }),
+      ],
+    });
+  }
+  function newPersonality() {
+    personalityDialog({
+      title: "New personality",
+      sub: "Add another voice and behavior preset for Delamain",
+      prompt: assistantPrompt.value,
+      onSave: async (nm, pr) => {
+        const id = `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        personalities.push({ id, name: nm, prompt: pr });
+        activePersonalityId = id;
+        paintPersonality();
+        await persistPersonalities(`Personality “${nm}” added`);
+      },
+    });
+  }
+  function editPersonality() {
+    const p = activePersonality();
+    personalityDialog({
+      title: "Edit personality", sub: p.name,
+      name: p.name, prompt: p.prompt,
+      onSave: async (nm, pr) => {
+        p.name = nm;
+        p.prompt = pr;
+        paintPersonality();
+        await persistPersonalities(`Personality “${nm}” saved`);
+      },
+    });
+  }
+  async function deletePersonality() {
+    const p = activePersonality();
+    if (personalities.length <= 1) { toast("Keep at least one personality", "warn"); return; }
+    const ok = await confirmDialog({
+      title: "Delete personality", confirmText: "DELETE", danger: true,
+      message: `Delete “${p.name}”? The remaining personalities are untouched.`,
+    });
+    if (!ok) return;
+    personalities = personalities.filter((x) => x.id !== p.id);
+    activePersonalityId = personalities[0].id;
+    paintPersonality();
+    await persistPersonalities(`Personality “${p.name}” deleted`);
+  }
+  personalitySelect.addEventListener("change", async () => {
+    activePersonalityId = personalitySelect.value;
+    assistantPrompt.value = activePersonality().prompt;
+    await persistPersonalities(`Personality: ${activePersonality().name}`);
+  });
+  paintPersonality();
   const assistantSafety = settingsDetails("Safety, privacy and tool boundaries",
     h("div", { class: "col gap-6" },
       h("div", { class: "callout small", text: "Thinking/reasoning can improve complex answers but is much slower on CPU-only systems (especially Qwen 3.5). If responses stall, disable thinking or increase timeout." }),
@@ -742,7 +853,11 @@ export async function render(root) {
         h("div", { class: "form-grid" },
           field("Temperature", assistantTemp), field("Timeout (sec)", assistantTimeout, "Per-request Ollama read timeout. The chat waits this long for activity before reporting a stall."),
           field("Context tokens", assistantCtx), field("Max reply tokens", assistantMaxTokens, "Raise for long guides. 2048 is the default; higher is slower on CPU. If answers stop mid-sentence, increase this.")),
-        field("System prompt", assistantPrompt, "Guides behavior/safety. Keep it practical; avoid secrets."),
+        h("div", { class: "settings-subhead", text: "Personality" }),
+        h("div", { class: "row wrap gap-6", style: { alignItems: "flex-end" } },
+          h("div", { style: { flex: "1 1 220px" } }, field("ACTIVE", personalitySelect)),
+          personalityEdit, personalityNew, personalityDelete),
+        field("SYSTEM PROMPT", assistantPrompt, "Edit the selected personality here, or use EDIT/NEW to manage the list. Saved with SAVE ASSISTANT."),
         h("div", { class: "settings-actions" },
           btn("SAVE ASSISTANT", { tone: "primary", icon: "save", onClick: saveAssistant }),
           btn("TEST CONNECTION", { icon: "refresh", onClick: testAssistant }),
@@ -753,6 +868,7 @@ export async function render(root) {
   grid.appendChild(assistantPanel);
 
   async function saveAssistant() {
+    activePersonality().prompt = assistantPrompt.value;
     await saveSimple({
       assistant_enabled: assistantEnabled.querySelector("input").checked,
       assistant_think: assistantThink.querySelector("input").checked,
@@ -771,6 +887,8 @@ export async function render(root) {
       assistant_num_ctx: Number(assistantCtx.value),
       assistant_max_tokens: Number(assistantMaxTokens.value),
       assistant_system_prompt: assistantPrompt.value,
+      assistant_personality: activePersonalityId,
+      assistant_personalities: personalities.map((p) => ({ id: p.id, name: p.name, prompt: p.prompt })),
     }, "Assistant settings saved");
   }
   async function testAssistant() {

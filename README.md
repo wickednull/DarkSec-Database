@@ -189,6 +189,15 @@ Set the endpoint (default `http://127.0.0.1:11434`) and model name in
 **Settings → Assistant**. Only local endpoints are used; nothing is sent to a
 cloud service. The assistant can include cached intelligence context when asked.
 
+**Personalities** — Settings → Assistant has three editable starting
+personalities for Delamain (**Field standard**, **Dry wit**, **Mentor**). Pick
+one from the selector to change how it sounds and what it emphasises; **EDIT**
+changes the selected personality, **NEW** adds another (up to 12), and **DELETE**
+removes one (at least one is kept). The selected personality's text is the
+system prompt sent to the model, and the hard safety/tool limits are present in
+every starting prompt. An existing custom system prompt from an older install is
+kept as the first personality during the upgrade.
+
 Delamain can also act on the local system when you ask it to: it can save an entry
 to the mission log, save an encrypted vault note (vault must be unlocked), and
 search or OCR the indexed document library. These tools are rate-limited server-side
@@ -360,6 +369,11 @@ tuner, gain steps, CPU temperature, Raspberry Pi throttling flags and
 uConsole/AIO V2 setup steps. See [docs/SDR.md](docs/SDR.md) for hardware
 setup, uConsole USB-A/GPIO details, Raspberry Pi power advice, `rtl_tcp`
 sharing and WebSDR etiquette.
+
+Spotted aircraft are kept when the receiver is stopped: the ADS-B panel shows
+the last table (`LAST SPOTTED`) from the local `adsb_spotted` history (7 days,
+up to 2,000 aircraft) instead of going blank, and **SAVE TO VAULT** writes it
+to an encrypted vault note. **CLEAR SPOTS** removes only the local history.
 
 Live audio and the spectrum cockpit use a WebSocket. The server needs the
 `websockets` package (installed by `./install.sh`, listed in
