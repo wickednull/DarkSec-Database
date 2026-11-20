@@ -292,6 +292,19 @@ and only then the bundled overview. Cached tiles from unrelated providers are
 never mixed into the same view. Missing high-zoom tiles therefore stay aligned
 with roads, waypoints and intel instead of turning into a patchwork.
 
+Tile serving is built to stay responsive on slow storage and slow networks. A
+small in-memory LRU serves recently used tiles (including parents used for
+overzoom) without touching the SD card, and recent misses are remembered for a
+few seconds so offline panning does not re-stat every provider for every tile.
+Missing tiles are queued to two background workers and cached for the next
+request; a tile request waits at most 0.75 s for a provider before painting a
+cached parent, so the map never blocks on the upstream rate limit or a
+20-second network timeout. The browser retries a missing tile quickly (about
+1 s, then 4 s, then 9 s), so newly downloaded detail appears without a reload.
+Cache counts and sizes are revalidated in the background and the previous
+values are returned immediately, which keeps the panel usable with very large
+caches.
+
 The 3D globe uses a starfield space background beyond Earth's limb. Toggle
 **Settings → Offline maps → Starfield space background** if you prefer a plain
 background. The starfield is local CSS, makes no network requests, and keeps

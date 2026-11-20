@@ -95,7 +95,7 @@ def test_basemap_prefers_active_source_over_bundled(tmp_path, monkeypatch, clien
     cached = tilecache.tile_path(10, 1, 1, "usgs_topo")
     cached.parent.mkdir(parents=True, exist_ok=True)
     cached.write_bytes(PNG)
-    monkeypatch.setattr(tilecache, "is_online", lambda: False)
+    monkeypatch.setattr(tilecache, "is_online", lambda **_: False)
     try:
         assert client.put("/api/settings", json={"tile_source": "usgs_topo"}).status_code == 200
         r = client.get("/api/map/tiles/10/1/1.png")
@@ -117,7 +117,7 @@ def test_basemap_overzooms_active_source_parent(tmp_path, monkeypatch, client):
     parent = tilecache.tile_path(9, 1, 1, "usgs_topo")
     parent.parent.mkdir(parents=True, exist_ok=True)
     parent.write_bytes(JPEG)
-    monkeypatch.setattr(tilecache, "is_online", lambda: False)
+    monkeypatch.setattr(tilecache, "is_online", lambda **_: False)
     try:
         assert client.put("/api/settings", json={"tile_source": "usgs_topo"}).status_code == 200
         r = client.get("/api/map/tiles/10/2/2.png")
@@ -282,7 +282,7 @@ def test_offline_pack_from_another_source_is_used_as_fallback(tmp_path, monkeypa
     tile = tilecache.tile_path(8, 57, 97, "esri_street")
     tile.parent.mkdir(parents=True, exist_ok=True)
     tile.write_bytes(JPEG)
-    monkeypatch.setattr(tilecache, "is_online", lambda: False)
+    monkeypatch.setattr(tilecache, "is_online", lambda **_: False)
     try:
         client.put("/api/settings", json={"tile_source": "usgs_topo"})
         r = client.get("/api/map/tiles/8/57/97.png")
@@ -301,3 +301,80 @@ def test_label_overlay_is_never_a_basemap_fallback(tmp_path, monkeypatch):
     label.write_bytes(JPEG)
     assert tilecache.find_cached(8, 57, 97) is None
     assert tilecache.get_cached(8, 57, 97, "esri_labels_roads") == JPEG
+
+
+def test_tile_bytes_are_memoised_in_ram(tmp_path, monkeypatch):
+    from darksec import config, tilecache
+
+    monkeypatch.setattr(config, "MAP_TILE_DIR", tmp_path)
+    path = tilecache.tile_path(9, 7, 8, "esri_imagery")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(JPEG)
+    assert tilecache.get_cached(9, 7, 8, "esri_imagery") == JPEG
+    path.unlink()  # the second read must come from RAM
+    assert tilecache.get_cached(9, 7, 8, "esri_imagery") == JPEG
+
+
+def test_warm_tile_queues_in_the_background(tmp_path, monkeypatch):
+    import time
+    from darksec import config, tilecache
+
+    monkeypatch.setattr(config, "MAP_TILE_DIR", tmp_path)
+    monkeypatch.setattr(tilecache, "is_online", lambda block=True: True)
+    calls = []
+
+    def slow_fetch(z, x, y, source="esri_imagery"):
+        calls.append((z, x, y))
+        time.sleep(0.05)
+        path = tilecache.tile_path(z, x, y, source)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(JPEG)
+        return JPEG
+
+    monkeypatch.setattr(tilecache, "fetch_tile", slow_fetch)
+    started = time.perf_counter()
+    assert tilecache.warm_tile(12, 40, 50, "esri_imagery", wait=0.0) is None
+    assert time.perf_counter() - started < 0.1
+
+    deadline = time.time() + 3
+    while time.time() < deadline and not tilecache.is_cached(12, 40, 50, "esri_imagery"):
+        time.sleep(0.02)
+    assert calls == [(12, 40, 50)]
+    assert tilecache.get_cached(12, 40, 50, "esri_imagery") == JPEG
+
+
+def test_offline_probe_never_blocks_tile_requests(monkeypatch):
+    import time
+    from darksec import tilecache
+
+    tilecache.reset_runtime_caches()
+
+    def slow_head(*_a, **_k):
+        time.sleep(0.4)
+        raise OSError("offline")
+
+    monkeypatch.setattr(tilecache.requests, "head", slow_head)
+    started = time.perf_counter()
+    assert tilecache.is_online(block=False) is False
+    assert time.perf_counter() - started < 0.2
+    time.sleep(0.6)
+    assert tilecache.is_online(block=False) is False
+
+
+def test_tile_route_does_not_wait_for_a_stalled_provider(tmp_path, monkeypatch, client):
+    import time
+    from darksec import config, tilecache
+
+    monkeypatch.setattr(config, "MAP_TILE_DIR", tmp_path)
+    monkeypatch.setattr(tilecache, "TILE_FETCH_WAIT", 0.05)
+    monkeypatch.setattr(tilecache, "is_online", lambda block=True: True)
+
+    def stalled(*_a, **_k):
+        time.sleep(3)
+        return None
+
+    monkeypatch.setattr(tilecache, "fetch_tile", stalled)
+    started = time.perf_counter()
+    response = client.get("/api/map/tiles/11/1801/901.png")
+    assert time.perf_counter() - started < 1.0
+    assert response.status_code in (200, 404)

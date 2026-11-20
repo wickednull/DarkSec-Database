@@ -27,6 +27,15 @@ from fastapi.testclient import TestClient  # noqa: E402
 from darksec.server import COOKIE, create_app  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _reset_tile_runtime_caches():
+    """Tiles are memoised in RAM; tests swap cache roots, so start clean."""
+    from darksec import tilecache
+
+    tilecache.reset_runtime_caches()
+    yield
+
+
 @pytest.fixture(scope="session")
 def app():
     return create_app(token="test-token", no_index=True)

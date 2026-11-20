@@ -1083,7 +1083,11 @@ export async function render(root, params = {}) {
     const img = new Image();
     img.decoding = "async";
     img.onload = () => draw();
-    img.onerror = () => { img.dataset.failed = "1"; };
+    img.onerror = () => {
+      // The server queues missing tiles in the background; let a later redraw
+      // try again instead of pinning a permanently blank label tile.
+      labelTileCache.delete(key);
+    };
     img.src = `/api/map/cache/tiles/${source}/${z}/${x}/${y}.png?v=5&s=${source}&b=${cacheGeneration}`;
     labelTileCache.set(key, img);
     if (labelTileCache.size > 520) {
@@ -1102,15 +1106,18 @@ export async function render(root, params = {}) {
       img.dataset.failed = "1";
       // A tile that failed while offline should get another chance after the
       // connection returns instead of staying blank for the whole session.
+      // The server also queues missing tiles in the background, so short
+      // retries pick them up quickly once the fetch lands.
       const attempts = Number(img.dataset.retries || 0);
-      if (attempts >= 2) return;
+      if (attempts >= 3) return;
       img.dataset.retries = String(attempts + 1);
+      const delay = [1200, 4000, 9000][attempts] || 9000;
       setTimeout(() => {
         if (tileCache.get(key) === img) {
           tileCache.delete(key);
           draw();
         }
-      }, 15000);
+      }, delay);
     };
     img.src = `/api/map/tiles/${z}/${x}/${y}.png?v=5&s=${encodeURIComponent(activeSource)}&b=${cacheGeneration}${tileRevision ? `&r=${encodeURIComponent(tileRevision)}` : ""}`;
     tileCache.set(key, img);

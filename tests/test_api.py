@@ -1187,7 +1187,7 @@ def test_map_tile_falls_back_to_bundled_overview(client, monkeypatch, tmp_path):
     tile = config.MAP_TILE_DIR / "overview" / "5" / "5" / "11.png"
     tile.parent.mkdir(parents=True, exist_ok=True)
     tile.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
-    monkeypatch.setattr(server.tilecache, "is_online", lambda: False)
+    monkeypatch.setattr(server.tilecache, "is_online", lambda **_: False)
     try:
         r = client.get("/api/map/tiles/15/5799/11950.png")
         assert r.status_code == 200

@@ -26,10 +26,12 @@ import copy
 import hashlib
 import math
 import os
+import queue
 import shutil
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -123,6 +125,10 @@ DEFAULT_SOURCE = "esri_imagery"
 USER_AGENT = "DarkSec-FieldConsole/2.0 (offline survival map cache; +https://github.com/darksec)"
 REQUEST_TIMEOUT = 20
 MIN_REQUEST_INTERVAL = 0.12  # seconds between upstream requests
+# How long a tile request waits for a queued upstream fetch before painting a
+# cached parent instead. Small enough to keep the map responsive; most fast
+# providers answer inside it.
+TILE_FETCH_WAIT = 0.75
 
 # Error images returned with HTTP 200. Reject by hash and by marker text.
 _ERROR_HASHES = {
@@ -137,37 +143,62 @@ _jobs_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 # Paths & cache
 # ---------------------------------------------------------------------------
-_CACHE_ROOT_TTL = 5.0
+_CACHE_ROOT_TTL = 30.0
 _cache_root_lock = threading.RLock()
+_cache_root_refresh = threading.Lock()
 _cache_root_cache: dict = {"at": 0.0, "raw": None}
 
 
 def configured_cache_path() -> str:
-    """Operator-selected tile folder; empty means the bundled cache folder."""
+    """Operator-selected tile folder; empty means the bundled cache folder.
+
+    Stale-while-revalidate: a tile request never waits on the settings database.
+    One thread refreshes; everyone else keeps using the previous value.
+    """
     now = time.monotonic()
     with _cache_root_lock:
         if _cache_root_cache["raw"] is not None and now - _cache_root_cache["at"] < _CACHE_ROOT_TTL:
             return str(_cache_root_cache["raw"])
-    raw = ""
+        previous = _cache_root_cache["raw"]
+    if not _cache_root_refresh.acquire(blocking=False):
+        return str(previous or "")
     try:
-        from .db import Database
-
-        d = Database()
-        try:
-            raw = str(d.get_setting("map_cache_path", "") or "")
-        finally:
-            d.close()
-    except Exception:
         raw = ""
-    with _cache_root_lock:
-        _cache_root_cache.update({"at": now, "raw": raw})
-    return raw
+        try:
+            from .db import Database
+
+            d = Database()
+            try:
+                raw = str(d.get_setting("map_cache_path", "") or "")
+            finally:
+                d.close()
+        except Exception:
+            raw = str(previous or "")
+        with _cache_root_lock:
+            _cache_root_cache.update({"at": now, "raw": raw})
+        return raw
+    finally:
+        _cache_root_refresh.release()
 
 
 def invalidate_cache_path(raw: str | None = None) -> None:
     with _cache_root_lock:
         _cache_root_cache.update({"at": time.monotonic(), "raw": raw})
+    reset_runtime_caches()
     _invalidate_stats()
+
+
+def reset_runtime_caches() -> None:
+    """Forget in-memory tiles, probe state and directories proven to exist."""
+    global _online_checked_at, _online_probed, _online_probing, _online_value
+    _invalidate_mem()
+    with _cache_root_lock:
+        _ready_dirs.clear()
+    with _online_lock:
+        _online_checked_at = 0.0
+        _online_probed = False
+        _online_probing = False
+        _online_value = False
 
 
 def cache_root() -> Path:
@@ -176,15 +207,25 @@ def cache_root() -> Path:
     return Path(raw).expanduser() if raw else (config.MAP_TILE_DIR / "cache")
 
 
+_ready_dirs: set[str] = set()
+
+
 def tile_cache_dir(source: str = DEFAULT_SOURCE) -> Path:
     """Return the on-disk cache directory for source, creating it if possible."""
     base = cache_root() / _safe(source)
-    try:
-        base.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        # The USB drive may be unplugged or read-only. Reads will miss and
-        # writes will fail cleanly; the map falls back to other sources.
-        pass
+    key = str(base)
+    with _cache_root_lock:
+        ready = key in _ready_dirs
+    if not ready:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # The USB drive may be unplugged or read-only. Reads will miss and
+            # writes will fail cleanly; the map falls back to other sources.
+            pass
+        else:
+            with _cache_root_lock:
+                _ready_dirs.add(key)
     return base
 
 
@@ -232,7 +273,9 @@ def _safe(name: str) -> str:
 
 def tile_path(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Path:
     ext = TILE_SOURCES.get(source, {}).get("ext", "png")
-    return tile_cache_dir(source) / str(z) / str(x) / f"{y}.{ext}"
+    # Deliberately no mkdir here: this is the per-tile read hot path. Writers
+    # create the parent directory themselves (see fetch_tile).
+    return cache_root() / _safe(source) / str(z) / str(x) / f"{y}.{ext}"
 
 
 def _looks_like_image(data: bytes) -> bool:
@@ -247,30 +290,128 @@ def _looks_like_image(data: bytes) -> bool:
     return False
 
 
-def _read_valid_tile(path: Path) -> Optional[bytes]:
-    """Read a cached tile, deleting HTML/error/corrupt files on sight."""
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return None
-    if _looks_like_image(data):
-        return data
-    try:
-        path.unlink()
-    except OSError:
-        pass
-    return None
-
-
 def is_cached(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> bool:
-    p = tile_path(z, x, y, source)
-    return p.exists() and p.stat().st_size > 0
+    key = (source, int(z), int(x), int(y))
+    if _mem_get(key) is not None:
+        return True
+    if _neg_get(key):
+        return False
+    try:
+        return tile_path(z, x, y, source).stat().st_size > 0
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Hot-tile memory cache and miss cache
+# ---------------------------------------------------------------------------
+# A 256x256 tile is ~10 KB, so a viewport plus its parents fits comfortably in
+# RAM. This removes repeated SD-card reads while panning back over the same
+# ground and makes the multi-source fallback scans cheap.
+_MEM_MAX_BYTES = 24 * 1024 * 1024
+_MEM_MAX_ENTRY = 2 * 1024 * 1024
+_mem: "OrderedDict[tuple, bytes]" = OrderedDict()
+_mem_bytes = 0
+_mem_lock = threading.Lock()
+
+# Remember recent misses for a short while. Offline overzoom otherwise re-stats
+# every source and zoom ancestor for every missing tile on every redraw.
+_NEG_TTL = 8.0
+_NEG_MAX = 8192
+_neg: dict[tuple, float] = {}
+_neg_lock = threading.Lock()
+
+
+def _mem_get(key: tuple):
+    global _mem_bytes
+    with _mem_lock:
+        data = _mem.get(key)
+        if data is not None:
+            _mem.move_to_end(key)
+        return data
+
+
+def _mem_put(key: tuple, data: Optional[bytes]) -> None:
+    global _mem_bytes
+    if not data or len(data) > _MEM_MAX_ENTRY:
+        return
+    with _mem_lock:
+        old = _mem.pop(key, None)
+        if old is not None:
+            _mem_bytes -= len(old)
+        _mem[key] = data
+        _mem_bytes += len(data)
+        while _mem_bytes > _MEM_MAX_BYTES and _mem:
+            _, dropped = _mem.popitem(last=False)
+            _mem_bytes -= len(dropped)
+
+
+def _neg_get(key: tuple) -> bool:
+    if not _neg:
+        return False
+    now = time.monotonic()
+    with _neg_lock:
+        until = _neg.get(key)
+        if until is None:
+            return False
+        if until < now:
+            _neg.pop(key, None)
+            return False
+        return True
+
+
+def _neg_put(key: tuple) -> None:
+    now = time.monotonic()
+    with _neg_lock:
+        if len(_neg) >= _NEG_MAX:
+            # Dict preserves insertion order: drop the oldest quarter.
+            for _ in range(_NEG_MAX // 4):
+                try:
+                    _neg.pop(next(iter(_neg)))
+                except (StopIteration, KeyError):
+                    break
+        _neg[key] = now + _NEG_TTL
+
+
+def _neg_drop(key: tuple) -> None:
+    if _neg:
+        with _neg_lock:
+            _neg.pop(key, None)
+
+
+def _invalidate_mem() -> None:
+    global _mem_bytes
+    with _mem_lock:
+        _mem.clear()
+        _mem_bytes = 0
+    with _neg_lock:
+        _neg.clear()
 
 
 def get_cached(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Optional[bytes]:
+    key = (source, int(z), int(x), int(y))
+    data = _mem_get(key)
+    if data is not None:
+        return data
+    if _neg_get(key):
+        return None
     p = tile_path(z, x, y, source)
-    if p.exists() and p.stat().st_size > 0:
-        return _read_valid_tile(p)
+    try:
+        if p.stat().st_size <= 0:
+            _neg_put(key)
+            return None
+        data = p.read_bytes()
+    except OSError:
+        _neg_put(key)
+        return None
+    if _looks_like_image(data):
+        _mem_put(key, data)
+        return data
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    _neg_put(key)
     return None
 
 
@@ -422,29 +563,144 @@ def fetch_tile(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Optional
         except OSError:
             pass
         return None
+    key = (source, int(z), int(x), int(y))
+    _mem_put(key, data)
+    _neg_drop(key)
     return data
 
 
 _online_checked_at = 0.0
 _online_value = False
+_online_probed = False
+_online_probing = False
 _online_lock = threading.Lock()
+_online_event = threading.Event()
 
 
-def is_online() -> bool:
-    """Cheap, cached connectivity probe so offline tile requests fail fast."""
-    global _online_checked_at, _online_value
+def _probe_online() -> None:
+    """Refresh connectivity in a worker; never called on the request path."""
+    global _online_value, _online_checked_at, _online_probing, _online_probed
+    try:
+        requests.head("https://server.arcgisonline.com/", timeout=4,
+                      headers={"User-Agent": USER_AGENT})
+        value = True
+    except Exception:
+        value = False
+    with _online_lock:
+        _online_value = value
+        _online_checked_at = time.monotonic() + 60
+        _online_probing = False
+        _online_probed = True
+        _online_event.set()
+
+
+def is_online(block: bool = True) -> bool:
+    """Connectivity probe that never stalls the tile hot path.
+
+    ``block=False`` (used by tile serving) always returns the last known value
+    and refreshes in the background. The first blocking call in a process waits
+    briefly for a real answer so callers that gate network work stay correct.
+    """
+    global _online_probing
     now = time.monotonic()
     with _online_lock:
         if now < _online_checked_at:
             return _online_value
+        first = not _online_probed
+        started = False
+        if not _online_probing:
+            _online_probing = True
+            started = True
+            _online_event.clear()
+            threading.Thread(target=_probe_online, daemon=True,
+                             name="tile-online-probe").start()
+        value = _online_value
+    if first and started and block:
+        _online_event.wait(2.5)
+        with _online_lock:
+            return _online_value
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Background single-tile fetches
+# ---------------------------------------------------------------------------
+# The map must never wait on a provider. A missing tile is queued to a small
+# worker pool; the request returns a cached parent/overview at once and the
+# next request finds the real tile. Two workers keep the provider rate limit
+# honoured while still filling a viewport in a few seconds.
+_FETCH_WORKERS = 2
+_FETCH_QUEUE_MAX = 256
+_fetch_queue: "queue.Queue" = queue.Queue(maxsize=_FETCH_QUEUE_MAX)
+_fetch_pending: dict[tuple, threading.Event] = {}
+_fetch_lock = threading.Lock()
+_fetch_started = False
+
+
+def _ensure_fetch_workers() -> None:
+    global _fetch_started
+    if _fetch_started:
+        return
+    for i in range(_FETCH_WORKERS):
+        threading.Thread(target=_fetch_worker, daemon=True,
+                         name=f"tile-fetch-{i}").start()
+    _fetch_started = True
+
+
+def _fetch_worker() -> None:
+    while True:
+        key, z, x, y, source, done = _fetch_queue.get()
         try:
-            requests.head("https://server.arcgisonline.com/", timeout=4,
-                          headers={"User-Agent": USER_AGENT})
-            _online_value = True
+            # Connectivity may have flipped to offline (or the source may be in
+            # cooldown) while this job sat in the queue. Drop it instead of
+            # holding the radio/network busy for a viewport that has moved on.
+            if is_online(block=False) and not _source_in_cooldown(source):
+                try:
+                    data = fetch_tile(z, x, y, source)
+                except TileBlocked:
+                    data = None
+                if data:
+                    # fetch_tile already does this, but a custom/older fetch
+                    # path must not leave the tile hidden behind a miss entry.
+                    _mem_put(key, data)
+                    _neg_drop(key)
         except Exception:
-            _online_value = False
-        _online_checked_at = now + 60
-        return _online_value
+            pass
+        finally:
+            with _fetch_lock:
+                _fetch_pending.pop(key, None)
+            done.set()
+            _fetch_queue.task_done()
+
+
+def warm_tile(z: int, x: int, y: int, source: str = DEFAULT_SOURCE,
+              wait: float = 0.75) -> Optional[bytes]:
+    """Return a tile if available, else queue a fetch and wait at most `wait`.
+
+    Returns cached/served bytes when the provider answered inside the wait
+    budget, otherwise None (caller paints a parent/overview). The worker keeps
+    going and caches the tile for the next request.
+    """
+    key = (source, int(z), int(x), int(y))
+    data = get_cached(z, x, y, source)
+    if data is not None:
+        return data
+    if not is_online(block=False):
+        return None
+    with _fetch_lock:
+        done = _fetch_pending.get(key)
+        if done is None:
+            done = threading.Event()
+            _fetch_pending[key] = done
+            try:
+                _ensure_fetch_workers()
+                _fetch_queue.put_nowait((key, int(z), int(x), int(y), source, done))
+            except queue.Full:
+                _fetch_pending.pop(key, None)
+                return None
+    if wait and wait > 0 and done.wait(wait):
+        return get_cached(z, x, y, source)
+    return None
 
 
 def get_or_fetch(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Optional[bytes]:
@@ -851,22 +1107,40 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 _stats_cache: dict[tuple, tuple[float, dict]] = {}
 _stats_lock = threading.Lock()
+_stats_refreshing: set[tuple] = set()
 STATS_TTL = 5.0
 
 
 def _invalidate_stats() -> None:
+    """Mark cached stats stale but keep the last values for instant responses."""
     with _stats_lock:
-        _stats_cache.clear()
+        for key, (_at, data) in list(_stats_cache.items()):
+            _stats_cache[key] = (0.0, data)
 
 
-def cache_stats(source: Optional[str] = None) -> dict:
-    """Count cached tiles and total size. source=None aggregates every source."""
-    key = (source or "*", str(cache_root()))
-    now = time.monotonic()
-    with _stats_lock:
-        cached = _stats_cache.get(key)
-        if cached and now - cached[0] < STATS_TTL:
-            return copy.deepcopy(cached[1])
+def _walk_images(base: Path):
+    """Yield (zoom, size) for cached images without Path/rglob overhead."""
+    stack = [(base, None)]
+    while stack:
+        directory, zoom = stack.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    name = entry.name
+                    z = int(name) if name.isdigit() else zoom
+                    stack.append((Path(entry.path), z))
+                elif (entry.is_file(follow_symlinks=False)
+                      and os.path.splitext(entry.name)[1].lower() in _IMAGE_SUFFIXES):
+                    yield zoom, entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+
+
+def _compute_stats(source: Optional[str] = None) -> dict:
     sources = [source] if source else list(TILE_SOURCES)
     out = []
     total_tiles = 0
@@ -879,19 +1153,12 @@ def cache_stats(source: Optional[str] = None) -> dict:
         size = 0
         min_z, max_z = 99, 0
         if base.exists():
-            for z_dir in base.iterdir():
-                if not z_dir.is_dir() or not z_dir.name.isdigit():
-                    continue
-                z = int(z_dir.name)
-                n = 0
-                for f in z_dir.rglob("*"):
-                    if f.is_file() and f.suffix.lower() in _IMAGE_SUFFIXES:
-                        n += 1
-                        size += f.stat().st_size
-                if n:
+            for z, n_bytes in _walk_images(base):
+                tiles += 1
+                size += n_bytes
+                if z is not None:
                     min_z = min(min_z, z)
                     max_z = max(max_z, z)
-                    tiles += n
         total_tiles += tiles
         total_bytes += size
         out.append({
@@ -918,8 +1185,45 @@ def cache_stats(source: Optional[str] = None) -> dict:
         match = next((s for s in out if s["source"] == source), None)
         if match:
             result.update(match)
+    return result
+
+
+def _refresh_stats(key: tuple, source: Optional[str]) -> None:
+    try:
+        result = _compute_stats(source)
+        with _stats_lock:
+            _stats_cache[key] = (time.monotonic(), copy.deepcopy(result))
+    except Exception:
+        pass
+    finally:
+        with _stats_lock:
+            _stats_refreshing.discard(key)
+
+
+def cache_stats(source: Optional[str] = None) -> dict:
+    """Count cached tiles and total size. source=None aggregates every source.
+
+    Stale-while-revalidate: after the first scan the previous numbers are
+    returned immediately while one worker rescans, so a cache with tens of
+    thousands of files never stalls the Settings or Map panel.
+    """
+    key = (source or "*", str(cache_root()))
+    now = time.monotonic()
     with _stats_lock:
-        _stats_cache[key] = (now, copy.deepcopy(result))
+        cached = _stats_cache.get(key)
+        if cached and now - cached[0] < STATS_TTL:
+            return copy.deepcopy(cached[1])
+        refreshing = key in _stats_refreshing
+        if cached is not None and not refreshing:
+            _stats_refreshing.add(key)
+    if cached is not None:
+        if not refreshing:
+            threading.Thread(target=_refresh_stats, args=(key, source), daemon=True,
+                             name="tile-stats").start()
+        return copy.deepcopy(cached[1])
+    result = _compute_stats(source)
+    with _stats_lock:
+        _stats_cache[key] = (time.monotonic(), copy.deepcopy(result))
     return result
 
 
@@ -947,6 +1251,7 @@ def clear_cache(source: Optional[str] = None) -> dict:
                     d.rmdir()
                 except OSError:
                     pass
+    _invalidate_mem()
     _invalidate_stats()
     return {"removed": removed, "freed_bytes": freed,
             "freed_mb": round(freed / (1024 * 1024), 2),
@@ -995,6 +1300,7 @@ def verify_cache(source: Optional[str] = None, fix: bool = True) -> dict:
                 except OSError:
                     pass
     if removed:
+        _invalidate_mem()
         _invalidate_stats()
     return {
         "checked": checked, "invalid": invalid, "removed": removed,

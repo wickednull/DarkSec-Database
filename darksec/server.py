@@ -5445,24 +5445,37 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         raise HTTPException(status_code=404, detail="Tile not found")
 
     _tile_source_cache = {"at": 0.0, "value": None}
+    _tile_source_refresh = threading.Lock()
 
     def _active_tile_source() -> str:
-        """Resolve the configured basemap provider, cached for 30s (tile hot path)."""
+        """Resolve the configured basemap provider (tile hot path).
+
+        Stale-while-revalidate: one thread reads the setting, every other tile
+        request immediately gets the previous source instead of queueing on the
+        settings database.
+        """
         from . import tilecache
         now = time.monotonic()
-        if _tile_source_cache["value"] and now - _tile_source_cache["at"] < 30:
-            return _tile_source_cache["value"]
-        src = tilecache.DEFAULT_SOURCE
+        value = _tile_source_cache["value"]
+        if value and now - _tile_source_cache["at"] < 60:
+            return value
+        if not _tile_source_refresh.acquire(blocking=False):
+            return value or tilecache.DEFAULT_SOURCE
         try:
-            d = Database()
-            configured = d.get_setting("tile_source", tilecache.DEFAULT_SOURCE)
-            d.close()
-            if configured in tilecache.TILE_SOURCES:
-                src = configured
-        except Exception:
-            pass
-        _tile_source_cache.update({"at": now, "value": src})
-        return src
+            src = tilecache.DEFAULT_SOURCE
+            try:
+                d = Database()
+                configured = d.get_setting("tile_source", tilecache.DEFAULT_SOURCE)
+                d.close()
+                if configured in tilecache.TILE_SOURCES:
+                    src = configured
+            except Exception:
+                if value:
+                    src = value
+            _tile_source_cache.update({"at": now, "value": src})
+            return src
+        finally:
+            _tile_source_refresh.release()
 
     @app.get("/api/map/tiles/{z}/{x}/{y}.png")
     def map_tile(z: int, x: int, y: int):
@@ -5489,14 +5502,13 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         blob = tilecache.get_cached(z, x, y, src)
         if blob:
             return _tile_response(blob, src)
-        # Nothing cached: fetch only if the operator is online, never block the map.
-        if tilecache.is_online():
-            try:
-                blob = tilecache.fetch_tile(z, x, y, src)
-            except tilecache.TileBlocked:
-                blob = None
-            if blob:
-                return _tile_response(blob, src)
+        # Nothing cached: queue a background fetch and wait very briefly for a
+        # fast provider. The map always paints now; the tile lands on the
+        # client's next retry instead of stalling this request (or the whole
+        # thread pool) behind the upstream rate limit.
+        blob = tilecache.warm_tile(z, x, y, src, wait=tilecache.TILE_FETCH_WAIT)
+        if blob:
+            return _tile_response(blob, src)
         # Offline or upstream unavailable: overzoom the nearest cached parent
         # from the same source before falling back to the bundled overview.
         parent = tilecache.find_cached_ancestor(z, x, y, src)
@@ -5520,19 +5532,21 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         fallback = _bundled_ancestor_tile(z, x, y)
         if fallback:
             return _tile_response(fallback, "bundled-overview")
-        raise HTTPException(status_code=404, detail="Tile not cached")
+        raise HTTPException(status_code=404, detail="Tile not cached",
+                            headers={"Cache-Control": "max-age=5"})
 
     # ---------------------------------------------------------------- tile cache
     @app.get("/api/map/cache/tiles/{source}/{z}/{x}/{y}.png")
     def cached_tile(source: str, z: int, x: int, y: int):
-        """Serve one cached tile; fetch only when online and not cached."""
+        """Serve one cached tile; queue a fetch when online and not cached."""
         from . import tilecache
         require(0 <= z <= 22 and x >= 0 and y >= 0, "Invalid tile coordinates", 400)
         require(source in tilecache.TILE_SOURCES, "Unknown tile source", 400)
-        data = tilecache.get_or_fetch(z, x, y, source)
+        data = tilecache.warm_tile(z, x, y, source, wait=tilecache.TILE_FETCH_WAIT)
         if data:
             return _tile_response(data, source)
-        raise HTTPException(status_code=404, detail="Tile not available")
+        raise HTTPException(status_code=404, detail="Tile not available",
+                            headers={"Cache-Control": "max-age=5"})
 
     @app.get("/api/map/cache/status")
     def cache_status(source: str | None = None):
