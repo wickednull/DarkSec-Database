@@ -734,3 +734,40 @@ def test_adsb_port_never_probes_the_darksec_web_port(monkeypatch):
     assert sdr._adsb_settings()["port"] == 8081
     monkeypatch.setattr(sdr, "_settings", lambda: {"lan_port": 8080, "adsb_port": 9090})
     assert sdr._adsb_settings()["port"] == 9090
+
+
+def test_websocket_backend_is_reported(client):
+    data = client.get("/api/sdr/devices").json()
+    info = data.get("websocket") or {}
+    assert "available" in info
+    assert info["library"] in ("websockets", "wsproto")
+
+
+def test_wsutil_degrades_without_a_backend(monkeypatch):
+    from darksec import wsutil
+
+    monkeypatch.setattr(wsutil, "OPTIONAL_LIBS", ())
+    info = wsutil.detect()
+    assert info["available"] is False
+    assert "pip install websockets" in info["install"]
+    assert "pip install websockets" in info["hint"]
+    assert wsutil.uvicorn_ws_mode() == "none"
+
+
+def test_missing_websocket_backend_quiets_uvicorn_noise(monkeypatch):
+    import logging
+    from darksec import wsutil
+
+    monkeypatch.setattr(wsutil, "OPTIONAL_LIBS", ())
+    assert wsutil.uvicorn_ws_mode() == "none"
+    logger = logging.getLogger("uvicorn.error")
+    assert any(type(f).__name__ == "_DropWsNoise" for f in logger.filters)
+
+    noise = logging.LogRecord(
+        "uvicorn.error", logging.WARNING, __file__, 1,
+        'No supported WebSocket library detected. Please use "pip install ..."', None, None)
+    other = logging.LogRecord(
+        "uvicorn.error", logging.WARNING, __file__, 1, "Some other warning", None, None)
+    filters = [f for f in logger.filters if type(f).__name__ == "_DropWsNoise"]
+    assert all(f.filter(other) for f in filters)
+    assert not all(f.filter(noise) for f in filters)

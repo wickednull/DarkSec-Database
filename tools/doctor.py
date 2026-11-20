@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PYTHON_PACKAGES = [
     ("fastapi", "FastAPI"),
     ("uvicorn", "Uvicorn"),
+    ("websockets", "websockets (live SDR audio)"),
     ("psutil", "psutil"),
     ("cryptography", "cryptography"),
     ("ephem", "ephem"),

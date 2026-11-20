@@ -14,6 +14,8 @@ from pathlib import Path
 
 import uvicorn
 
+from . import wsutil
+
 from . import tls
 
 
@@ -61,7 +63,7 @@ class LanManager:
             kwargs = dict(
                 host="0.0.0.0", port=self.port,
                 log_level="warning", access_log=False, server_header=False,
-                lifespan="off",
+                lifespan="off", ws=wsutil.uvicorn_ws_mode(),
             )
             if use_tls:
                 cert_path, key_path = tls.ensure_cert(self.ip)

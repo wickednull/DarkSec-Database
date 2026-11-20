@@ -170,8 +170,24 @@ Notes:
 
 ## Live audio
 
-Live audio is demodulated on the server and streamed to the browser as 16-bit
-little-endian mono PCM. It works with HackRF, RTL-SDR and rtl_tcp. The browser
+Live audio is demodulated on the server and streamed to the browser over the
+`/api/sdr/ws` WebSocket as 16-bit little-endian mono PCM, together with status
+and spectrum frames. That route needs an ASGI WebSocket backend: `websockets`
+(normal) or `wsproto`. `./install.sh` installs `websockets`; if the server log
+repeats `No supported WebSocket library detected` / `Unsupported upgrade
+request`, the running Python is missing it. Install it with the interpreter
+that starts DarkSec and restart:
+
+```bash
+.venv/bin/python -m pip install websockets
+# or, with the venv active:  pip install 'uvicorn[standard]'
+```
+
+The SDR panel detects this (the device inventory reports `websocket.available`)
+and disables **PLAY** with the same instruction, so a beta install without the
+package is obvious instead of silent. Everything except live audio/spectrum
+still works without it.
+ It works with HackRF, RTL-SDR and rtl_tcp. The browser
 schedules the PCM into an `AudioContext`; the level bar shows signal activity.
 
 Modes: NFM, WFM (mono), AM, USB, LSB. Squelch is a 0–100 threshold (0 = off).

@@ -113,6 +113,8 @@ export async function render(root, params = {}) {
   const network = devices.rtl_tcp || {};
   const tools = devices.tools || {};
   const activeBackend = devices.active_backend || "none";
+  const wsInfo = devices.websocket || {};
+  const wsAvailable = wsInfo.available !== false;
   const recs = recordings.items || [];
   const recentJobs = jobs.items || [];
   const paramFreq = Number(params.freq || 0);
@@ -665,6 +667,7 @@ export async function render(root, params = {}) {
   let liveFatal = false;
   let liveAudioRate = 48000;
   let liveRunning = false;
+  let liveOpened = false;
   let liveWs = null;
   let liveCtx = null;
   let liveGainNode = null;
@@ -713,6 +716,13 @@ export async function render(root, params = {}) {
   const liveScanBtn = btn("SCAN", { icon: "search", tone: "ghost" });
   const liveStatus = h("span", { class: "tiny muted sdr-live-status", text: "IDLE" });
   const liveWarning = h("div", { class: "callout warn small mt-8 sdr-live-warning", style: "display:none" });
+  if (!wsAvailable) {
+    livePlay.disabled = true;
+    liveStatus.textContent = "WEBSOCKET MISSING";
+    liveWarning.textContent = wsInfo.hint
+      || "Live audio needs the 'websockets' Python package on the server. Run ./install.sh (or pip install websockets) and restart DarkSec.";
+    liveWarning.style.display = "";
+  }
   const liveModeRow = h("div", { class: "sdr-mode-row" });
   const liveBandRow = h("div", { class: "sdr-band-row" });
   const liveSpectrum = h("canvas", { class: "sdr-live-spectrum" });
@@ -1041,6 +1051,10 @@ export async function render(root, params = {}) {
 
   function startLive() {
     if (liveRunning) return;
+    if (!wsAvailable) {
+      toast(wsInfo.hint || "Server is missing the 'websockets' package: pip install websockets", "error", 9000);
+      return;
+    }
     const AudioCtor = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtor) { toast("This browser has no Web Audio support", "error"); return; }
     try { liveCtx = new AudioCtor(); } catch (err) { toast(`Audio unavailable: ${err.message || err}`, "error"); return; }
@@ -1067,11 +1081,12 @@ export async function render(root, params = {}) {
     liveWs = new WebSocket(`${scheme}://${location.host}/api/sdr/ws?${qs}`);
     liveWs.binaryType = "arraybuffer";
     liveRunning = true;
+    liveOpened = false;
     livePlay.disabled = true;
     liveStopBtn.disabled = false;
     livePlay.replaceChildren(h("span", { text: "LIVE" }));
     liveStatus.textContent = "CONNECTING…";
-    liveWs.onopen = () => { liveStatus.textContent = "LIVE · waiting for audio"; };
+    liveWs.onopen = () => { liveOpened = true; liveStatus.textContent = "LIVE · waiting for audio"; };
     liveWs.onmessage = (event) => {
       if (typeof event.data === "string") {
         let frame;
@@ -1115,11 +1130,19 @@ export async function render(root, params = {}) {
     };
     liveWs.onerror = () => { liveStatus.textContent = "CONNECTION ERROR"; };
     liveWs.onclose = () => {
+      const rejected = !liveOpened && !liveFatal;
       liveRunning = false;
       livePlay.disabled = false;
       liveStopBtn.disabled = true;
       livePlay.replaceChildren(h("span", { text: "PLAY" }));
       if (liveStatus.textContent.startsWith("LIVE")) liveStatus.textContent = "DISCONNECTED";
+      if (rejected) {
+        // The server refused the upgrade (usually a missing WebSocket backend).
+        liveStatus.textContent = "WS UNSUPPORTED";
+        liveWarning.textContent = wsInfo.hint
+          || "The server rejected the WebSocket upgrade. Install the 'websockets' package with ./install.sh (or pip install websockets), then restart DarkSec.";
+        liveWarning.style.display = "";
+      }
       liveWs = null;
     };
   }

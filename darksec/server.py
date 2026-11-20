@@ -43,7 +43,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTe
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, assistant, astro, autosync, config, feeds, geo, geocoding, intel, library, mapstyle, mbtiles, phonegps, sdr, sitrep, tilecache, websdr
+from . import __version__, assistant, astro, autosync, config, feeds, geo, geocoding, intel, library, mapstyle, mbtiles, phonegps, sdr, sitrep, tilecache, websdr, wsutil
 from .config import APP_NAME
 from .brief import build_brief, to_markdown
 from .calc_catalog import CALC_CATALOG, CALC_FUNCS
@@ -6287,7 +6287,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
 
     @app.get("/api/sdr/devices")
     def sdr_devices(force: bool = False):
-        return hardware(force=force)
+        out = hardware(force=force)
+        out["websocket"] = wsutil.detect()
+        return out
 
     @app.post("/api/sdr/platform/uconsole-sdr")
     def sdr_uconsole_sdr(request: Request):

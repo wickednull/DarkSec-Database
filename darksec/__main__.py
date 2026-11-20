@@ -20,7 +20,7 @@ import uvicorn
 from . import __version__
 from .config import APP_NAME
 from .server import create_app
-from . import tls
+from . import tls, wsutil
 
 
 def free_port() -> int:
@@ -94,8 +94,14 @@ def main(argv: list[str] | None = None) -> int:
                 qr.print_ascii(invert=True)
             except Exception as exc:
                 print(f"(QR code unavailable: {exc})", flush=True)
+    ws_mode = wsutil.uvicorn_ws_mode()
+    if ws_mode == "none":
+        # stderr: stdout carries the Electron JSON handshake.
+        print("NOTE: no WebSocket backend found (websockets/wsproto). Live SDR audio "
+              "is disabled. Install it with: pip install websockets "
+              "(or ./install.sh) and restart.", file=sys.stderr, flush=True)
     uvicorn_kwargs = dict(host=bind_host, port=port, log_level=args.log_level,
-                          access_log=False, server_header=False)
+                          access_log=False, server_header=False, ws=ws_mode)
     if ssl_certfile:
         uvicorn_kwargs.update(ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     uvicorn.run(app, **uvicorn_kwargs)

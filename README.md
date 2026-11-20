@@ -361,6 +361,19 @@ uConsole/AIO V2 setup steps. See [docs/SDR.md](docs/SDR.md) for hardware
 setup, uConsole USB-A/GPIO details, Raspberry Pi power advice, `rtl_tcp`
 sharing and WebSDR etiquette.
 
+Live audio and the spectrum cockpit use a WebSocket. The server needs the
+`websockets` package (installed by `./install.sh`, listed in
+`requirements.txt`). If the console log says
+`No supported WebSocket library detected`, install it with the same Python that
+starts DarkSec and restart:
+
+```bash
+.venv/bin/python -m pip install websockets      # or: pip install 'uvicorn[standard]'
+```
+
+Without it the rest of the console still works; the SDR panel disables **PLAY**
+and shows the exact command instead of failing silently.
+
 #### MBTiles from a USB drive
 
 Operator-supplied MBTiles archives are read **in place and read-only**, so a
