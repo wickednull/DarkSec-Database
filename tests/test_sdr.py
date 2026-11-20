@@ -571,7 +571,8 @@ def test_managed_adsb_uses_json_output_not_an_http_port(monkeypatch, tmp_path):
         captured["cmd"] = cmd
         return Proc()
 
-    monkeypatch.setattr(sdr, "_adsb_binary", lambda: "/usr/bin/dump1090")
+    monkeypatch.setattr(sdr, "_adsb_device_type", lambda: "rtlsdr")
+    monkeypatch.setattr(sdr, "_adsb_binary", lambda *a, **k: "/usr/bin/dump1090")
     monkeypatch.setattr(sdr, "_adsb_feed", lambda port=None: None)
     monkeypatch.setattr(sdr, "_adsb_json_dir", lambda: tmp_path)
     monkeypatch.setattr(sdr.subprocess, "Popen", fake_popen)
@@ -673,3 +674,63 @@ def test_guidance_does_not_warn_about_the_radio_that_is_connected():
     assert "No HackRF detected" in text
     assert "no HackRF responded" not in text
     assert all(n["level"] != "warn" for n in notes)
+
+
+def test_adsb_binary_for_hackrf_is_readsb(monkeypatch):
+    from darksec import sdr
+
+    monkeypatch.setattr(
+        sdr.shutil, "which",
+        lambda name: "/usr/bin/readsb" if name == "readsb" else "/usr/bin/dump1090")
+    assert sdr._adsb_binary("hackrf") == "/usr/bin/readsb"
+    assert sdr._adsb_binary("rtlsdr") == "/usr/bin/dump1090"
+
+
+def test_managed_adsb_drives_a_hackrf_through_readsb(monkeypatch, tmp_path):
+    from darksec import sdr
+
+    captured = {}
+
+    class Proc:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(sdr, "_adsb_device_type", lambda: "hackrf")
+    monkeypatch.setattr(sdr, "_adsb_binary", lambda *a, **k: "/usr/bin/readsb")
+    monkeypatch.setattr(sdr, "detect", lambda force=False: {
+        "hackrf": {"connected": True, "serial": "ABC123"}})
+    monkeypatch.setattr(sdr, "_adsb_feed", lambda port=None: None)
+    monkeypatch.setattr(sdr, "_adsb_json_dir", lambda: tmp_path)
+    monkeypatch.setattr(sdr.subprocess, "Popen",
+                        lambda cmd, **kw: (captured.update(cmd=cmd), Proc())[1])
+    monkeypatch.setattr(sdr.time, "sleep", lambda _s: None)
+    try:
+        sdr.start_adsb(gain=41, device=0)
+        cmd = captured["cmd"]
+        assert "--device-type=hackrf" in cmd
+        assert "--device=ABC123" in cmd
+        assert "--hackrf-vgagain=40" in cmd  # 41 dB quantised to the 2 dB VGA steps
+        assert "--write-json" in cmd and str(tmp_path) in cmd
+        assert "--net-http-port" not in cmd and "--net" not in cmd
+    finally:
+        sdr.stop_adsb()
+
+
+def test_adsb_port_never_probes_the_darksec_web_port(monkeypatch):
+    from darksec import sdr
+
+    monkeypatch.setattr(sdr, "_settings", lambda: {"lan_port": 8080, "adsb_port": 8080})
+    assert sdr._adsb_settings()["port"] == 8081
+    monkeypatch.setattr(sdr, "_settings", lambda: {"lan_port": 8080, "adsb_port": 9090})
+    assert sdr._adsb_settings()["port"] == 9090

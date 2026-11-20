@@ -102,7 +102,16 @@ rtl_test -s 2400000        # Ctrl-C after a few seconds
 
 ## ADS-B / dump1090
 
-Open **SDR → ADS-B** to start and stop a managed `dump1090`/`readsb` receiver, set tuner gain and device index, and watch the aircraft table. Managed mode uses dump1090's `--write-json` output under `fielddata/adsb/` and reads it directly, so it does **not** open an HTTP port and cannot collide with DarkSec's LAN server on 8080. The **EXTERNAL PORT** setting (default **8081**) is used only to detect and reuse a feed that another program already runs over HTTP. Stop the live receiver or rtl_tcp first — one RTL-SDR cannot feed two programs at once. Logs are written to `fielddata/logs/dump1090.log`.
+Open **SDR → ADS-B** to start and stop a managed `dump1090`/`readsb` receiver, set tuner gain and device index, and watch the aircraft table. Managed mode uses the receiver's `--write-json` output under `fielddata/adsb/` and reads it directly, so it does **not** open an HTTP port and cannot collide with DarkSec's LAN server on 8080. The **EXTERNAL PORT** setting (default **8081**) is used only to detect and reuse a feed that another program already runs over HTTP. Stop the live receiver or rtl_tcp first — one radio cannot feed two programs at once. Logs are written to `fielddata/logs/dump1090.log`.
+
+DarkSec picks the backend from the connected radio:
+
+| Radio | Receiver | Notes |
+| --- | --- | --- |
+| RTL-SDR | `dump1090-fa` / `dump1090-mutability` / `readsb` | Native 2.4 Msps decoding; gain is the RTL tuner gain. |
+| HackRF | `readsb` (3.14+) | `dump1090` has no HackRF backend. readsb uses `--device-type=hackrf`; the **GAIN** field maps to the HackRF VGA (0–62, 2 dB steps) and LNA is fixed at 40 dB. |
+
+A managed start fails with a readable message instead of a bare "no supported devices" when the radio and the decoder do not match. Reception needs a **1090 MHz** antenna with a clear view of the sky; a 2 m/70 cm whip will hear only nearby aircraft. For more range on a HackRF, run readsb with `--hackrf-enable-ampgain` (≈11 dB, can overload near strong transmitters).
 
 ## HackRF
 

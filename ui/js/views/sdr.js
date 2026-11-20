@@ -1670,7 +1670,7 @@ export async function render(root, params = {}) {
   const adsbDevice = input({ type: "number", value: String(adsb0.device ?? 0), min: "0", max: "8" });
   const adsbStatus = h("div", { class: "tiny muted", text: "Checking ADS-B manager…" });
   const adsbTable = h("div", { class: "col" });
-  const adsbStart = btn("START DUMP1090", { tone: "primary", icon: "play" });
+  const adsbStart = btn("START ADS-B", { tone: "primary", icon: "play" });
   const adsbStopBtn = btn("STOP", { icon: "stop", tone: "danger" });
   let adsbPoll = null;
 
@@ -1691,11 +1691,11 @@ export async function render(root, params = {}) {
     adsbTable.replaceChildren();
     const aircraft = data?.aircraft || [];
     if (!status.available) {
-      adsbTable.appendChild(emptyState("ADS-B feed unavailable", status.note || "Start dump1090 or point DarkSec at an existing feed.", "satellite"));
+      adsbTable.appendChild(emptyState("ADS-B feed unavailable", status.note || "Start the ADS-B receiver or point DarkSec at an existing feed.", "satellite"));
       return;
     }
     if (!aircraft.length) {
-      adsbTable.appendChild(emptyState("No aircraft heard", "dump1090 is reachable; waiting for ADS-B messages.", "satellite"));
+      adsbTable.appendChild(emptyState("No aircraft heard", "The receiver is running; waiting for ADS-B messages. Reception needs a 1090 MHz antenna with a clear view of the sky.", "satellite"));
       return;
     }
     const table = h("table", { class: "data" });
@@ -1749,10 +1749,10 @@ export async function render(root, params = {}) {
         try { await store.saveSettings({ adsb_port: out.port }); } catch {}
       }
       toast(out?.external ? "Existing ADS-B feed detected; showing it"
-        : out?.warning || "dump1090 started");
+        : out?.warning || "ADS-B receiver started");
       await loadAdsb();
     } catch (err) {
-      toast(err.message || "Could not start dump1090", "error", 9000);
+      toast(err.message || "Could not start the ADS-B receiver", "error", 9000);
       await loadAdsb();
     } finally {
       adsbStart.disabled = false;
@@ -1761,7 +1761,7 @@ export async function render(root, params = {}) {
   async function stopAdsb() {
     try {
       await api.post("/api/sdr/adsb/stop", {});
-      toast("dump1090 stopped");
+      toast("ADS-B receiver stopped");
       await loadAdsb();
     } catch (err) { toast(err.message, "error"); }
   }
@@ -1779,7 +1779,7 @@ export async function render(root, params = {}) {
     adsbStatus,
     h("div", { class: "mt-8" }, adsbTable),
     h("div", { class: "hint mt-10",
-      text: "ADS-B is receive-only. Stop the live receiver and rtl_tcp before starting dump1090 — one RTL-SDR can only serve one program at a time." }),
+      text: "ADS-B is receive-only. One radio can only serve one program at a time: stop the live receiver, a sweep and rtl_tcp before starting. An RTL-SDR uses dump1090/readsb; a HackRF uses readsb. Reception needs a 1090 MHz antenna." }),
   );
   paneAdsb.appendChild(panel({ title: "ADS-B / air picture", sub: "dump1090 / readsb · managed locally", icon: "satellite", body: adsbBody }));
 

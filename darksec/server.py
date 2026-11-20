@@ -6734,7 +6734,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     def sdr_adsb_start(request: Request, payload: dict = Body(...)):
         try:
             out = sdr.start_adsb(
-                port=int(payload.get("port") or 8080),
+                port=int(payload.get("port") or 8081),
                 gain=int(payload.get("gain") or 40),
                 device=int(payload.get("device") or 0),
             )

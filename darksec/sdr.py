@@ -1327,7 +1327,20 @@ def delete_recording(rec_id: int) -> dict:
     return {"deleted": rec_id}
 
 
-def _adsb_binary() -> str | None:
+def _adsb_device_type() -> str:
+    """Pick the ADS-B receiver: RTL-SDR first, then HackRF (readsb only)."""
+    info = detect()
+    if (info.get("rtl") or {}).get("connected"):
+        return "rtlsdr"
+    if (info.get("hackrf") or {}).get("connected"):
+        return "hackrf"
+    return ""
+
+
+def _adsb_binary(device_type: str = "") -> str | None:
+    if device_type == "hackrf":
+        # dump1090 has no HackRF backend; recent readsb builds do.
+        return shutil.which("readsb")
     for name in ("dump1090-fa", "dump1090-mutability", "dump1090", "readsb"):
         found = shutil.which(name)
         if found:
@@ -1340,6 +1353,14 @@ def _adsb_settings() -> dict:
     try:
         port = int(s.get("adsb_port") or 8081)
     except (TypeError, ValueError):
+        port = 8081
+    try:
+        web_port = int(s.get("lan_port") or config.default_settings().get("lan_port") or 8080)
+    except (TypeError, ValueError):
+        web_port = 8080
+    if port == web_port:
+        # An external-feed port equal to the DarkSec web port would probe our
+        # own server, so fall back to the documented default.
         port = 8081
     try:
         gain = int(float(s.get("adsb_gain") or 40))
@@ -1403,14 +1424,14 @@ def adsb_status() -> dict:
             tail = " | ".join((_ADSB.get("log") and Path(_ADSB["log"]).read_text(errors="replace").splitlines()[-3:]) or [])
         except Exception:
             pass
-        exited = (f"dump1090 exited with code {proc.returncode}."
+        exited = (f"The ADS-B receiver exited with code {proc.returncode}."
                   + (f" {tail[:400]}" if tail else " Check the ADS-B log."))
     return {
         "available": data is not None,
         "running": bool(ours or external),
         "managed": ours,
         "external": external,
-        "binary": _ADSB.get("binary") or _adsb_binary(),
+        "binary": _ADSB.get("binary") or _adsb_binary(_adsb_device_type()),
         "port": port,
         "host": cfg["host"],
         "gain": cfg["gain"],
@@ -1424,8 +1445,8 @@ def adsb_status() -> dict:
         "aircraft_count": len((data or {}).get("aircraft") or []),
         "note": (exited or _ADSB.get("last_error") or _ADSB.get("warning")
                  or ("A feed is already running outside DarkSec; showing it." if external
-                     else "Start dump1090 to receive ADS-B from an RTL-SDR." if not ours
-                     else "dump1090 is running under DarkSec; reading its local JSON output.")),
+                     else "Start the ADS-B receiver (dump1090 for an RTL-SDR, readsb for a HackRF)." if not ours
+                     else "The ADS-B receiver is running under DarkSec; reading its local JSON output.")),
     }
 
 
@@ -1437,9 +1458,18 @@ def start_adsb(port: int | None = None, gain: int | None = None,
     device = int(cfg["device"] if device is None else device)
     if _adsb_feed(port) is not None:
         return adsb_status()
-    binary = _adsb_binary()
+    device_type = _adsb_device_type()
+    if not device_type:
+        message = ("No SDR radio detected for ADS-B. Connect an RTL-SDR (dump1090/readsb) "
+                   "or a HackRF (readsb only; dump1090 cannot drive a HackRF).")
+        _ADSB.update({"last_error": message})
+        raise ValueError(message)
+    binary = _adsb_binary(device_type)
     if not binary:
-        message = ("dump1090/readsb is not installed. Install dump1090-mutability, "
+        message = ("ADS-B with a HackRF needs readsb; readsb is not installed. "
+                   "Install readsb, or connect an RTL-SDR for dump1090."
+                   if device_type == "hackrf" else
+                   "dump1090/readsb is not installed. Install dump1090-mutability, "
                    "dump1090-fa or readsb.")
         _ADSB.update({"last_error": message})
         raise ValueError(message)
@@ -1453,7 +1483,14 @@ def start_adsb(port: int | None = None, gain: int | None = None,
     if not os.access(json_dir, os.W_OK):
         raise ValueError(f"ADS-B data directory is not writable: {json_dir}")
     base = Path(binary).name.lower()
-    if "readsb" in base:
+    if device_type == "hackrf":
+        serial = str((detect().get("hackrf") or {}).get("serial") or "").strip()
+        cmd = [binary, "--device-type=hackrf"]
+        if serial:
+            cmd.append(f"--device={serial}")
+        cmd += [f"--hackrf-vgagain={_quantize_gain(gain, 62, 2)}",
+                "--write-json", str(json_dir), "--quiet"]
+    elif "readsb" in base:
         cmd = [binary, "--device-type", "rtlsdr", "--device", str(device),
                "--gain", str(gain), "--write-json", str(json_dir), "--quiet"]
     else:
@@ -1480,7 +1517,7 @@ def start_adsb(port: int | None = None, gain: int | None = None,
             tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-8:])
         except OSError:
             pass
-        message = f"dump1090 exited with code {proc.returncode}. {tail[:500]}".strip()
+        message = f"The ADS-B receiver exited with code {proc.returncode}. {tail[:500]}".strip()
         _ADSB.update({"proc": None, "binary": binary, "port": port, "started": None,
                       "log": str(log_path), "warning": "", "dir": None,
                       "last_error": message})
@@ -1513,7 +1550,8 @@ def adsb_snapshot() -> dict:
     data = _adsb_feed(status.get("port"))
     if not data:
         return {"available": False, "aircraft": [], "status": status,
-                "note": "Start dump1090 from the ADS-B tab, or feed a HackRF IQ file to dump1090 --ifile."}
+                "note": "Start the ADS-B receiver from the ADS-B tab "
+                        "(dump1090 for an RTL-SDR, readsb for a HackRF)."}
     aircraft = []
     for a in data.get("aircraft", [])[:100]:
         aircraft.append({"hex": a.get("hex"), "flight": (a.get("flight") or "").strip(),
