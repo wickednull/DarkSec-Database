@@ -1,40 +1,31 @@
 # Screenshots
 
-These screenshots were captured from a demo profile at 1600×1000. The callsign,
-position and records are sample data; no real operator position or vault
-contents are shown.
+Captured from a throwaway demo profile at 1600×1000. The callsign, position,
+records and Delamain conversation are sample data; no real operator position or
+vault contents are shown.
 
-Included:
+## Files
 
-- `map-world.png` — 2D world map, basemap only.
-- `map-focused.png` — focused map with a small waypoint set.
-- `defcon-tracker.png` — DEFCON tracker and overview stats.
-- `situation-report.png` — main dashboard / SITREP.
-- `situation-report-light.png` — the same dashboard in the Daylight light theme.
-- `global-search.png` — top-bar global search across records, documents and references.
-- `document-library.png` — document library and full-text search.
+- `map-world.png` — 2D world map, wide view.
+- `map-focused.png` — focused map with sample waypoints and cached intel layers.
+- `defcon-tracker.png` — DEFCON tracker and intel overview.
+- `situation-report.png` — main dashboard / SITREP, Slate theme + Amber CRT accent.
+- `situation-report-plum.png` — same dashboard, Plum theme + Green accent.
+- `situation-report-light.png` — same dashboard, Daylight light theme.
+- `situation-report-operations.png` — dashboard Operations tab.
+- `delamain.png` — Delamain local AI assistant, Slate / Amber CRT.
+- `delamain-plum.png` — Delamain local AI assistant, Plum / Green.
+- `document-library.png` — document library and search/index state.
 - `security-vault.png` — vault and security page.
+- `global-search.png` — top-bar global search across records, documents and references.
 
-## Delamain screenshots
+## Regenerating
 
-The two Delamain images were intentionally deferred until a non-uncensored
-Qwen 3.5 model is installed.
+Screenshots are produced by `/tmp/opencode/shots/shoot.py` against a throwaway
+backend (`DARKSEC_DATA=/tmp/opencode/shots`, `--no-index`, port 8799). The
+script seeds demo records, waits for feeds to settle, indexes sample library
+text for global search, and drives headless Chromium via Selenium/ChromeDriver.
 
-Suggested setup:
-
-```bash
-ollama pull qwen3.5:4b
-```
-
-In DarkSec:
-
-1. Settings → Delamain / Ollama → model `qwen3.5:4b`, thinking off.
-2. Ask a useful planning question, e.g.:
-   > Build a 72-hour water plan for two people using a 20 L container, a Sawyer
-   > filter, and municipal water that may be cut off. Include storage, treatment,
-   > and a rotation schedule.
-3. Capture the conversation with the model selector visible.
-4. For the white/basic view, switch Settings → Theme to **High contrast** and
-   Accent to **Monochrome**, then capture the same conversation.
-
-Do not use the locally installed uncensored model for public screenshots.
+Delamain shots require a local Ollama model. The current set used the locally
+installed uncensored Qwen 3.5 4B model; swap `UNCENSORED` in the script to use a
+different installed model.

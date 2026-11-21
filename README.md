@@ -16,6 +16,9 @@ database.
 
 ## Screenshots
 
+Captured from a demo profile at 1600×1000 with sample data; no real operator
+position or vault contents are shown.
+
 | World map | Focused map |
 | --- | --- |
 | ![World map](docs/screenshots/map-world.png) | ![Focused map](docs/screenshots/map-focused.png) |
@@ -24,13 +27,23 @@ database.
 | --- | --- |
 | ![DEFCON tracker](docs/screenshots/defcon-tracker.png) | ![Situation report](docs/screenshots/situation-report.png) |
 
-| Document library | Security & vault |
+| Delamain (local AI) | Document library |
 | --- | --- |
-| ![Document library](docs/screenshots/document-library.png) | ![Security and vault](docs/screenshots/security-vault.png) |
+| ![Delamain local AI assistant](docs/screenshots/delamain.png) | ![Document library](docs/screenshots/document-library.png) |
 
-### Theme switching
+| Global search | Security & vault |
+| --- | --- |
+| ![Global search across records, documents and references](docs/screenshots/global-search.png) | ![Security and vault](docs/screenshots/security-vault.png) |
 
-![Situation report in the Daylight light theme](docs/screenshots/situation-report-light.png)
+### Themes and color options
+
+| Slate / Amber CRT (dark) | Plum / Green (dark) |
+| --- | --- |
+| ![Situation report in Slate with Amber CRT accent](docs/screenshots/situation-report.png) | ![Situation report in Plum with Green accent](docs/screenshots/situation-report-plum.png) |
+
+| Delamain in Plum / Green | Daylight (light) |
+| --- | --- |
+| ![Delamain in Plum with Green accent](docs/screenshots/delamain-plum.png) | ![Situation report in the Daylight light theme](docs/screenshots/situation-report-light.png) |
 
 Dark and light backgrounds are both supported. Light themes use soft, low-glare
 palettes inspired by Catppuccin Latte, Rosé Pine Dawn, Solarized Light, GitHub
@@ -41,17 +54,6 @@ include Nightwatch, Midnight, Blackout, Forest, Slate, Ocean, Ember, Plum and
 high contrast. The sun/moon button in the top bar switches between your saved
 dark and light themes. **Settings → Identity & display** sets the background
 mode (Dark / Light / Follow system), both theme variants, and the accent colour.
-
-
-### Global search
-
-![Global search across records, documents and references](docs/screenshots/global-search.png)
-
-The magnifier in the top bar (or `/`) searches every operator record, the
-full-text document library, field-manual guides, reference cards and radio
-frequencies from one list. Matches open the owning view; a record also opens its
-edit form, and a library result opens the document. `Ctrl+K` remains the command
-palette.
 
 ## What is included
 
