@@ -53,3 +53,17 @@ Books/
 .directory
 __pycache__/
 .pytest_cache/
+
+# Local agent/AI instruction files — for our sessions only, never published
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.cursorrules
+.cursor/
+.windsurfrules
+.clinerules
+.opencode/
+opencode.json
+opencode.jsonc
+.github/copilot-instructions.md
+.github/instructions/
