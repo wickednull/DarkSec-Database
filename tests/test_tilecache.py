@@ -418,3 +418,23 @@ def test_download_job_fetches_label_overlays(monkeypatch, tmp_path):
         "esri_imagery", "esri_labels_places", "esri_labels_roads"}
     assert job["state"] == "done"
     assert job["total"] == len(seen)
+
+
+def test_pack_limit_allows_a_25km_radius_with_labels():
+    """A 25 km / z16 pack with labels is ~70k tiles: the old 40k cap refused it."""
+    from darksec import tilecache
+
+    # Same bbox the map builds for a 25 km radius at 51.5 N.
+    est = tilecache.estimate_tiles(51.274, -0.481, 51.726, 0.241, 0, 16,
+                                   "esri_imagery", include_labels=True)
+    assert est["total"] > 40000
+    assert est["limit"] == tilecache.MAX_DOWNLOAD_TILES
+    assert est["over_limit"] is False
+
+
+def test_pack_limit_still_refuses_a_continent_scale_job():
+    from darksec import tilecache
+
+    est = tilecache.estimate_tiles(-60, -120, 60, 120, 0, 12, "esri_imagery")
+    assert est["total"] > tilecache.MAX_DOWNLOAD_TILES
+    assert est["over_limit"] is True

@@ -318,6 +318,14 @@ label share before you start. **Cache viewed areas automatically** includes
 labels when **Settings → Offline maps → labels overlay** is on. Without the
 option an offline pack still shows terrain/streets but no place names.
 
+One pack may queue up to 150,000 tiles across every source in it (a labelled
+pack counts three sources). The cap only stops a mis-click from starting a
+continent-scale job; a 25 km radius at max zoom 16 fits comfortably. If labels
+push a pack over it, the dialog offers to download the basemap alone instead of
+refusing outright, and the estimate turns red before you press download. Large
+packs are slow at the polite request rate but keep their progress: already
+cached tiles are skipped when you start the same area again.
+
 Tile serving is built to stay responsive on slow storage and slow networks. A
 small in-memory LRU serves recently used tiles (including parents used for
 overzoom) without touching the SD card, and recent misses are remembered for a

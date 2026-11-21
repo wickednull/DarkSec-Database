@@ -818,7 +818,7 @@ export async function render(root, params = {}) {
     const includeLabels = checkbox("Also download place & road labels (2 transparent overlay layers)",
       settings.map_labels_overlay !== false);
     const labelsHint = h("div", { class: "tiny muted", text:
-      "The map draws Esri place and road labels above the basemap. Without this option they stay online-only, so an offline pack shows terrain and roads but no names. Enabling it roughly triples the tile count." });
+      "The map draws Esri place and road labels above the basemap. Without this option they stay online-only, so an offline pack shows terrain and roads but no names. Enabling it roughly triples the tile count, so it can push a large radius past the pack limit." });
     const centerLat = input({ type: "number", step: "0.0001", value: view.lat.toFixed(4) });
     const centerLon = input({ type: "number", step: "0.0001", value: view.lon.toFixed(4) });
     const estimateEl = h("div", { class: "callout", text: "Calculating…" });
@@ -923,11 +923,15 @@ export async function render(root, params = {}) {
           ? Object.entries(e.sources).filter(([k]) => k.includes("labels"))
               .reduce((n, [, v]) => n + (v.total || 0), 0)
           : 0;
+        const overLimit = e.over_limit === true || (e.limit > 0 && e.total > e.limit);
         estimateEl.textContent = `Zoom ${zMin}–${zMax} · ${e.total.toLocaleString()} tiles` +
           (labelBits ? ` (${labelBits.toLocaleString()} label)` : "") +
           ` · ${e.missing.toLocaleString()} to fetch · ≈${mb} MB` +
+          (overLimit ? ` · OVER THE ${e.limit.toLocaleString()} TILE LIMIT — lower the max zoom,` +
+            ` shrink the radius, or untick labels` : "") +
           (noRoom ? ` · NOT ENOUGH FREE SPACE (${cacheTarget.free_gb} GB free)` : "");
-        estimateEl.className = (e.missing > 8000 || noRoom) ? "callout warn" : "callout";
+        estimateEl.className = (overLimit || noRoom) ? "callout danger"
+          : (e.missing > 8000 ? "callout warn" : "callout");
       }).catch((err) => {
         if (seq !== estimateSeq) return;
         estimateEl.textContent = `Estimate unavailable: ${err.message}`;
@@ -969,7 +973,29 @@ export async function render(root, params = {}) {
         toast("A download is already running — cancel it in Downloads first", "warn");
         return;
       }
-      const { source, bbox, zMin, zMax, includeLabels: withLabels } = currentRequest();
+      let { source, bbox, zMin, zMax, includeLabels: withLabels } = currentRequest();
+      // The cap counts labels as tiles. Rather than refusing the pack, offer to
+      // drop the overlays: the basemap alone is usually well under the limit.
+      if (lastEstimate?.over_limit) {
+        const baseTotal = lastEstimate.sources?.[source]?.total || 0;
+        if (withLabels && baseTotal && baseTotal <= (lastEstimate.limit || 0)) {
+          const ok = await confirmDialog({
+            title: "Over the tile limit",
+            message: `With labels this pack needs ${lastEstimate.total.toLocaleString()} tiles, ` +
+              `over the ${lastEstimate.limit.toLocaleString()} tile limit. ` +
+              `Download the basemap only (${baseTotal.toLocaleString()} tiles, no place or ` +
+              `road names)?`,
+            confirmText: "WITHOUT LABELS",
+          });
+          if (!ok) return;
+          withLabels = false;
+        } else {
+          toast(`Too many tiles (${lastEstimate.total.toLocaleString()}, limit ` +
+            `${lastEstimate.limit.toLocaleString()}). Lower the max zoom or shrink the radius.`,
+            "error");
+          return;
+        }
+      }
       if (lastEstimate && lastEstimate.missing > 30000) {
         const ok = await confirmDialog({
           title: "Large download",

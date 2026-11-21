@@ -125,6 +125,11 @@ DEFAULT_SOURCE = "esri_imagery"
 USER_AGENT = "DarkSec-FieldConsole/2.0 (offline survival map cache; +https://github.com/darksec)"
 REQUEST_TIMEOUT = 20
 MIN_REQUEST_INTERVAL = 0.12  # seconds between upstream requests
+# Ceiling for one offline pack, counted across every source in the job (a pack
+# with labels is three sources). It only exists to stop a mis-click from
+# queueing a continent-scale job; 150k tiles is roughly 2.7 GB on disk and a
+# few hours at the polite request rate, and is cancellable/resumable.
+MAX_DOWNLOAD_TILES = 150_000
 # How long a tile request waits for a queued upstream fetch before painting a
 # cached parent instead. Small enough to keep the map responsive; most fast
 # providers answer inside it.
@@ -777,6 +782,7 @@ def estimate_tiles(lat_min, lon_min, lat_max, lon_max, zoom_min, zoom_max,
         missing += src_missing
     return {"total": total, "missing": missing, "source": source,
             "sources": per_source, "include_labels": bool(include_labels),
+            "limit": MAX_DOWNLOAD_TILES, "over_limit": total > MAX_DOWNLOAD_TILES,
             "zoom_range": [zoom_min, zoom_max]}
 
 

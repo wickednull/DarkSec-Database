@@ -5707,7 +5707,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         est = tilecache.estimate_tiles(lat_min, lon_min, lat_max, lon_max,
                                        zoom_min, zoom_max, source,
                                        include_labels=include_labels)
-        require(est["total"] <= 40000, f"Area too large ({est['total']} tiles). Narrow the box or lower max zoom.", 400)
+        require(not est["over_limit"],
+                f"Area too large ({est['total']:,} tiles, limit "
+                f"{est['limit']:,}). Lower the max zoom, shrink the radius, "
+                f"or turn off the label overlays.", 400)
         job = tilecache.start_download(lat_min, lon_min, lat_max, lon_max,
                                        zoom_min, zoom_max, source,
                                        label=str(body.get("label") or "manual"),

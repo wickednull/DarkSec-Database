@@ -1403,3 +1403,25 @@ def test_map_estimate_reports_label_overlays(client):
     assert set(data["sources"]) == {
         "esri_imagery", "esri_labels_places", "esri_labels_roads"}
     assert data["total"] == sum(s["total"] for s in data["sources"].values())
+
+
+def test_map_download_refuses_pack_over_the_tile_limit(client):
+    r = client.post("/api/map/cache/download", json={
+        "lat_min": -60, "lat_max": 60, "lon_min": -120, "lon_max": 120,
+        "zoom_min": 0, "zoom_max": 12, "source": "esri_imagery",
+    })
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "limit" in detail and "label" in detail
+
+
+def test_map_estimate_reports_the_pack_limit(client):
+    r = client.post("/api/map/cache/estimate", json={
+        "lat_min": 51.274, "lat_max": 51.726, "lon_min": -0.481, "lon_max": 0.241,
+        "zoom_min": 0, "zoom_max": 16, "source": "esri_imagery",
+        "include_labels": True,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["limit"] == 150_000
+    assert data["over_limit"] is False
