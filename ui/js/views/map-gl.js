@@ -30,7 +30,7 @@ function loadMapLibre() {
   return maplibrePromise;
 }
 
-function rasterStyle(revision = "", source = "", generation = 0, labelsOverlay = false) {
+function rasterStyle(revision = "", source = "", generation = 0, labelsOverlay = false, mbtilesRaster = false) {
   const params = new URLSearchParams();
   if (revision) params.set("r", revision);
   if (source) params.set("s", source);
@@ -44,7 +44,10 @@ function rasterStyle(revision = "", source = "", generation = 0, labelsOverlay =
     { id: "bg", type: "background", paint: { "background-color": "#030806" } },
     { id: "local-raster", type: "raster", source: "local", paint: { "raster-opacity": 0.92, "raster-fade-duration": 120 } },
   ];
-  if (labelsOverlay && ["esri_imagery", "usgs_imagery"].includes(source)) {
+  const showLabels = labelsOverlay && (
+    ["esri_imagery", "usgs_imagery"].includes(source) || mbtilesRaster
+  );
+  if (showLabels) {
     const labelTiles = (id) =>
       [`${location.origin}/api/map/cache/tiles/${id}/{z}/{x}/{y}.png?v=5&s=${id}&b=${generation || 0}`];
     sources.labelsPlaces = {
@@ -237,7 +240,7 @@ export async function render(root, params = {}) {
       toast(`Vector basemap style unavailable: ${err.message || err}`, "warn", 7000);
     }
   }
-  if (!mapStyle) mapStyle = rasterStyle(mbInfo.revision || "", mapLayers?.activeSource || "", mapLayers?.cacheGeneration || 0, labelsOverlay);
+  if (!mapStyle) mapStyle = rasterStyle(mbInfo.revision || "", mapLayers?.activeSource || "", mapLayers?.cacheGeneration || 0, labelsOverlay, !!(mbInfo.raster && mbInfo.usable));
   mapStyle = await ensureVectorGlyphs(mapStyle);
   let intelAlpr = { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };
   let alprFetchTimer = null, alprQueryKey = "";

@@ -545,8 +545,7 @@ export async function render(root, params = {}) {
     const mbNames = (mbtilesInfo.archives || []).map((a) => a.name).filter(Boolean).slice(0, 3).join(", ");
     const attr = layer?.attribution || sourceMeta[activeSource]?.attribution
       || (mbtilesInfo.usable ? `MBTiles · ${mbNames || "operator archive"}` : "");
-    const labels = labelsOverlay && ["esri_imagery", "usgs_imagery"].includes(activeSource)
-      ? " · Labels: Esri" : "";
+    const labels = labelOverlaysActive() ? " · Labels: Esri overlays" : "";
     attribution.textContent = attr ? `Tiles: ${attr}${labels}` : "Vector basemap · no tile attribution";
   }
   api.get("/api/map/cache/sources").then((r) => {
@@ -1089,9 +1088,16 @@ export async function render(root, params = {}) {
     }
   }
 
+  function labelOverlaysActive() {
+    if (!labelsOverlay) return false;
+    if (["esri_imagery", "usgs_imagery"].includes(activeSource)) return true;
+    // Raster MBTiles (imagery or topo packs) often have no label layer; overlay
+    // Esri place/road labels so roads and names stay readable offline.
+    return !!(mbtilesInfo.raster && mbtilesInfo.usable);
+  }
+
   function drawLabelTiles(ctx, w, hh) {
-    if (!labelsOverlay || view.zoom < 6) return;
-    if (!["esri_imagery", "usgs_imagery"].includes(activeSource)) return;
+    if (!labelOverlaysActive() || view.zoom < 6) return;
     const z = Math.max(0, Math.min(19, Math.round(view.zoom)));
     const worldScale = TILE * (2 ** view.zoom);
     const tileSize = TILE * (2 ** (view.zoom - z));
