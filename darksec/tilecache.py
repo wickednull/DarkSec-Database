@@ -731,6 +731,16 @@ def lat_to_tile(lat: float, z: int) -> int:
         (1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi) / 2.0 * n))
 
 
+LABEL_SOURCES = ("esri_labels_places", "esri_labels_roads")
+
+
+def label_sources_for(source: str) -> list[str]:
+    """Transparent label overlays the map draws above any raster basemap."""
+    if source in LABEL_SOURCES or source not in TILE_SOURCES:
+        return []
+    return list(LABEL_SOURCES)
+
+
 def tiles_in_bbox(lat_min, lon_min, lat_max, lon_max, zoom_min, zoom_max, source=DEFAULT_SOURCE):
     tiles = []
     for z in range(zoom_min, zoom_max + 1):
@@ -742,22 +752,31 @@ def tiles_in_bbox(lat_min, lon_min, lat_max, lon_max, zoom_min, zoom_max, source
     return tiles
 
 
-def estimate_tiles(lat_min, lon_min, lat_max, lon_max, zoom_min, zoom_max, source=DEFAULT_SOURCE) -> dict:
+def estimate_tiles(lat_min, lon_min, lat_max, lon_max, zoom_min, zoom_max,
+                   source=DEFAULT_SOURCE, include_labels: bool = False) -> dict:
     """Cheap count without building the full list — used by the UI before download."""
+    sources = [source] + (label_sources_for(source) if include_labels else [])
     missing = 0
     total = 0
-    for z in range(zoom_min, zoom_max + 1):
-        nx = lon_to_tile(lon_max, z) - lon_to_tile(lon_min, z) + 1
-        ny = lat_to_tile(lat_min, z) - lat_to_tile(lat_max, z) + 1
-        n = max(0, nx) * max(0, ny)
-        total += n
-    # Exact cached count only when small enough to enumerate, else approximate.
-    if total <= 4000:
-        missing = sum(1 for t in tiles_in_bbox(
-            lat_min, lon_min, lat_max, lon_max, zoom_min, zoom_max, source) if not t["cached"])
-    else:
-        missing = total
+    per_source: dict[str, dict] = {}
+    for src in sources:
+        src_total = 0
+        for z in range(zoom_min, zoom_max + 1):
+            nx = lon_to_tile(lon_max, z) - lon_to_tile(lon_min, z) + 1
+            ny = lat_to_tile(lat_min, z) - lat_to_tile(lat_max, z) + 1
+            src_total += max(0, nx) * max(0, ny)
+        # Exact cached count only when small enough to enumerate, else approximate.
+        if src_total <= 4000:
+            src_missing = sum(1 for t in tiles_in_bbox(
+                lat_min, lon_min, lat_max, lon_max, zoom_min, zoom_max, src)
+                if not t["cached"])
+        else:
+            src_missing = src_total
+        per_source[src] = {"total": src_total, "missing": src_missing}
+        total += src_total
+        missing += src_missing
     return {"total": total, "missing": missing, "source": source,
+            "sources": per_source, "include_labels": bool(include_labels),
             "zoom_range": [zoom_min, zoom_max]}
 
 
@@ -773,12 +792,17 @@ def _job_log(job: dict, message: str, level: str = "info") -> None:
 
 
 def start_download(lat_min, lon_min, lat_max, lon_max, zoom_min, zoom_max,
-                   source=DEFAULT_SOURCE, label: str = "manual") -> dict:
+                   source=DEFAULT_SOURCE, label: str = "manual",
+                   include_labels: bool = False) -> dict:
     job_id = uuid.uuid4().hex[:12]
+    labels = label_sources_for(source) if include_labels else []
+    sources = [source, *labels]
     job = {
         "id": job_id,
         "state": "running",
         "source": source,
+        "sources": sources,
+        "include_labels": bool(labels),
         "label": str(label or "manual")[:20],
         "bbox": [lat_min, lon_min, lat_max, lon_max],
         "zoom_range": [zoom_min, zoom_max],
@@ -789,7 +813,8 @@ def start_download(lat_min, lon_min, lat_max, lon_max, zoom_min, zoom_max,
         "started": time.time(), "finished": None,
     }
     _job_log(job, f"Started {source} z{zoom_min}–{zoom_max} "
-                  f"({'auto' if label == 'auto' else 'manual'} pack)")
+                  f"({'auto' if label == 'auto' else 'manual'} pack)"
+                  + (f" · labels: {', '.join(labels)}" if labels else ""))
     with _jobs_lock:
         _jobs[job_id] = job
     t = threading.Thread(target=_run_job, args=(job,), daemon=True)
@@ -824,10 +849,15 @@ def list_jobs(limit: int = 12) -> list[dict]:
 
 
 def _run_job(job: dict) -> None:
-    tiles = tiles_in_bbox(*job["bbox"], *job["zoom_range"], job["source"])
+    sources = job.get("sources") or [job["source"]]
+    tiles = []
+    for src in sources:
+        for t in tiles_in_bbox(*job["bbox"], *job["zoom_range"], src):
+            t["source"] = src
+            tiles.append(t)
     job["total"] = len(tiles)
     step = max(1, min(200, len(tiles) // 40)) if tiles else 1
-    _job_log(job, f"{len(tiles):,} tiles in range · source {job['source']}")
+    _job_log(job, f"{len(tiles):,} tiles in range · sources: {', '.join(sources)}")
     consecutive_failures = 0
     last_progress = time.monotonic()
     try:
@@ -847,7 +877,7 @@ def _run_job(job: dict) -> None:
                                   f"{job['downloaded']:,} new · {job['already_cached']:,} cached")
                 continue
             try:
-                data = fetch_tile(t["z"], t["x"], t["y"], job["source"])
+                data = fetch_tile(t["z"], t["x"], t["y"], t.get("source") or job["source"])
             except TileBlocked as exc:
                 job["blocked"] = str(exc)
                 job["state"] = "blocked"

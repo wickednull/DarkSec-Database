@@ -378,3 +378,43 @@ def test_tile_route_does_not_wait_for_a_stalled_provider(tmp_path, monkeypatch, 
     response = client.get("/api/map/tiles/11/1801/901.png")
     assert time.perf_counter() - started < 1.0
     assert response.status_code in (200, 404)
+
+
+def test_estimate_can_include_label_overlays():
+    from darksec import tilecache
+
+    base = tilecache.estimate_tiles(39.70, -105.01, 39.71, -105.00, 12, 12, "esri_imagery")
+    with_labels = tilecache.estimate_tiles(39.70, -105.01, 39.71, -105.00, 12, 12,
+                                           "esri_imagery", include_labels=True)
+    assert with_labels["total"] == base["total"] * 3
+    assert set(with_labels["sources"]) == {
+        "esri_imagery", "esri_labels_places", "esri_labels_roads"}
+    assert with_labels["include_labels"] is True
+
+
+def test_download_job_fetches_label_overlays(monkeypatch, tmp_path):
+    from darksec import config, tilecache
+
+    monkeypatch.setattr(config, "MAP_TILE_DIR", tmp_path)
+    monkeypatch.setattr(tilecache, "is_online", lambda **_: True)
+    seen = []
+
+    def fake_fetch(z, x, y, source="esri_imagery"):
+        seen.append((z, x, y, source))
+        return b""
+
+    monkeypatch.setattr(tilecache, "fetch_tile", fake_fetch)
+    job = {
+        "id": "test", "state": "running", "source": "esri_imagery",
+        "sources": ["esri_imagery", "esri_labels_places", "esri_labels_roads"],
+        "bbox": [39.70, -105.00, 39.705, -104.995], "zoom_range": [12, 12],
+        "total": 0, "completed": 0, "downloaded": 0, "already_cached": 0,
+        "failed": 0, "bytes_added": 0, "blocked": None, "error": None,
+        "cancel": False, "current": None, "log": [], "started": 0,
+        "finished": None, "label": "test",
+    }
+    tilecache._run_job(job)
+    assert {src for _, _, _, src in seen} == {
+        "esri_imagery", "esri_labels_places", "esri_labels_roads"}
+    assert job["state"] == "done"
+    assert job["total"] == len(seen)

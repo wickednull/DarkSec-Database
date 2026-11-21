@@ -1389,3 +1389,17 @@ def test_defcon_failure_marks_cached_value_stale_and_backs_off(monkeypatch):
     finally:
         defcon._cache.clear()
         defcon._cache.update(saved)
+
+
+def test_map_estimate_reports_label_overlays(client):
+    r = client.post("/api/map/cache/estimate", json={
+        "lat_min": 39.70, "lat_max": 39.71, "lon_min": -105.01, "lon_max": -105.00,
+        "zoom_min": 12, "zoom_max": 12, "source": "esri_imagery",
+        "include_labels": True,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["include_labels"] is True
+    assert set(data["sources"]) == {
+        "esri_imagery", "esri_labels_places", "esri_labels_roads"}
+    assert data["total"] == sum(s["total"] for s in data["sources"].values())

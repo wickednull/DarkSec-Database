@@ -593,6 +593,7 @@ export async function render(root, params = {}) {
         lat_min: bbox.latMin, lat_max: bbox.latMax,
         lon_min: bbox.lonMin, lon_max: bbox.lonMax,
         zoom_min: 0, zoom_max: zMax, source: activeSource, label: "auto",
+        include_labels: labelsOverlay,
       });
       await pollAutoPack(job.id);
     } catch {
@@ -814,6 +815,10 @@ export async function render(root, params = {}) {
       { value: "16", label: "Max zoom 16 (building detail)" },
     ], "15");
     const fullStack = checkbox("Download the full zoom stack (z0 → max) for seamless zooming", true);
+    const includeLabels = checkbox("Also download place & road labels (2 transparent overlay layers)",
+      settings.map_labels_overlay !== false);
+    const labelsHint = h("div", { class: "tiny muted", text:
+      "The map draws Esri place and road labels above the basemap. Without this option they stay online-only, so an offline pack shows terrain and roads but no names. Enabling it roughly triples the tile count." });
     const centerLat = input({ type: "number", step: "0.0001", value: view.lat.toFixed(4) });
     const centerLon = input({ type: "number", step: "0.0001", value: view.lon.toFixed(4) });
     const estimateEl = h("div", { class: "callout", text: "Calculating…" });
@@ -835,6 +840,8 @@ export async function render(root, params = {}) {
       field("Area", radiusSel),
       field("Detail (max zoom)", zoomSel),
       fullStack,
+      includeLabels,
+      labelsHint,
       h("div", { class: "row gap-8" },
         field("Centre latitude", centerLat),
         field("Centre longitude", centerLon)),
@@ -893,25 +900,32 @@ export async function render(root, params = {}) {
       // A full stack avoids a different (or missing) basemap when the user
       // zooms out. The old zMax-4 packs left most overview zooms absent.
       const zMin = fullStack.querySelector("input").checked ? 0 : Math.max(6, zMax - 4);
-      return { source, bbox, zMin, zMax };
+      const labels = includeLabels.querySelector("input").checked;
+      return { source, bbox, zMin, zMax, includeLabels: labels };
     }
 
     let estimateSeq = 0;
     function updateEstimate() {
-      const { source, bbox, zMin, zMax } = currentRequest();
+      const { source, bbox, zMin, zMax, includeLabels: withLabels } = currentRequest();
       const seq = ++estimateSeq;
       api.post("/api/map/cache/estimate", {
         lat_min: bbox.latMin, lat_max: bbox.latMax,
         lon_min: bbox.lonMin, lon_max: bbox.lonMax,
         zoom_min: zMin, zoom_max: zMax, source,
+        include_labels: withLabels,
       }).then((e) => {
         if (seq !== estimateSeq) return;
         lastEstimate = e;
         const mb = (e.missing * 18 / 1024).toFixed(1);
         const neededGb = (e.missing * 18) / (1024 * 1024);
         const noRoom = cacheTarget?.free_gb != null && neededGb > cacheTarget.free_gb;
-        estimateEl.textContent = `Zoom ${zMin}–${zMax} · ${e.total.toLocaleString()} tiles · ` +
-          `${e.missing.toLocaleString()} to fetch · ≈${mb} MB` +
+        const labelBits = e.include_labels && e.sources
+          ? Object.entries(e.sources).filter(([k]) => k.includes("labels"))
+              .reduce((n, [, v]) => n + (v.total || 0), 0)
+          : 0;
+        estimateEl.textContent = `Zoom ${zMin}–${zMax} · ${e.total.toLocaleString()} tiles` +
+          (labelBits ? ` (${labelBits.toLocaleString()} label)` : "") +
+          ` · ${e.missing.toLocaleString()} to fetch · ≈${mb} MB` +
           (noRoom ? ` · NOT ENOUGH FREE SPACE (${cacheTarget.free_gb} GB free)` : "");
         estimateEl.className = (e.missing > 8000 || noRoom) ? "callout warn" : "callout";
       }).catch((err) => {
@@ -930,7 +944,7 @@ export async function render(root, params = {}) {
       targetEl.textContent = "Destination: current tile cache (status unavailable)";
     });
     updateEstimate();
-    [sourceSel, radiusSel, zoomSel, centerLat, centerLon, fullStack].forEach((el) =>
+    [sourceSel, radiusSel, zoomSel, centerLat, centerLon, fullStack, includeLabels].forEach((el) =>
       el.addEventListener("change", updateEstimate));
 
     api.get("/api/map/cache/sources").then((r) => {
@@ -955,7 +969,7 @@ export async function render(root, params = {}) {
         toast("A download is already running — cancel it in Downloads first", "warn");
         return;
       }
-      const { source, bbox, zMin, zMax } = currentRequest();
+      const { source, bbox, zMin, zMax, includeLabels: withLabels } = currentRequest();
       if (lastEstimate && lastEstimate.missing > 30000) {
         const ok = await confirmDialog({
           title: "Large download",
@@ -970,6 +984,7 @@ export async function render(root, params = {}) {
           lat_min: bbox.latMin, lat_max: bbox.latMax,
           lon_min: bbox.lonMin, lon_max: bbox.lonMax,
           zoom_min: zMin, zoom_max: zMax, source, label: "manual",
+          include_labels: withLabels,
         });
         activeSource = source;
         try { await store.saveSettings({ tile_source: source }); } catch {}

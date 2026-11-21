@@ -5681,7 +5681,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         require(source in tilecache.TILE_SOURCES, "Unknown tile source", 400)
         require(0 <= zoom_min <= zoom_max <= 19, "Invalid zoom range", 400)
         return tilecache.estimate_tiles(lat_min, lon_min, lat_max, lon_max,
-                                        zoom_min, zoom_max, source)
+                                        zoom_min, zoom_max, source,
+                                        include_labels=bool(body.get("include_labels")))
 
     @app.post("/api/map/cache/download")
     def download_tiles(request: Request, body: dict = Body(default={})):
@@ -5700,17 +5701,21 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         require(lat_min < lat_max and lon_min < lon_max, "Bounding box is inverted", 400)
         require(0 <= zoom_min <= zoom_max <= tilecache.TILE_SOURCES[source]["max_zoom"],
                 "Invalid zoom range for this source", 400)
-        # Guard against accidental continent-scale jobs.
+        include_labels = bool(body.get("include_labels"))
+        # Guard against accidental continent-scale jobs. Labels are two extra
+        # overlay sources, so they count toward the cap too.
         est = tilecache.estimate_tiles(lat_min, lon_min, lat_max, lon_max,
-                                       zoom_min, zoom_max, source)
+                                       zoom_min, zoom_max, source,
+                                       include_labels=include_labels)
         require(est["total"] <= 40000, f"Area too large ({est['total']} tiles). Narrow the box or lower max zoom.", 400)
         job = tilecache.start_download(lat_min, lon_min, lat_max, lon_max,
                                        zoom_min, zoom_max, source,
-                                       label=str(body.get("label") or "manual"))
+                                       label=str(body.get("label") or "manual"),
+                                       include_labels=include_labels)
         job["estimate"] = est
         db(request).audit("MAP_CACHE_DOWNLOAD",
                           f"job={job.get('id')} source={source} z{zoom_min}-{zoom_max} "
-                          f"tiles={job.get('total')}",
+                          f"labels={include_labels} tiles={job.get('total')}",
                           request.client.host if request.client else "")
         return job
 

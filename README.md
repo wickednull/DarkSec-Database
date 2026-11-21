@@ -309,6 +309,15 @@ and only then the bundled overview. Cached tiles from unrelated providers are
 never mixed into the same view. Missing high-zoom tiles therefore stay aligned
 with roads, waypoints and intel instead of turning into a patchwork.
 
+**Labels are a separate overlay.** The map draws Esri place and road label
+tiles above the basemap; they are not part of the imagery/topo tile set. The
+offline download dialog has **Also download place & road labels**, on by default
+when the labels overlay is enabled, which stores both label layers for the same
+area and zooms. It roughly triples the tile count, so the estimate shows the
+label share before you start. **Cache viewed areas automatically** includes
+labels when **Settings → Offline maps → labels overlay** is on. Without the
+option an offline pack still shows terrain/streets but no place names.
+
 Tile serving is built to stay responsive on slow storage and slow networks. A
 small in-memory LRU serves recently used tiles (including parents used for
 overzoom) without touching the SD card, and recent misses are remembered for a
