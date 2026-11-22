@@ -1155,7 +1155,7 @@ def _invalidate_stats() -> None:
 
 
 def _walk_images(base: Path):
-    """Yield (zoom, size) for cached images without Path/rglob overhead."""
+    """Yield (zoom, size, allocated) for cached images without Path/rglob overhead."""
     stack = [(base, None)]
     while stack:
         directory, zoom = stack.pop()
@@ -1171,47 +1171,71 @@ def _walk_images(base: Path):
                     stack.append((Path(entry.path), z))
                 elif (entry.is_file(follow_symlinks=False)
                       and os.path.splitext(entry.name)[1].lower() in _IMAGE_SUFFIXES):
-                    yield zoom, entry.stat(follow_symlinks=False).st_size
+                    st = entry.stat(follow_symlinks=False)
+                    allocated = getattr(st, "st_blocks", None)
+                    allocated_bytes = (allocated * 512) if allocated is not None else st.st_size
+                    yield zoom, st.st_size, allocated_bytes
             except OSError:
                 continue
 
 
 def _compute_stats(source: Optional[str] = None) -> dict:
-    sources = [source] if source else list(TILE_SOURCES)
+    if source:
+        sources = [source]
+    else:
+        sources = list(TILE_SOURCES)
+        # Include any on-disk cache directories not in TILE_SOURCES so totals
+        # match what is actually stored (legacy/custom source dirs).
+        try:
+            for entry in os.scandir(cache_root()):
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                name = entry.name
+                if name not in sources:
+                    sources.append(name)
+        except OSError:
+            pass
     out = []
     total_tiles = 0
     total_bytes = 0
+    total_disk_bytes = 0
     for src in sources:
-        if src not in TILE_SOURCES:
-            continue
+        meta = TILE_SOURCES.get(src, {})
         base = cache_root() / _safe(src)
         tiles = 0
         size = 0
+        disk_size = 0
         min_z, max_z = 99, 0
         if base.exists():
-            for z, n_bytes in _walk_images(base):
+            for z, n_bytes, n_disk in _walk_images(base):
                 tiles += 1
                 size += n_bytes
+                disk_size += n_disk
                 if z is not None:
                     min_z = min(min_z, z)
                     max_z = max(max_z, z)
         total_tiles += tiles
         total_bytes += size
+        total_disk_bytes += disk_size
         out.append({
             "source": src,
-            "name": TILE_SOURCES[src]["name"],
+            "name": meta.get("name", src),
             "tile_count": tiles,
             "total_bytes": size,
             "total_mb": round(size / (1024 * 1024), 2),
+            "disk_bytes": disk_size,
+            "disk_mb": round(disk_size / (1024 * 1024), 2),
             "zoom_range": [min_z, max_z] if tiles else [],
-            "max_zoom": TILE_SOURCES[src]["max_zoom"],
-            "attribution": TILE_SOURCES[src]["attribution"],
+            "max_zoom": meta.get("max_zoom"),
+            "attribution": meta.get("attribution", ""),
         })
     info = disk_info()
     result = {
         "tile_count": total_tiles,
         "total_bytes": total_bytes,
         "total_mb": round(total_bytes / (1024 * 1024), 2),
+        "disk_bytes": total_disk_bytes,
+        "disk_mb": round(total_disk_bytes / (1024 * 1024), 2),
         "path": str(cache_root()),
         "free_bytes": info["free_bytes"],
         "free_gb": info["free_gb"],

@@ -438,3 +438,31 @@ def test_pack_limit_still_refuses_a_continent_scale_job():
     est = tilecache.estimate_tiles(-60, -120, 60, 120, 0, 12, "esri_imagery")
     assert est["total"] > tilecache.MAX_DOWNLOAD_TILES
     assert est["over_limit"] is True
+
+
+def test_cache_stats_reports_disk_bytes_and_unknown_dirs(monkeypatch, tmp_path):
+    from darksec import config, tilecache
+
+    monkeypatch.setattr(config, "MAP_TILE_DIR", tmp_path)
+    tilecache._invalidate_stats()
+
+    cache = tmp_path / "cache"
+    known = cache / "esri_imagery" / "10" / "512" / "384.png"
+    known.parent.mkdir(parents=True)
+    known.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 256)
+    unknown = cache / "custom_legacy" / "5" / "1" / "2.jpg"
+    unknown.parent.mkdir(parents=True)
+    unknown.write_bytes(b"\xff\xd8\xff" + b"y" * 128)
+
+    stats = tilecache.cache_stats()
+    assert stats["tile_count"] == 2
+    assert stats["total_bytes"] > 0
+    assert stats["disk_bytes"] >= stats["total_bytes"]
+    assert stats["disk_mb"] >= 0
+    sources = {s["source"]: s for s in stats["sources"]}
+    assert "esri_imagery" in sources
+    assert "custom_legacy" in sources
+    assert sources["custom_legacy"]["tile_count"] == 1
+    assert sources["custom_legacy"]["disk_bytes"] >= sources["custom_legacy"]["total_bytes"]
+
+    tilecache._invalidate_stats()

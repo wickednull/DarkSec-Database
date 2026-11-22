@@ -1051,7 +1051,7 @@ export async function render(root) {
           destination = (locations?.items || []).find((item) => item.default)?.path || "";
         }
         const choice = await cacheSwitchChoice(stats.path || oldCache || "the current folder",
-          destination, stats.tile_count, stats.total_mb);
+          destination, stats.tile_count, stats.total_mb, stats.disk_mb);
         if (choice === "cancel") return;
         if (choice === "copy") {
           if (!destination) {
@@ -1992,7 +1992,12 @@ export async function render(root) {
       if (fetchCount) {
         try {
           const st = await api.get("/api/map/cache/status");
-          extra = ` · current cache ${Number(st.tile_count || 0).toLocaleString()} tiles (${st.total_mb || 0} MB)`;
+          const logicalMb = Number(st.total_mb || 0);
+          const diskMb = Number(st.disk_mb || 0);
+          const size = diskMb > 0 && Math.abs(diskMb - logicalMb) > Math.max(64, logicalMb * 0.15)
+            ? `${logicalMb.toFixed(2)} MB data, ${diskMb.toFixed(2)} MB on disk`
+            : `${logicalMb.toFixed(2)} MB`;
+          extra = ` · current cache ${Number(st.tile_count || 0).toLocaleString()} tiles (${size})`;
         } catch { /* leave count out */ }
       }
       cacheStatus.className = "tiny muted";
@@ -2160,14 +2165,20 @@ export async function render(root) {
     });
   }
 
-  function cacheSwitchChoice(oldPath, newPath, tiles, mb) {
+  function cacheSwitchChoice(oldPath, newPath, tiles, mb, diskMb = 0) {
+    const logical = Number(mb) || 0;
+    const disk = Number(diskMb) || 0;
+    const fmtSize = (n) => n >= 1024 ? `${(n / 1024).toFixed(2)} GB` : `${n.toFixed(2)} MB`;
+    const sizeText = disk > 0 && Math.abs(disk - logical) > Math.max(64, logical * 0.15)
+      ? `${fmtSize(logical)} data, ${fmtSize(disk)} on disk`
+      : `${fmtSize(logical)}`;
     return new Promise((resolve) => {
       const m = modal({
         title: "Change tile cache location",
         sub: "Existing offline tiles",
         wide: true,
         body: h("div", { class: "col gap-8" },
-          h("div", { class: "small", text: `The current cache contains ${Number(tiles).toLocaleString()} tiles (${mb || 0} MB) at ${oldPath}.` }),
+          h("div", { class: "small", text: `The current cache contains ${Number(tiles).toLocaleString()} tiles (${sizeText}) at ${oldPath}.` }),
           h("div", { class: "small", text: `Copy them to ${newPath || "the app folder"} before switching? Copying is safer; switching without copying leaves the old tiles unused.` })),
         actions: [
           btn("CANCEL", { tone: "ghost", onClick: () => { m.close(); resolve("cancel"); } }),
@@ -2179,6 +2190,16 @@ export async function render(root) {
     });
   }
 
+  function cacheSizeLabel(logicalMb, diskMb) {
+    const logical = Number(logicalMb) || 0;
+    const disk = Number(diskMb) || 0;
+    const fmtSize = (mb) => mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(2)} MB`;
+    if (disk > 0 && Math.abs(disk - logical) > Math.max(64, logical * 0.15)) {
+      return `${fmtSize(logical)} data · ${fmtSize(disk)} on disk`;
+    }
+    return fmtSize(logical);
+  }
+
   async function loadCacheSummary() {
     cacheSummary.replaceChildren(loading("Loading cache…"));
     try {
@@ -2186,7 +2207,7 @@ export async function render(root) {
       cacheSummary.replaceChildren();
       const free = st.free_gb != null ? `${st.free_gb} GB free` : "free space unknown";
       cacheSummary.appendChild(h("div", { class: "tiny muted wrap-any", text:
-        `${Number(st.tile_count || 0).toLocaleString()} tiles · ${st.total_mb || 0} MB · ${free} · ${st.path || "unknown path"}` }));
+        `${Number(st.tile_count || 0).toLocaleString()} tiles · ${cacheSizeLabel(st.total_mb, st.disk_mb)} · ${free} · ${st.path || "unknown path"}` }));
       const cached = (st.sources || []).filter((src) => Number(src.tile_count) > 0);
       if (!cached.length) {
         cacheSummary.appendChild(h("div", { class: "tiny muted", text: "No downloaded raster tiles yet." }));
@@ -2203,7 +2224,7 @@ export async function render(root) {
         list.appendChild(h("div", { class: "list-item" },
           h("div", { class: "li-main" },
             h("div", { class: "li-title", text: src.name || src.source }),
-            h("div", { class: "li-sub", text: `${Number(src.tile_count).toLocaleString()} tiles · ${src.total_mb || 0} MB${zoom}` })),
+            h("div", { class: "li-sub", text: `${Number(src.tile_count).toLocaleString()} tiles · ${cacheSizeLabel(src.total_mb, src.disk_mb)}${zoom}` })),
           clear));
       }
       cacheSummary.appendChild(list);
@@ -2215,7 +2236,7 @@ export async function render(root) {
   async function clearCachedSource(src) {
     const ok = await confirmDialog({
       title: `Clear ${src.name || src.source} tiles`,
-      message: `Delete ${Number(src.tile_count).toLocaleString()} cached tiles (${src.total_mb || 0} MB) for ${src.name || src.source}? You will need a connection to download them again.`,
+      message: `Delete ${Number(src.tile_count).toLocaleString()} cached tiles (${cacheSizeLabel(src.total_mb, src.disk_mb)}) for ${src.name || src.source}? You will need a connection to download them again.`,
       confirmText: "DELETE", danger: true,
     });
     if (!ok) return;

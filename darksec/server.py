@@ -5290,7 +5290,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     "maxZoom": max_zoom,
                     "attribution": attr,
                 })
-        stats = {s["source"]: s for s in tilecache.cache_stats()["sources"]}
+        cache_full = tilecache.cache_stats()
+        stats = {s["source"]: s for s in cache_full.get("sources", [])}
         mb = mbtiles.describe_source()
         for src in tilecache.sources_info():
             s = stats.get(src["id"], {})
@@ -5329,8 +5330,11 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 "archives": mb["archives"][:8],
             },
             "cache": {
-                "tile_count": sum(s.get("tile_count", 0) for s in stats.values()),
-                "total_mb": round(sum(s.get("total_bytes", 0) for s in stats.values()) / (1024 * 1024), 2),
+                "tile_count": cache_full.get("tile_count", 0),
+                "total_mb": cache_full.get("total_mb", 0),
+                "disk_mb": cache_full.get("disk_mb", 0),
+                "total_bytes": cache_full.get("total_bytes", 0),
+                "disk_bytes": cache_full.get("disk_bytes", 0),
             },
         }
 
@@ -5605,7 +5609,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         """Report cache size and coverage (per source and total)."""
         from . import tilecache
         if source and source not in tilecache.TILE_SOURCES:
-            raise HTTPException(status_code=400, detail="Unknown tile source")
+            base = tilecache.cache_root() / "".join(ch for ch in source if ch.isalnum() or ch in "-_")
+            if not source or not base.exists():
+                raise HTTPException(status_code=400, detail="Unknown tile source")
         return tilecache.cache_stats(source)
 
     @app.get("/api/map/cache/sources")
@@ -5759,7 +5765,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         from . import tilecache
         source = body.get("source") or None
         if source and source not in tilecache.TILE_SOURCES:
-            raise HTTPException(status_code=400, detail="Unknown tile source")
+            base = tilecache.cache_root() / "".join(ch for ch in str(source) if ch.isalnum() or ch in "-_")
+            if not base.exists():
+                raise HTTPException(status_code=400, detail="Unknown tile source")
         if (any(job.get("state") == "running" for job in tilecache.list_jobs())
                 or tilecache.relocations_running()):
             raise HTTPException(status_code=409, detail="Cancel active tile downloads/transfers before verifying the cache")
@@ -5773,7 +5781,9 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         from . import tilecache
         source = body.get("source") or None
         if source and source not in tilecache.TILE_SOURCES:
-            raise HTTPException(status_code=400, detail="Unknown tile source")
+            base = tilecache.cache_root() / "".join(ch for ch in str(source) if ch.isalnum() or ch in "-_")
+            if not base.exists():
+                raise HTTPException(status_code=400, detail="Unknown tile source")
         if (any(job.get("state") == "running" for job in tilecache.list_jobs())
                 or tilecache.relocations_running()):
             raise HTTPException(status_code=409, detail="Cancel active tile downloads/transfers before clearing the cache")

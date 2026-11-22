@@ -230,6 +230,7 @@ export async function render(root, params = {}) {
   let cacheInfo = {
     tile_count: Number(layers.cache?.tile_count) || 0,
     total_mb: Number(layers.cache?.total_mb) || 0,
+    disk_mb: Number(layers.cache?.disk_mb) || 0,
     sources: Array.isArray(layers.cache?.sources) ? layers.cache.sources : [],
   };
   let activeSource = layers.activeSource || "esri_imagery";
@@ -583,9 +584,25 @@ export async function render(root, params = {}) {
   updateAttribution();
   updateLabelStatus();
 
+  function formatMb(mb) {
+    const n = Number(mb) || 0;
+    if (n >= 1024) return `${(n / 1024).toFixed(2)} GB`;
+    return `${n.toFixed(2)} MB`;
+  }
+
+  function cacheSizeText(info) {
+    const logical = formatMb(info.total_mb);
+    const disk = Number(info.disk_mb) || 0;
+    const logicalMb = Number(info.total_mb) || 0;
+    if (disk > 0 && Math.abs(disk - logicalMb) > Math.max(64, logicalMb * 0.15)) {
+      return `${logical} data · ${formatMb(disk)} on disk`;
+    }
+    return `${logical} cached`;
+  }
+
   function cacheStatusText() {
     if (!cacheInfo.tile_count) return "No offline tiles stored";
-    return `${cacheInfo.tile_count.toLocaleString()} tiles · ${cacheInfo.total_mb} MB cached`;
+    return `${cacheInfo.tile_count.toLocaleString()} tiles · ${cacheSizeText(cacheInfo)}`;
   }
 
   function labelCacheCount(id) {
@@ -679,6 +696,7 @@ export async function render(root, params = {}) {
       cacheInfo = {
         tile_count: st.tile_count || 0,
         total_mb: st.total_mb || 0,
+        disk_mb: st.disk_mb || 0,
         sources: Array.isArray(st.sources) ? st.sources : [],
       };
       if (cacheStatusEl) cacheStatusEl.textContent = cacheStatusText();
