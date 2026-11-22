@@ -1021,8 +1021,20 @@ export async function render(root) {
   async function saveMap() {
     const nextCache = mapCache.value.trim();
     const oldCache = String(settings.map_cache_path || "");
+    const nextMbtiles = mbtiles.value.trim();
+    const oldMbtiles = String(settings.mbtiles_path || "").trim();
+    if (nextMbtiles && nextMbtiles !== oldMbtiles) {
+      const ok = await confirmDialog({
+        title: "External map pack — experimental",
+        message: "Using map packs downloaded separately (MBTiles / USB tile folders) is experimental and still a work in progress. " +
+          "Some packs may not render labels, roads, or styles correctly. Raster packs work in 2D and 3D; vector/PBF packs work best in 3D GL. " +
+          "Keep the drive mounted while using it, and verify the map before relying on it in the field.",
+        confirmText: "USE MAP PACK",
+      });
+      if (!ok) return;
+    }
     const patch = {
-      tile_source: tileSource.value, mbtiles_path: mbtiles.value.trim(),
+      tile_source: tileSource.value, mbtiles_path: nextMbtiles,
       map_vector: mapVector.querySelector("input").checked,
       map_auto_pack: mapAutoPack.querySelector("input").checked,
       map_space_background: mapSpace.querySelector("input").checked,
@@ -1822,6 +1834,14 @@ export async function render(root) {
         icon: item.usable ? "check" : "warning",
         disabled: !item.usable,
         onClick: async () => {
+          const ok = await confirmDialog({
+            title: "External map pack — experimental",
+            message: "Using map packs downloaded separately (MBTiles / USB tile folders) is experimental and still a work in progress. " +
+              "Some packs may not render labels, roads, or styles correctly. Raster packs work in 2D and 3D; vector/PBF packs work best in 3D GL. " +
+              "Keep the drive mounted while using it, and verify the map before relying on it in the field.",
+            confirmText: "USE MAP PACK",
+          });
+          if (!ok) return;
           mbtiles.value = item.path;
           await saveSimple({ mbtiles_path: item.path }, "MBTiles archive re-linked");
           showMbStatus(item);
@@ -1924,6 +1944,14 @@ export async function render(root) {
         size: "sm", tone: it.usable ? "primary" : "", icon: it.usable ? "check" : "warning",
         disabled: !it.usable,
         onClick: async () => {
+          const ok = await confirmDialog({
+            title: "External map pack — experimental",
+            message: "Using map packs downloaded separately (MBTiles / USB tile folders) is experimental and still a work in progress. " +
+              "Some packs may not render labels, roads, or styles correctly. Raster packs work in 2D and 3D; vector/PBF packs work best in 3D GL. " +
+              "Keep the drive mounted while using it, and verify the map before relying on it in the field.",
+            confirmText: "USE MAP PACK",
+          });
+          if (!ok) return;
           mbtiles.value = it.path;
           await saveSimple({ mbtiles_path: it.path }, "MBTiles archive selected");
           showMbStatus(it);
