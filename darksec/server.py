@@ -6779,6 +6779,37 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     def sdr_recordings():
         return {"items": sdr.list_recordings()}
 
+    @app.get("/api/sdr/recordings/{rec_id}/analyze")
+    def sdr_recording_analyze(rec_id: int):
+        try:
+            return sdr.analyze_recording(rec_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    @app.post("/api/sdr/recordings/{rec_id}/note")
+    def sdr_recording_note(request: Request, rec_id: int, payload: dict = Body(default={})):
+        try:
+            out = sdr.update_recording(rec_id, name=payload.get("name"), note=payload.get("note"))
+            db(request).audit("SDR_RECORDING_NOTE", f"recording={rec_id}")
+            return out
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    @app.get("/api/sdr/decode/tools")
+    def sdr_decode_tools():
+        return sdr.decode_tools()
+
+    @app.post("/api/sdr/recordings/{rec_id}/decode")
+    def sdr_recording_decode(request: Request, rec_id: int, payload: dict = Body(default={})):
+        decoder = str(payload.get("decoder") or "").strip().lower()
+        require(bool(decoder), "decoder is required")
+        try:
+            out = sdr.decode_recording(rec_id, decoder)
+            db(request).audit("SDR_DECODE", f"recording={rec_id} decoder={decoder} ok={out.get('ok')}")
+            return out
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     @app.get("/api/sdr/recordings/{rec_id}/{kind}")
     def sdr_recording_file(rec_id: int, kind: str, download: bool = False):
         require(kind in ("audio", "image", "iq"), "kind must be audio, image or iq")

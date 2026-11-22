@@ -867,3 +867,69 @@ def test_adsb_spots_survive_stop_and_save_to_vault(client, monkeypatch):
     finally:
         client.delete(f"/api/notes/{body['id']}")
         client.post("/api/vault/lock")
+
+
+def test_decode_tools_endpoint(client, monkeypatch):
+    import shutil as _shutil
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/" + name if name in ("multimon-ng", "sox") else None)
+    # also patch in sdr module namespace
+    from darksec import sdr as sdrmod
+    monkeypatch.setattr(sdrmod.shutil, "which", lambda name: "/usr/bin/" + name if name in ("multimon-ng", "sox") else None)
+    out = client.get("/api/sdr/decode/tools")
+    assert out.status_code == 200
+    tools = out.json()["tools"]
+    assert tools["multimon-ng"]["available"] is True
+    assert tools["direwolf"]["available"] is False
+
+
+def test_recording_note_and_analyze_missing(client):
+    r = client.post("/api/sdr/recordings/999999/note", json={"note": "hello"})
+    assert r.status_code == 404
+    r = client.get("/api/sdr/recordings/999999/analyze")
+    assert r.status_code == 404
+
+
+def test_recording_analyze_with_audio(client, tmp_path, monkeypatch):
+    import wave, struct, math
+    from darksec import config, db as dbmod
+    # Create a small WAV file in the recording dir.
+    rec_dir = config.RECORDING_DIR
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = rec_dir / "test-analyze.wav"
+    rate = 48000
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        for i in range(rate):  # 1 second
+            v = int(12000 * math.sin(2 * math.pi * 1000 * i / rate))
+            wf.writeframes(struct.pack("<h", v))
+    d = dbmod.Database()
+    d.execute(
+        "INSERT INTO sdr_recordings(ts,name,freq_hz,rate,kind,iq_path,audio_path,image_path,size,note) "
+        "VALUES(datetime('now'),?,?,?,?,?,?,?,?,?)",
+        ("test-analyze", 100_000_000.0, 2_400_000.0, "nfm", None, str(wav_path), None, wav_path.stat().st_size, "test note"),
+    )
+    rec_id = d.one("SELECT id FROM sdr_recordings WHERE name='test-analyze' ORDER BY id DESC LIMIT 1")["id"]
+    d.close()
+    try:
+        r = client.get(f"/api/sdr/recordings/{rec_id}/analyze")
+        assert r.status_code == 200
+        out = r.json()
+        assert out["audio"]["duration_s"] > 0.9
+        assert out["audio"]["peak"] > 0
+        r2 = client.post(f"/api/sdr/recordings/{rec_id}/note", json={"name": "renamed", "note": "updated"})
+        assert r2.status_code == 200
+        assert r2.json()["name"] == "renamed"
+        assert r2.json()["note"] == "updated"
+    finally:
+        try:
+            d2 = dbmod.Database()
+            d2.delete("sdr_recordings", rec_id)
+            d2.close()
+        except Exception:
+            pass
+        try:
+            wav_path.unlink(missing_ok=True)
+        except Exception:
+            pass

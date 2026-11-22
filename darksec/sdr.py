@@ -1329,6 +1329,188 @@ def delete_recording(rec_id: int) -> dict:
     return {"deleted": rec_id}
 
 
+def _recording_path(row: dict, kind: str) -> Path | None:
+    p = row.get(f"{kind}_path")
+    if not p:
+        return None
+    path = Path(str(p))
+    try:
+        path.resolve().relative_to(Path(config.RECORDING_DIR).resolve())
+    except Exception:
+        return None
+    return path if path.exists() and path.is_file() else None
+
+
+def update_recording(rec_id: int, *, name: str | None = None, note: str | None = None) -> dict:
+    db = Database()
+    row = db.one("SELECT * FROM sdr_recordings WHERE id=?", (rec_id,))
+    if not row:
+        db.close()
+        raise ValueError("Recording not found")
+    updates = {}
+    if name is not None:
+        name = str(name).strip()[:120]
+        if name:
+            updates["name"] = name
+    if note is not None:
+        updates["note"] = str(note).strip()[:2000]
+    if updates:
+        keys = list(updates)
+        db.execute(
+            f"UPDATE sdr_recordings SET {', '.join(f'{k}=?' for k in keys)} WHERE id=?",
+            [updates[k] for k in keys] + [rec_id],
+        )
+    row = db.one("SELECT * FROM sdr_recordings WHERE id=?", (rec_id,))
+    db.close()
+    return dict(row) if row else {"id": rec_id}
+
+
+def analyze_recording(rec_id: int) -> dict:
+    db = Database()
+    row = db.one("SELECT * FROM sdr_recordings WHERE id=?", (rec_id,))
+    db.close()
+    if not row:
+        raise ValueError("Recording not found")
+    row = dict(row)
+    out = {
+        "id": rec_id,
+        "name": row.get("name"),
+        "freq_hz": row.get("freq_hz"),
+        "rate": row.get("rate"),
+        "kind": row.get("kind"),
+        "files": {},
+        "spectrum": None,
+        "audio": None,
+    }
+    for kind in ("iq", "audio", "image"):
+        path = _recording_path(row, kind)
+        if path:
+            try:
+                st = path.stat()
+                out["files"][kind] = {"path": str(path), "bytes": st.st_size, "name": path.name}
+            except OSError:
+                pass
+    iq_path = _recording_path(row, "iq")
+    if iq_path:
+        sample_format = "u8" if str(row.get("kind") or "").lower() in ("rtl", "u8") else "i8"
+        # Heuristic: rtl captures are stored as u8 in this codebase; hackrf as i8.
+        # If backend info is not stored, try to infer from name.
+        backend_hint = str(row.get("name") or "").lower()
+        if "rtl" in backend_hint:
+            sample_format = "u8"
+        spec = analyze_spectrum(iq_path, float(row.get("rate") or 2_400_000), sample_format=sample_format)
+        if spec and spec.get("bins"):
+            bins = spec["bins"]
+            peak_db = max(bins)
+            noise = float(np.percentile(bins, 20)) if bins else peak_db
+            out["spectrum"] = {
+                **spec,
+                "peak_db": round(float(peak_db), 2),
+                "noise_floor_db": round(noise, 2),
+                "snr_est_db": round(float(peak_db - noise), 2),
+            }
+    audio_path = _recording_path(row, "audio")
+    if audio_path and audio_path.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(audio_path), "rb") as wf:
+                frames = wf.getnframes()
+                rate = wf.getframerate() or 1
+                sampwidth = wf.getsampwidth()
+                channels = wf.getnchannels()
+                duration = frames / float(rate)
+                # Read a limited sample for RMS/peak.
+                wf.rewind()
+                chunk = wf.readframes(min(frames, rate * 30))
+            if sampwidth == 2:
+                arr = np.frombuffer(chunk, dtype="<i2").astype(np.float32) / 32768.0
+            elif sampwidth == 1:
+                arr = (np.frombuffer(chunk, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+            else:
+                arr = np.array([], dtype=np.float32)
+            if channels > 1 and arr.size:
+                arr = arr.reshape(-1, channels).mean(axis=1)
+            rms = float(np.sqrt(np.mean(np.square(arr)))) if arr.size else 0.0
+            peak = float(np.max(np.abs(arr))) if arr.size else 0.0
+            out["audio"] = {
+                "duration_s": round(duration, 3),
+                "sample_rate": rate,
+                "channels": channels,
+                "sample_width": sampwidth,
+                "rms": round(rms, 6),
+                "peak": round(peak, 6),
+                "peak_dbfs": round(20 * math.log10(peak + 1e-12), 2),
+            }
+        except Exception as exc:
+            out["audio"] = {"error": str(exc)[:200]}
+    return out
+
+
+def decode_tools() -> dict:
+    tools = {}
+    for name, binary, note in [
+        ("multimon-ng", "multimon-ng", "POCSAG/FLEX/EAS/AFSK decoders (if supported by build)"),
+        ("direwolf", "direwolf", "APRS/AX.25 packet decoder"),
+        ("rtl_433", "rtl_433", "ISM/OOK sensor decoder"),
+        ("sox", "sox", "Audio conversion utility"),
+    ]:
+        path = shutil.which(binary)
+        tools[name] = {"available": bool(path), "path": path or "", "note": note}
+    return {"tools": tools}
+
+
+def decode_recording(rec_id: int, decoder: str) -> dict:
+    db = Database()
+    row = db.one("SELECT * FROM sdr_recordings WHERE id=?", (rec_id,))
+    db.close()
+    if not row:
+        raise ValueError("Recording not found")
+    row = dict(row)
+    decoder = str(decoder or "").strip().lower()
+    audio_path = _recording_path(row, "audio")
+    if not audio_path:
+        raise ValueError("This recording has no audio file to decode")
+    if decoder == "multimon-ng":
+        binary = shutil.which("multimon-ng")
+        if not binary:
+            raise ValueError("multimon-ng is not installed")
+        # Safe, fixed arg list; decode common pager/AFSK modes from WAV.
+        cmd = [binary, "-t", "wav", "-a", "POCSAG512", "-a", "POCSAG1200", "-a", "POCSAG2400",
+               "-a", "AFSK1200", "-a", "AFSK2400", str(audio_path)]
+        timeout = 90
+    elif decoder == "direwolf":
+        binary = shutil.which("direwolf")
+        if not binary:
+            raise ValueError("direwolf is not installed")
+        cmd = [binary, "-q", "d", "-t", "0", "-r", "48000", "-a", "10", str(audio_path)]
+        timeout = 120
+    elif decoder == "rtl_433":
+        binary = shutil.which("rtl_433")
+        if not binary:
+            raise ValueError("rtl_433 is not installed")
+        cmd = [binary, "-r", str(audio_path), "-F", "json"]
+        timeout = 120
+    else:
+        raise ValueError("Unsupported decoder")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, errors="replace")
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "decoder": decoder, "error": "Decoder timed out", "output": "", "lines": []}
+    except Exception as exc:
+        return {"ok": False, "decoder": decoder, "error": str(exc)[:300], "output": "", "lines": []}
+    raw = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    # Limit output size returned to UI.
+    trimmed = lines[-400:]
+    return {
+        "ok": proc.returncode == 0 or bool(trimmed),
+        "decoder": decoder,
+        "returncode": proc.returncode,
+        "output": "\n".join(trimmed)[-20000:],
+        "lines": trimmed[-200:],
+        "note": "External decoder output is unverified. Confirm before acting on it.",
+    }
+
+
 def _adsb_device_type() -> str:
     """Pick the ADS-B receiver: RTL-SDR first, then HackRF (readsb only)."""
     info = detect()

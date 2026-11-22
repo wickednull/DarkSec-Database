@@ -5,7 +5,7 @@ import {
   h, panel, stat, btn, badge, pageHead, alertStrip, emptyState, loading, fmt, toast,
   field, input, select, checkbox, modal, confirmDialog, icon,
 } from "../components.js";
-import { kv, progressBar, referenceSection, statusTone } from "./shared.js?v=opsec-1";
+import { kv, progressBar, referenceSection, statusTone, readTextFile } from "./shared.js?v=opsec-1";
 
 const DEMODS = [
   { value: "nfm", label: "NFM — narrowband voice" },
@@ -322,12 +322,50 @@ export async function render(root, params = {}) {
   regionSel.addEventListener("change", () => { presetState.region = regionSel.value; paintPresets(); });
   paintPresets();
 
+  function exportCustomPresets() {
+    const data = { version: 1, exported_at: new Date().toISOString(), presets: presetState.custom || [] };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const a = h("a", { href: URL.createObjectURL(blob), download: "darksec-sdr-presets.json" });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast(`Exported ${(presetState.custom || []).length} custom preset(s)`);
+  }
+  async function importCustomPresets() {
+    const file = await readTextFile(".json,application/json");
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(file.text || file);
+      const items = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.presets) ? parsed.presets : []);
+      const valid = [];
+      for (const p of items) {
+        const freq = Number(p.freq_mhz ?? p.freq ?? p.frequency_mhz);
+        if (!p.name || !(freq > 0 && freq <= 6000)) continue;
+        valid.push({
+          id: uid(), name: String(p.name).slice(0, 80), freq_mhz: freq,
+          demod: DEMODS.some((d) => d.value === p.demod) ? p.demod : "nfm",
+          region: String(p.region || "Worldwide").slice(0, 40),
+          group: String(p.group || "CUSTOM").slice(0, 40).toUpperCase(),
+          priority: "CUSTOM", sweep: p.sweep && Number(p.sweep.start_mhz) < Number(p.sweep.end_mhz)
+            ? { start_mhz: Number(p.sweep.start_mhz), end_mhz: Number(p.sweep.end_mhz) } : null,
+          note: String(p.note || "").slice(0, 200),
+        });
+      }
+      if (!valid.length) { toast("No valid presets found in file", "warn"); return; }
+      presetState.custom = [...valid, ...(presetState.custom || [])];
+      savePresetState(); paintPresets();
+      toast(`Imported ${valid.length} preset(s)`);
+    } catch (err) { toast(`Import failed: ${err.message || err}`, "error"); }
+  }
+
   const presetsPanel = panel({
     title: "Quick signal presets",
     sub: "Tune capture or set a sweep range — no auto-transmit",
     icon: "antenna",
     cls: "mt-14 sdr-presets-panel",
-    tools: [presetCount, btn("ADD", { size: "sm", icon: "plus", tone: "ghost", title: "Add custom preset", onClick: () => openCustomPreset(null) })],
+    tools: [presetCount,
+      btn("IMPORT", { size: "sm", tone: "ghost", title: "Import custom presets JSON", onClick: importCustomPresets }),
+      btn("EXPORT", { size: "sm", tone: "ghost", title: "Export custom presets JSON", onClick: exportCustomPresets }),
+      btn("ADD", { size: "sm", icon: "plus", tone: "ghost", title: "Add custom preset", onClick: () => openCustomPreset(null) })],
     body: h("div", { class: "sdr-presets-body" },
       h("div", { class: "sdr-presets-toolbar" },
         presetSearch,
@@ -653,6 +691,7 @@ export async function render(root, params = {}) {
     body: spectrumBody,
   }));
   paneScan.appendChild(presetsPanel);
+
   paneSystem.appendChild(hardwarePanel);
 
   /* ------------------------------------------------------- live receiver */
@@ -675,6 +714,11 @@ export async function render(root, params = {}) {
   let liveSources = [];
   let liveHistory = [];
   let liveBounds = { min: -120, max: -10 };
+  let livePeakHold = null;
+  let livePeakHoldEnabled = loadJsonLS("darksec.sdr.peakHold", false);
+  let liveSnr = null;
+  let liveNoiseFloor = null;
+  let liveMarkers = loadJsonLS("darksec.sdr.markers", []);
   let liveSpec = null;
   let liveRecording = false;
   let liveRecChunks = [];
@@ -714,6 +758,67 @@ export async function render(root, params = {}) {
   const liveRecBtn = btn("REC", { icon: "mic", tone: "ghost" });
   const liveFull = btn("FULL", { icon: "maximize", tone: "ghost" });
   const liveScanBtn = btn("SCAN", { icon: "search", tone: "ghost" });
+  const liveMarkBtn = btn("MARK", { icon: "star", tone: "ghost", title: "Bookmark current frequency as a custom preset", onClick: () => {
+    openCustomPreset({
+      name: `${fmt.num(liveCenter / 1e6, 4)} MHz ${liveModeValue.toUpperCase()}`,
+      freq_mhz: Number((liveCenter / 1e6).toFixed(6)),
+      demod: liveModeValue,
+      region: "Worldwide",
+      group: "CUSTOM",
+      note: `Bookmarked from live receiver at ${new Date().toLocaleString()}`,
+    });
+  } });
+  const livePeakBtn = btn(livePeakHoldEnabled ? "PK ON" : "PK HOLD", { tone: "ghost", title: "Toggle spectrum peak hold", onClick: () => {
+    livePeakHoldEnabled = !livePeakHoldEnabled;
+    saveJsonLS("darksec.sdr.peakHold", livePeakHoldEnabled);
+    if (!livePeakHoldEnabled) livePeakHold = null;
+    livePeakBtn.replaceChildren(h("span", { text: livePeakHoldEnabled ? "PK ON" : "PK HOLD" }));
+    drawLiveSpectrum();
+  } });
+  const livePeakClearBtn = btn("PK CLR", { tone: "ghost", title: "Clear peak hold trace", onClick: () => { livePeakHold = null; drawLiveSpectrum(); } });
+  const liveMkrBtn = btn("MKR", { tone: "ghost", title: "Manage spectrum markers", onClick: () => {
+    const list = h("div", { class: "col gap-6" });
+    function paintMarkers() {
+      list.replaceChildren();
+      if (!liveMarkers.length) { list.appendChild(h("div", { class: "small muted", text: "No markers. Add one at the current tuned frequency." })); return; }
+      for (const m of liveMarkers.slice().sort((a,b)=>a.hz-b.hz)) {
+        const delta = Number(m.hz) - liveCenter;
+        list.appendChild(h("div", { class: "list-item" },
+          h("div", { class: "li-main" },
+            h("div", { class: "li-title mono", text: `${fmt.num(Number(m.hz)/1e6, 5)} MHz` }),
+            h("div", { class: "li-sub", text: `${m.label || ""} · Δ ${delta>=0?"+":""}${fmt.num(delta/1000,1)} kHz from tuned` })),
+          btn("TUNE", { size: "sm", tone: "ghost", onClick: () => { tuneTo(Number(m.hz)); } }),
+          btn("DEL", { size: "sm", tone: "ghost", onClick: () => { liveMarkers = liveMarkers.filter((x) => x !== m); saveJsonLS("darksec.sdr.markers", liveMarkers); paintMarkers(); drawLiveSpectrum(); } }),
+        ));
+      }
+    }
+    paintMarkers();
+    const m = modal({ title: "Spectrum markers", sub: "Tune, add, or remove frequency markers", body: h("div", { class: "col gap-8" }, list), actions: [
+      btn("ADD CURRENT", { tone: "ghost", onClick: () => {
+        const hz = Math.round(liveCenter);
+        if (!liveMarkers.some((x) => Math.abs(Number(x.hz)-hz) < 500)) liveMarkers.push({ hz, label: fmt.num(hz/1e6,4) });
+        liveMarkers = liveMarkers.slice(-12); saveJsonLS("darksec.sdr.markers", liveMarkers); paintMarkers(); drawLiveSpectrum();
+      } }),
+      btn("CLEAR", { tone: "ghost", onClick: () => { liveMarkers = []; saveJsonLS("darksec.sdr.markers", liveMarkers); paintMarkers(); drawLiveSpectrum(); } }),
+      btn("CLOSE", { tone: "primary", onClick: () => m.close() }),
+    ] });
+  } });
+  const liveMkrClrBtn = btn("MKR CLR", { tone: "ghost", title: "Clear all spectrum markers", onClick: () => { liveMarkers = []; saveJsonLS("darksec.sdr.markers", liveMarkers); drawLiveSpectrum(); } });
+  const liveLockoutBtn = btn("LOCKOUT", { tone: "ghost", title: "Toggle scan lockout for current frequency/mode", onClick: () => {
+    const k = scanKey(liveCenter, liveModeValue);
+    if (liveScanLockouts.has(k)) { liveScanLockouts.delete(k); toast("Frequency removed from scan lockout"); }
+    else { liveScanLockouts.add(k); toast("Frequency added to scan lockout"); }
+    saveScanLockouts(); paintScanLog();
+  } });
+  const liveCapBtn = btn("CAPTURE", { tone: "ghost", icon: "radio", title: "Load current live frequency into capture controls", onClick: () => {
+    capFreq.value = String((liveCenter / 1e6).toFixed(6));
+    capDemod.value = liveModeValue || "nfm";
+    capRate.value = liveRateIn.value || "1.024";
+    capBackend.value = liveBackendValue || "auto";
+    capDirect.value = liveDirect.value || "auto";
+    showTab("capture");
+    toast(`Capture loaded: ${fmt.num(liveCenter / 1e6, 4)} MHz ${String(liveModeValue).toUpperCase()}`);
+  } });
   const liveStatus = h("span", { class: "tiny muted sdr-live-status", text: "IDLE" });
   const liveWarning = h("div", { class: "callout warn small mt-8 sdr-live-warning", style: "display:none" });
   if (!wsAvailable) {
@@ -822,38 +927,274 @@ export async function render(root, params = {}) {
     });
     setTimeout(() => { try { value.focus(); value.select(); } catch {} }, 30);
   }
+  const SCAN_CFG_LS = "darksec.sdr.scanCfg";
+  const SCAN_LOG_LS = "darksec.sdr.scanLog";
+  const SCAN_LOCKOUT_LS = "darksec.sdr.scanLockout";
+  let liveScanList = [];
+  let liveScanIndex = 0;
+  let liveScanLastSource = "";
+  const SCAN_COUNTS_LS = "darksec.sdr.scanCounts";
+  const SCAN_PROFILES_LS = "darksec.sdr.scanProfiles";
+  let liveScanHits = loadJsonLS(SCAN_LOG_LS, []);
+  let liveScanLockouts = new Set(loadJsonLS(SCAN_LOCKOUT_LS, []));
+  let liveScanCounts = loadJsonLS(SCAN_COUNTS_LS, {});
+  let liveScanProfiles = loadJsonLS(SCAN_PROFILES_LS, []);
+  let liveScanCfg = {
+    dwell: 500, threshold: -75, loop: true, stopOnSignal: true, source: "favorites",
+    useSnr: false, snrThreshold: 8, skipLockout: true, logHits: true, resume: true,
+    ...loadJsonLS(SCAN_CFG_LS, {}),
+  };
+  function saveScanCfg() { saveJsonLS(SCAN_CFG_LS, liveScanCfg); }
+  function saveScanLog() { saveJsonLS(SCAN_LOG_LS, liveScanHits.slice(0, 200)); }
+  function saveScanLockouts() { saveJsonLS(SCAN_LOCKOUT_LS, Array.from(liveScanLockouts)); }
+  function scanKey(hz, mode) { return `${Math.round(Number(hz))}:${String(mode || "").toLowerCase()}`; }
+  function isLockedOut(hz, mode) { return liveScanLockouts.has(scanKey(hz, mode)) || liveScanLockouts.has(String(Math.round(Number(hz)))); }
+  let paintScanLog = () => {};
+  const scanLogBody = h("div", { class: "col gap-8" });
+  const scanLogList = h("div", { class: "col gap-6" });
+  const scanLogSummary = h("div", { class: "tiny muted" });
+  paintScanLog = () => {
+    scanLogList.replaceChildren();
+    scanLogSummary.textContent = `${liveScanHits.length} hit(s) · ${liveScanLockouts.size} lockout(s)`;
+    if (!liveScanHits.length) {
+      scanLogList.appendChild(h("div", { class: "small muted", text: "No scan hits logged yet. Start a live scan with 'Log signal hits' enabled." }));
+      return;
+    }
+    for (const hit of liveScanHits.slice(0, 50)) {
+      const hz = Number(hit.freq_hz) || 0;
+      const mode = String(hit.mode || "nfm").toLowerCase();
+      const locked = isLockedOut(hz, mode);
+      const row = h("div", { class: "list-item" },
+        h("div", { class: "li-main" },
+          h("div", { class: "li-title mono", text: `${fmt.num(hz / 1e6, 5)} MHz ${mode.toUpperCase()}` }),
+          h("div", { class: "li-sub", text: `${hit.name || "Signal"} · peak ${fmt.num(hit.peak_db, 1)} dB · SNR ${fmt.num(hit.snr, 1)} dB · hits ${Number(hit.count || liveScanCounts[scanKey(hit.freq_hz, hit.mode)] || 1)} · ${fmt.ago(hit.ts)}` })),
+        badge(locked ? "LOCKOUT" : "HIT", locked ? "amber" : "green"),
+        btn("TUNE", { size: "sm", tone: "ghost", onClick: () => { tuneTo(hz); if (["nfm","wfm","am","usb","lsb"].includes(mode)) setMode(mode); } }),
+        btn(locked ? "UNLOCK" : "SKIP", { size: "sm", tone: "ghost", onClick: () => {
+          const k = scanKey(hz, mode);
+          if (liveScanLockouts.has(k)) liveScanLockouts.delete(k); else liveScanLockouts.add(k);
+          saveScanLockouts(); paintScanLog();
+        } }),
+      );
+      scanLogList.appendChild(row);
+    }
+  };
+  scanLogBody.append(
+    h("div", { class: "row wrap gap-6" },
+      btn("CLEAR HITS", { size: "sm", tone: "ghost", onClick: () => { liveScanHits = []; saveScanLog(); paintScanLog(); } }),
+      btn("CLEAR LOCKOUTS", { size: "sm", tone: "ghost", onClick: () => { liveScanLockouts.clear(); saveScanLockouts(); paintScanLog(); } }),
+      btn("EXPORT HITS", { size: "sm", tone: "ghost", onClick: () => {
+        const blob = new Blob([JSON.stringify({ exported_at: new Date().toISOString(), hits: liveScanHits, lockouts: Array.from(liveScanLockouts) }, null, 2)], { type: "application/json" });
+        const a = h("a", { href: URL.createObjectURL(blob), download: "darksec-sdr-scan-log.json" });
+        document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      } }),
+    ),
+    scanLogSummary,
+    scanLogList,
+  );
+  paintScanLog();
+  paneScan.appendChild(panel({
+    title: "Scan hits & lockouts",
+    sub: "Logged signal hits from live scan · lockouts are skipped",
+    icon: "list",
+    cls: "span-2",
+    body: scanLogBody,
+  }));
+
   function stopScan(message = "") {
     liveScanActive = false;
     if (liveScanTimer) { clearTimeout(liveScanTimer); liveScanTimer = null; }
     liveScanBtn.replaceChildren(h("span", { text: "SCAN" }));
+    liveScanList = [];
     if (message) toast(message, "warn", 5000);
   }
+
+  function buildScanList(source) {
+    if (source === "range") return null;
+    const favs = presetState.favorites;
+    let items = allPresets().filter(regionMatch);
+    if (source === "favorites") items = items.filter((p) => favs.has(p.id));
+    else if (source === "custom") items = items.filter((p) => p.custom);
+    const seen = new Set();
+    return items.filter((p) => {
+      const k = `${Number(p.freq_mhz).toFixed(6)}:${String(p.demod || "nfm")}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      const hz = Number(p.freq_mhz) * 1e6;
+      if (!(hz > 0)) return false;
+      if (liveScanCfg.skipLockout && isLockedOut(hz, p.demod || "nfm")) return false;
+      return true;
+    }).sort((a, b) => Number(a.freq_mhz) - Number(b.freq_mhz));
+  }
+
+  function addScanHit(hit) {
+    const key = scanKey(hit.freq_hz, hit.mode || "nfm");
+    liveScanCounts[key] = Number(liveScanCounts[key] || 0) + 1;
+    saveJsonLS(SCAN_COUNTS_LS, liveScanCounts);
+    liveScanHits.unshift({ ...hit, ts: Date.now(), count: liveScanCounts[key] });
+    liveScanHits = liveScanHits.slice(0, 200);
+    if (liveScanCfg.logHits) saveScanLog();
+    paintScanLog();
+  }
+  function signalDetected() {
+    const peak = Number(liveSpec?.peak_db);
+    const snr = Number(liveSnr);
+    if (liveScanCfg.useSnr) return Number.isFinite(snr) && snr >= Number(liveScanCfg.snrThreshold || 8);
+    return Number.isFinite(peak) && peak > Number(liveScanCfg.threshold ?? -75);
+  }
+
+  function startScanRun(cfg) {
+    if (!liveRunning) { toast("Press PLAY before scanning", "warn"); return; }
+    liveScanCfg = { ...liveScanCfg, ...cfg };
+    saveScanCfg();
+    const list = buildScanList(liveScanCfg.source);
+    if (liveScanCfg.source !== "range" && (!list || !list.length)) {
+      toast("No presets in selected scan source. Add favorites/custom presets or use Range scan.", "warn");
+      return;
+    }
+    const sameSource = liveScanLastSource === liveScanCfg.source;
+    liveScanList = list || [];
+    if (!(liveScanCfg.resume && sameSource && liveScanIndex > 0 && liveScanIndex < liveScanList.length)) liveScanIndex = 0;
+    liveScanLastSource = liveScanCfg.source;
+    liveScanActive = true;
+    liveScanBtn.replaceChildren(h("span", { text: "STOP SCAN" }));
+
+    const tick = () => {
+      if (!liveScanActive) return;
+      if (liveScanCfg.source === "range") {
+        const step = Math.max(1000, liveStep);
+        const nextHz = liveCenter + step;
+        if (nextHz > 6_000_000_000) {
+          if (liveScanCfg.loop) { tuneTo(100_000); liveScanTimer = setTimeout(tick, liveScanCfg.dwell); return; }
+          stopScan("Range scan finished"); return;
+        }
+        if (liveScanCfg.skipLockout && isLockedOut(nextHz, liveModeValue)) { tuneTo(nextHz); liveScanTimer = setTimeout(tick, 40); return; }
+        tuneTo(nextHz);
+        liveScanTimer = setTimeout(() => {
+          if (!liveScanActive) return;
+          if (liveScanCfg.stopOnSignal && signalDetected()) {
+            addScanHit({ freq_hz: liveCenter, mode: liveModeValue, name: "Range hit", peak_db: liveSpec?.peak_db, snr: liveSnr });
+            stopScan(`Signal found at ${fmt.num(liveCenter / 1e6, 5)} MHz (${fmt.num(liveSpec?.peak_db, 1)} dB)`);
+          } else tick();
+        }, liveScanCfg.dwell);
+        return;
+      }
+      if (liveScanIndex >= liveScanList.length) {
+        if (liveScanCfg.loop && liveScanList.length) { liveScanIndex = 0; }
+        else { stopScan("Scan finished"); return; }
+      }
+      const p = liveScanList[liveScanIndex++];
+      const hz = Number(p.freq_mhz) * 1e6;
+      if (p.demod && ["nfm","wfm","am","usb","lsb"].includes(p.demod)) setMode(p.demod);
+      tuneTo(hz);
+      liveStatus.textContent = `SCAN ${liveScanIndex}/${liveScanList.length} · ${fmt.num(p.freq_mhz, 4)} MHz`;
+      liveScanTimer = setTimeout(() => {
+        if (!liveScanActive) return;
+        if (liveScanCfg.stopOnSignal && signalDetected()) {
+          addScanHit({ freq_hz: hz, mode: p.demod || liveModeValue, name: p.name || "", peak_db: liveSpec?.peak_db, snr: liveSnr, preset_id: p.id });
+          stopScan(`Signal found: ${p.name || fmt.num(p.freq_mhz, 4) + " MHz"} (${fmt.num(liveSpec?.peak_db, 1)} dB)`);
+        } else tick();
+      }, liveScanCfg.dwell);
+    };
+    tick();
+  }
+
   function startScan() {
     if (liveScanActive) { stopScan(); return; }
     if (!liveRunning) { toast("Press PLAY before scanning", "warn"); return; }
-    liveScanActive = true;
-    liveScanBtn.replaceChildren(h("span", { text: "STOP SCAN" }));
-    let steps = 0;
-    const step = Math.max(1000, liveStep);
-    const threshold = Number(liveSquelchIn.value) > 0 ? -75 : -80;
-    const tick = () => {
-      if (!liveScanActive) return;
-      if (steps++ > 600 || liveCenter > 6_000_000_000) {
-        stopScan("Scan finished: no signal above threshold");
-        return;
+    const sourceSel = select([
+      { value: "favorites", label: "Favorites / pinned presets" },
+      { value: "custom", label: "Custom presets" },
+      { value: "all", label: "All presets (current filter)" },
+      { value: "range", label: "Step scan (current step/freq)" },
+    ], liveScanCfg.source || "favorites");
+    const dwellIn = input({ type: "number", value: String(liveScanCfg.dwell || 500), min: "150", max: "5000", step: "50" });
+    const thrIn = input({ type: "number", value: String(liveScanCfg.threshold ?? -75), min: "-130", max: "0", step: "1" });
+    const snrThrIn = input({ type: "number", value: String(liveScanCfg.snrThreshold ?? 8), min: "1", max: "60", step: "1" });
+    const loopIn = checkbox("Loop scan list", !!liveScanCfg.loop);
+    const stopIn = checkbox("Stop on signal above threshold", !!liveScanCfg.stopOnSignal);
+    const useSnrIn = checkbox("Use SNR threshold instead of peak dB", !!liveScanCfg.useSnr);
+    const skipLockoutIn = checkbox("Skip lockout frequencies", liveScanCfg.skipLockout !== false);
+    const logHitsIn = checkbox("Log signal hits", liveScanCfg.logHits !== false);
+    const resumeIn = checkbox("Resume from last scan position when possible", liveScanCfg.resume !== false);
+    const profileSel = select([{ value: "", label: "Scan profiles…" }, ...liveScanProfiles.map((p, i) => ({ value: String(i), label: p.name || `Profile ${i + 1}` }))], "");
+    const profileName = input({ type: "text", placeholder: "Profile name", maxlength: "60" });
+    function refreshProfiles() {
+      liveScanProfiles = loadJsonLS(SCAN_PROFILES_LS, []);
+      profileSel.replaceChildren(...[{ value: "", label: "Scan profiles…" }, ...liveScanProfiles.map((p, i) => ({ value: String(i), label: p.name || `Profile ${i + 1}` }))].map((o) => h("option", { value: o.value, text: o.label })));
+    }
+    function currentCfg() {
+      return {
+        source: sourceSel.value,
+        dwell: Math.max(150, Math.min(5000, Number(dwellIn.value) || 500)),
+        threshold: Math.max(-130, Math.min(0, Number(thrIn.value) || -75)),
+        snrThreshold: Math.max(1, Math.min(60, Number(snrThrIn.value) || 8)),
+        loop: loopIn.querySelector("input")?.checked ?? true,
+        stopOnSignal: stopIn.querySelector("input")?.checked ?? true,
+        useSnr: useSnrIn.querySelector("input")?.checked ?? false,
+        skipLockout: skipLockoutIn.querySelector("input")?.checked ?? true,
+        logHits: logHitsIn.querySelector("input")?.checked ?? true,
+        resume: resumeIn.querySelector("input")?.checked ?? true,
+      };
+    }
+    function applyCfg(cfg) {
+      if (!cfg) return;
+      if (cfg.source) sourceSel.value = cfg.source;
+      if (cfg.dwell != null) dwellIn.value = String(cfg.dwell);
+      if (cfg.threshold != null) thrIn.value = String(cfg.threshold);
+      if (cfg.snrThreshold != null) snrThrIn.value = String(cfg.snrThreshold);
+      for (const [el, val] of [[loopIn,cfg.loop],[stopIn,cfg.stopOnSignal],[useSnrIn,cfg.useSnr],[skipLockoutIn,cfg.skipLockout],[logHitsIn,cfg.logHits],[resumeIn,cfg.resume]]) {
+        const i = el.querySelector("input"); if (i && val != null) i.checked = !!val;
       }
-      tuneTo(liveCenter + step);
-      liveScanTimer = setTimeout(() => {
-        if (!liveScanActive) return;
-        const peak = Number(liveSpec?.peak_db);
-        if (Number.isFinite(peak) && peak > threshold) {
-          stopScan(`Signal found at ${fmt.num(liveCenter / 1e6, 5)} MHz (${fmt.num(peak, 1)} dB)`);
-        } else {
-          tick();
-        }
-      }, 420);
-    };
-    tick();
+    }
+    const body = h("div", { class: "col gap-8" },
+      field("SCAN SOURCE", sourceSel),
+      h("div", { class: "form-grid" },
+        field("DWELL (ms)", dwellIn),
+        field("PEAK THRESHOLD (dB)", thrIn),
+        field("SNR THRESHOLD (dB)", snrThrIn)),
+      loopIn, stopIn, useSnrIn, skipLockoutIn, logHitsIn, resumeIn,
+      h("div", { class: "row wrap gap-6" },
+        btn("CALIBRATE", { size: "sm", tone: "ghost", title: "Set peak threshold from current noise floor + 10 dB", onClick: () => {
+          if (liveNoiseFloor == null) { toast("No live spectrum noise floor available yet", "warn"); return; }
+          thrIn.value = String(Math.round(liveNoiseFloor + 10));
+          toast(`Threshold set to ${thrIn.value} dB`);
+        } }),
+      ),
+      h("div", { class: "side-label mt-6", text: "SCAN PROFILES" }),
+      h("div", { class: "row wrap gap-6" }, profileSel, profileName),
+      h("div", { class: "row wrap gap-6" },
+        btn("SAVE", { size: "sm", tone: "ghost", onClick: () => {
+          const name = profileName.value.trim() || `Scan ${liveScanProfiles.length + 1}`;
+          const cfg = { name, ...currentCfg() };
+          liveScanProfiles = [cfg, ...liveScanProfiles.filter((p) => p.name !== name)].slice(0, 20);
+          saveJsonLS(SCAN_PROFILES_LS, liveScanProfiles); refreshProfiles(); toast("Scan profile saved");
+        } }),
+        btn("LOAD", { size: "sm", tone: "ghost", onClick: () => {
+          const p = liveScanProfiles[Number(profileSel.value)];
+          if (!p) { toast("Select a scan profile", "warn"); return; }
+          applyCfg(p); profileName.value = p.name || ""; toast(`Loaded profile: ${p.name}`);
+        } }),
+        btn("DELETE", { size: "sm", tone: "ghost", onClick: () => {
+          const idx = Number(profileSel.value);
+          if (!liveScanProfiles[idx]) { toast("Select a scan profile", "warn"); return; }
+          liveScanProfiles.splice(idx, 1); saveJsonLS(SCAN_PROFILES_LS, liveScanProfiles); refreshProfiles(); toast("Scan profile deleted");
+        } }),
+      ),
+      h("div", { class: "tiny muted", text: "Preset scan tunes through selected presets. Range scan steps up by the current VFO step. SNR uses live spectrum noise-floor estimate." }),
+    );
+    const m = modal({
+      title: "Scan",
+      sub: "Live receiver scanner",
+      body,
+      actions: [
+        btn("CANCEL", { tone: "ghost", onClick: () => m.close() }),
+        btn("START SCAN", { tone: "primary", icon: "search", onClick: () => {
+          m.close();
+          startScanRun(currentCfg());
+        } }),
+      ],
+    });
   }
 
   function schedulePcm(arrayBuffer) {
@@ -933,6 +1274,28 @@ export async function render(root, params = {}) {
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.strokeStyle = accentColor(); ctx.lineWidth = 1.3; ctx.stroke();
+    const bwMap = { nfm: 12500, wfm: 200000, am: 10000, usb: 3000, lsb: 3000 };
+    const bw = bwMap[liveModeValue] || 12500;
+    if (liveSpec.center_hz && liveSpec.end_hz > liveSpec.start_hz) {
+      const bwStart = Math.max(liveSpec.start_hz, liveSpec.center_hz - bw / 2);
+      const bwEnd = Math.min(liveSpec.end_hz, liveSpec.center_hz + bw / 2);
+      const x1 = 4 + ((bwStart - liveSpec.start_hz) / (liveSpec.end_hz - liveSpec.start_hz)) * (w - 8);
+      const x2 = 4 + ((bwEnd - liveSpec.start_hz) / (liveSpec.end_hz - liveSpec.start_hz)) * (w - 8);
+      ctx.fillStyle = `rgba(${accentRgb()},.08)`;
+      ctx.fillRect(x1, 0, Math.max(1, x2 - x1), hh - 18);
+      ctx.strokeStyle = `rgba(${accentRgb()},.25)`;
+      ctx.beginPath(); ctx.moveTo(x1, 0); ctx.lineTo(x1, hh - 18); ctx.moveTo(x2, 0); ctx.lineTo(x2, hh - 18); ctx.stroke();
+    }
+    if (livePeakHoldEnabled && livePeakHold && livePeakHold.length) {
+      ctx.beginPath();
+      for (let i = 0; i < livePeakHold.length; i++) {
+        const x = 4 + (i / Math.max(1, livePeakHold.length - 1)) * (w - 8);
+        const y = hh - 18 - ((livePeakHold[i] - lo) / Math.max(0.001, hi - lo)) * (hh - 30);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = `rgba(${cssRgb("--amber-rgb","234,180,95")},.55)`;
+      ctx.lineWidth = 1; ctx.stroke();
+    }
     if (liveSpec.peak_hz) {
       const px = 4 + ((liveSpec.peak_hz - liveSpec.start_hz) / Math.max(1, liveSpec.end_hz - liveSpec.start_hz)) * (w - 8);
       ctx.strokeStyle = `rgba(${cssRgb("--amber-rgb","234,180,95")},.8)`;
@@ -942,6 +1305,20 @@ export async function render(root, params = {}) {
       ctx.fillStyle = cssColor("--amber", "#eab45f");
       ctx.font = "9px 'JetBrains Mono', monospace";
       ctx.fillText(`${fmt.num(liveSpec.peak_hz / 1e6, 4)}`, Math.min(w - 60, px + 4), 12);
+    }
+    if (Array.isArray(liveMarkers) && liveMarkers.length) {
+      ctx.font = "9px 'JetBrains Mono', monospace";
+      for (const m of liveMarkers.slice(0, 8)) {
+        const hz = Number(m.hz);
+        if (!(hz >= liveSpec.start_hz && hz <= liveSpec.end_hz)) continue;
+        const px = 4 + ((hz - liveSpec.start_hz) / Math.max(1, liveSpec.end_hz - liveSpec.start_hz)) * (w - 8);
+        ctx.strokeStyle = "rgba(120,180,255,.7)";
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, hh - 18); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = "rgba(120,180,255,.9)";
+        ctx.fillText(m.label || fmt.num(hz / 1e6, 4), Math.min(w - 60, px + 3), 22);
+      }
     }
     ctx.fillStyle = "rgba(205,236,218,.78)";
     ctx.font = "9px 'JetBrains Mono', monospace";
@@ -991,15 +1368,34 @@ export async function render(root, params = {}) {
   function acceptLiveSpectrum(frame) {
     liveSpec = frame;
     const values = frame.bins || [];
+    let snrText = "";
+    liveSnr = null;
+    liveNoiseFloor = null;
     if (values.length) {
       const lo = Math.min(...values), hi = Math.max(...values);
       liveBounds.min = liveBounds.min * .9 + (lo - 6) * .1;
       liveBounds.max = liveBounds.max * .9 + (hi + 6) * .1;
+      if (livePeakHoldEnabled) {
+        if (!livePeakHold || livePeakHold.length !== values.length) livePeakHold = values.slice();
+        else for (let i = 0; i < values.length; i++) if (values[i] > livePeakHold[i]) livePeakHold[i] = values[i];
+      }
       liveHistory.push(values);
       if (liveHistory.length > 110) liveHistory.shift();
+      const sorted = values.slice().sort((a, b) => a - b);
+      const noise = sorted[Math.floor(sorted.length * 0.2)] ?? lo;
+      const peak = Number(frame.peak_db ?? hi);
+      const snr = peak - noise;
+      liveSnr = snr;
+      liveNoiseFloor = noise;
+      snrText = ` · noise ${fmt.num(noise, 1)} dB · SNR ${fmt.num(snr, 1)} dB`;
       drawLiveWaterfall();
     }
-    liveReadout.textContent = `${fmt.num(frame.center_hz / 1e6, 4)} MHz · span ${fmt.num((frame.end_hz - frame.start_hz) / 1e6, 3)} MHz · peak ${fmt.num(frame.peak_hz / 1e6, 4)} MHz / ${fmt.num(frame.peak_db, 1)} dB`;
+    let markerText = "";
+    if (liveMarkers?.length) {
+      const nearest = liveMarkers.map((m) => ({ ...m, delta: Number(m.hz) - liveCenter })).sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta))[0];
+      if (nearest) markerText = ` · marker Δ ${nearest.delta >= 0 ? "+" : ""}${fmt.num(nearest.delta / 1000, 1)} kHz`;
+    }
+    liveReadout.textContent = `${fmt.num(frame.center_hz / 1e6, 4)} MHz · span ${fmt.num((frame.end_hz - frame.start_hz) / 1e6, 3)} MHz · peak ${fmt.num(frame.peak_hz / 1e6, 4)} MHz / ${fmt.num(frame.peak_db, 1)} dB${snrText}${markerText}`;
     drawLiveSpectrum();
   }
 
@@ -1030,7 +1426,8 @@ export async function render(root, params = {}) {
     liveRecBtn.replaceChildren(h("span", { text: "REC ●" }));
     liveRecTimer = setInterval(() => {
       const seconds = Math.floor((Date.now() - liveRecStarted) / 1000);
-      liveStatus.textContent = `LIVE · REC ${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+      const mb = (liveRecBytes / 1048576).toFixed(1);
+      liveStatus.textContent = `LIVE · REC ${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")} · ${mb} MB`;
     }, 1000);
   }
   function stopRecording() {
@@ -1042,10 +1439,13 @@ export async function render(root, params = {}) {
     liveRecBtn.replaceChildren(h("span", { text: "REC" }));
     if (!liveRecChunks.length) return;
     const url = makeWav(liveRecChunks, liveAudioRate);
-    const a = h("a", { href: url, download: `darksec-${Date.now()}.wav` });
+    const freqTag = fmt.num(liveCenter / 1e6, 3).replace(/[^0-9.]/g, "");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const name = `darksec-live-${freqTag}MHz-${liveModeValue}-${ts}.wav`;
+    const a = h("a", { href: url, download: name });
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 8000);
-    toast("Recording saved as WAV");
+    toast(`Recording saved: ${name}`);
     liveStatus.textContent = "LIVE";
   }
 
@@ -1234,7 +1634,7 @@ export async function render(root, params = {}) {
       h("div", { class: "sdr-vfo-side" },
         h("div", { class: "row between" }, h("span", { class: "tiny muted", text: "S-METER" }), liveStatus),
         liveSBox,
-        h("div", { class: "row wrap gap-6 mt-6" }, livePlay, liveStopBtn, liveScanBtn, liveRecBtn, liveFull))),
+        h("div", { class: "row wrap gap-6 mt-6" }, livePlay, liveStopBtn, liveScanBtn, liveRecBtn, liveMarkBtn, livePeakBtn, livePeakClearBtn, liveMkrBtn, liveMkrClrBtn, liveLockoutBtn, liveCapBtn, liveFull))),
     liveModeRow,
     liveBandRow,
     liveGrid,
@@ -1330,7 +1730,76 @@ export async function render(root, params = {}) {
   );
   const captureBtn = btn("START CAPTURE", { tone: "primary", icon: "play" });
   const captureStatus = h("div", { class: "col mt-10" });
-  captureBody.append(capGrid, h("div", { class: "row mt-10" }, captureBtn), captureStatus);
+  const CAP_PROFILES_LS = "darksec.sdr.captureProfiles";
+  let capProfiles = loadJsonLS(CAP_PROFILES_LS, []);
+  const capProfileSel = select([{ value: "", label: "Capture profiles…" }, ...capProfiles.map((p, i) => ({ value: String(i), label: p.name || `Profile ${i + 1}` }))], "");
+  function refreshCapProfiles() {
+    capProfiles = loadJsonLS(CAP_PROFILES_LS, []);
+    capProfileSel.replaceChildren(...[{ value: "", label: "Capture profiles…" }, ...capProfiles.map((p, i) => ({ value: String(i), label: p.name || `Profile ${i + 1}` }))].map((o) => h("option", { value: o.value, text: o.label })));
+  }
+  const capSaveProfile = btn("SAVE PROFILE", { size: "sm", tone: "ghost", onClick: () => {
+    const name = (capName.value.trim() || `Capture ${mhz(Number(capFreq.value) * 1e6)}`).slice(0, 60);
+    const profile = {
+      name, freq_mhz: Number(capFreq.value), seconds: Number(capSeconds.value), rate: Number(capRate.value),
+      backend: capBackend.value, direct: capDirect.value, demod: capDemod.value, keep_iq: !!capKeepIq.querySelector("input")?.checked,
+    };
+    capProfiles = [profile, ...capProfiles.filter((p) => p.name !== name)].slice(0, 20);
+    saveJsonLS(CAP_PROFILES_LS, capProfiles);
+    refreshCapProfiles();
+    toast("Capture profile saved");
+  } });
+  const capLoadProfile = btn("LOAD", { size: "sm", tone: "ghost", onClick: () => {
+    const p = capProfiles[Number(capProfileSel.value)];
+    if (!p) { toast("Select a capture profile", "warn"); return; }
+    if (p.freq_mhz != null) capFreq.value = String(p.freq_mhz);
+    if (p.seconds != null) capSeconds.value = String(p.seconds);
+    if (p.rate != null) capRate.value = String(p.rate);
+    if (p.backend) capBackend.value = p.backend;
+    if (p.direct) capDirect.value = p.direct;
+    if (p.demod) capDemod.value = p.demod;
+    if (p.name) capName.value = p.name;
+    const keep = capKeepIq.querySelector("input"); if (keep && p.keep_iq != null) keep.checked = !!p.keep_iq;
+    toast(`Loaded profile: ${p.name}`);
+  } });
+  const capDelProfile = btn("DEL PROFILE", { size: "sm", tone: "ghost", onClick: () => {
+    const idx = Number(capProfileSel.value);
+    if (!capProfiles[idx]) { toast("Select a capture profile", "warn"); return; }
+    capProfiles.splice(idx, 1);
+    saveJsonLS(CAP_PROFILES_LS, capProfiles);
+    refreshCapProfiles();
+    toast("Capture profile deleted");
+  } });
+  let capScheduleTimer = null;
+  let capScheduleRemaining = 0;
+  const capScheduleStatus = h("div", { class: "tiny muted" });
+  const capScheduleBtn = btn("SCHEDULE", { size: "sm", tone: "ghost", onClick: () => {
+    if (capScheduleTimer) { clearInterval(capScheduleTimer); capScheduleTimer = null; capScheduleStatus.textContent = ""; toast("Scheduled capture cancelled"); return; }
+    const secIn = input({ type: "number", value: "60", min: "5", max: "86400", step: "5" });
+    const body = h("div", { class: "col gap-8" }, h("div", { class: "small", text: "Start capture after delay (seconds). Page must remain open." }), field("DELAY (s)", secIn));
+    const m = modal({ title: "Schedule capture", sub: "Local page timer", body, actions: [
+      btn("CANCEL", { tone: "ghost", onClick: () => m.close() }),
+      btn("SCHEDULE", { tone: "primary", onClick: () => {
+        capScheduleRemaining = Math.max(5, Math.min(86400, Number(secIn.value) || 60));
+        m.close();
+        capScheduleStatus.textContent = `Scheduled capture in ${capScheduleRemaining}s`;
+        capScheduleTimer = setInterval(() => {
+          capScheduleRemaining -= 1;
+          if (capScheduleRemaining <= 0) {
+            clearInterval(capScheduleTimer); capScheduleTimer = null; capScheduleStatus.textContent = "";
+            toast("Scheduled capture starting"); startCapture();
+          } else {
+            capScheduleStatus.textContent = `Scheduled capture in ${capScheduleRemaining}s`;
+          }
+        }, 1000);
+      } }),
+    ] });
+  } });
+  captureBody.append(
+    capGrid,
+    h("div", { class: "row wrap gap-6 mt-10" }, captureBtn, capScheduleBtn, capProfileSel, capSaveProfile, capLoadProfile, capDelProfile),
+    capScheduleStatus,
+    captureStatus,
+  );
   if (paramFreq) {
     captureBody.insertBefore(h("div", { class: "callout small" },
       `Tuned from Communications: ${fmt.num(paramFreq, 4)} MHz ${paramMode ? `// ${paramMode.toUpperCase()}` : ""}`), capGrid);
@@ -1566,6 +2035,7 @@ export async function render(root, params = {}) {
         wrap.appendChild(h("div", { class: "small muted mt-10", text: "Job complete. See the recording list below." }));
       }
       loadRecordings();
+      try { loadJobs(); } catch {}
     } else if (job.status === "running" || job.status === "processing" || job.status === "queued") {
       const stop = btn("STOP JOB", { size: "sm", tone: "danger", icon: "stop", onClick: async () => {
         try { await api.post(`/api/sdr/jobs/${encodeURIComponent(job.id)}/stop`, {}); toast("Stop requested"); }
@@ -1605,6 +2075,7 @@ export async function render(root, params = {}) {
           if (["complete", "error", "stopped"].includes(j.status)) {
             clearInterval(pollTimer);
             pollTimer = null;
+            try { loadJobs(); } catch {}
             if (j.status === "complete") toast("Capture complete");
             if (j.status === "error") toast(j.error || "Capture failed", "error");
           }
@@ -1623,37 +2094,211 @@ export async function render(root, params = {}) {
   captureBtn.addEventListener("click", startCapture);
 
   /* ----------------------------------------------------------- recordings */
+  let recFilterValue = "";
+  const recFilterInput = input({ type: "search", placeholder: "Filter recordings by name, freq, mode, note…" });
+  recFilterInput.addEventListener("input", () => { recFilterValue = recFilterInput.value.trim().toLowerCase(); paintRecordings(lastRecordings); });
+  const recList = h("div", { class: "col", id: "sdr-rec-list" });
   const recPanel = panel({
     title: "Recordings",
     sub: "Local audio, images and retained IQ",
     icon: "database",
     cls: "span-3",
-    tools: [btn("REFRESH", { size: "sm", icon: "refresh", onClick: () => loadRecordings() })],
-    body: h("div", { class: "col", id: "sdr-rec-list" }),
+    tools: [
+      btn("EXPORT META", { size: "sm", tone: "ghost", onClick: () => {
+        const blob = new Blob([JSON.stringify({ exported_at: new Date().toISOString(), recordings: lastRecordings }, null, 2)], { type: "application/json" });
+        const a = h("a", { href: URL.createObjectURL(blob), download: "darksec-sdr-recordings.json" });
+        document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      } }),
+      btn("PURGE", { size: "sm", tone: "ghost", title: "Delete recordings older than selected days", onClick: async () => {
+        const daysIn = input({ type: "number", value: "30", min: "0", max: "3650", step: "1" });
+        const body = h("div", { class: "col gap-8" },
+          h("div", { class: "small", text: "Delete recordings older than N days. Use 0 to delete all recordings." }),
+          field("DAYS", daysIn),
+        );
+        const m = modal({ title: "Purge recordings", sub: "Destructive - local files will be deleted", body, actions: [
+          btn("CANCEL", { tone: "ghost", onClick: () => m.close() }),
+          btn("PURGE", { tone: "danger", onClick: async () => {
+            const days = Math.max(0, Math.min(3650, Number(daysIn.value) || 0));
+            const cutoff = Date.now() - days * 86400000;
+            const targets = lastRecordings.filter((r) => days === 0 || (Date.parse(r.ts || "") || 0) < cutoff);
+            if (!targets.length) { toast("No recordings match purge criteria"); m.close(); return; }
+            const ok = await confirmDialog({ title: "Purge recordings", confirmText: "DELETE", danger: true, message: `Delete ${targets.length} recording(s)? This removes local files and cannot be undone.` });
+            if (!ok) return;
+            let deleted = 0;
+            for (const r of targets) {
+              try { await api.del(`/api/sdr/recordings/${r.id}`); deleted++; } catch {}
+            }
+            toast(`Deleted ${deleted} recording(s)`);
+            m.close();
+            loadRecordings();
+          } }),
+        ] });
+      } }),
+      btn("REFRESH", { size: "sm", icon: "refresh", onClick: () => loadRecordings() }),
+    ],
+    body: h("div", { class: "col gap-8" }, recFilterInput, recList),
   });
   paneCapture.appendChild(recPanel);
   const lower = paneSystem;
 
+  let decodeToolsCache = null;
+  let lastRecordings = [];
+  async function getDecodeTools() {
+    if (decodeToolsCache) return decodeToolsCache;
+    try { decodeToolsCache = await api.get("/api/sdr/decode/tools"); }
+    catch { decodeToolsCache = { tools: {} }; }
+    return decodeToolsCache;
+  }
+
+  function tuneFromRecording(rec) {
+    const freqMhz = Number(rec.freq_hz) / 1e6;
+    if (freqMhz > 0) {
+      capFreq.value = String(freqMhz.toFixed(6));
+      if (rec.kind && DEMODS.some((d) => d.value === rec.kind)) capDemod.value = rec.kind;
+      if (rec.rate) capRate.value = String(Number(rec.rate) / 1e6);
+      if (rec.name) capName.value = rec.name;
+      toast(`Capture controls loaded from recording #${rec.id}`);
+    }
+  }
+
+  async function analyzeRecording(rec) {
+    const body = h("div", { class: "col gap-8" }, loading("ANALYZING RECORDING"));
+    let analysis = null;
+    const exportBtn = btn("EXPORT JSON", { tone: "ghost", disabled: true, onClick: () => {
+      if (!analysis) return;
+      const blob = new Blob([JSON.stringify(analysis, null, 2)], { type: "application/json" });
+      const a = h("a", { href: URL.createObjectURL(blob), download: `darksec-recording-${rec.id}-analysis.json` });
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    } });
+    const m = modal({ title: `Analyze recording #${rec.id}`, sub: rec.name || "", wide: true, body,
+      actions: [exportBtn, btn("CLOSE", { tone: "ghost", onClick: () => m.close() })] });
+    try {
+      const out = await api.get(`/api/sdr/recordings/${rec.id}/analyze`);
+      analysis = out;
+      exportBtn.disabled = false;
+      body.replaceChildren();
+      body.appendChild(kv([
+        ["Frequency", mhz(out.freq_hz)],
+        ["Sample rate", out.rate ? `${fmt.num(Number(out.rate) / 1e6, 3)} Msps` : "—"],
+        ["Kind", String(out.kind || "—").toUpperCase()],
+      ]));
+      if (out.spectrum) {
+        body.appendChild(h("div", { class: "side-label mt-10", text: "SPECTRUM" }));
+        body.appendChild(kv([
+          ["Peak", `${fmt.num(out.spectrum.peak_db, 2)} dB`],
+          ["Noise floor", `${fmt.num(out.spectrum.noise_floor_db, 2)} dB`],
+          ["SNR estimate", `${fmt.num(out.spectrum.snr_est_db, 2)} dB`],
+        ]));
+      }
+      if (out.audio) {
+        body.appendChild(h("div", { class: "side-label mt-10", text: "AUDIO" }));
+        if (out.audio.error) body.appendChild(h("div", { class: "small danger-text", text: out.audio.error }));
+        else body.appendChild(kv([
+          ["Duration", `${fmt.num(out.audio.duration_s, 2)} s`],
+          ["Sample rate", `${out.audio.sample_rate} Hz`],
+          ["Channels", String(out.audio.channels)],
+          ["Peak", `${fmt.num(out.audio.peak_dbfs, 2)} dBFS`],
+          ["RMS", fmt.num(out.audio.rms, 5)],
+        ]));
+      }
+      const files = Object.entries(out.files || {});
+      if (files.length) {
+        body.appendChild(h("div", { class: "side-label mt-10", text: "FILES" }));
+        for (const [kind, info] of files) {
+          body.appendChild(h("div", { class: "tiny muted", text: `${kind.toUpperCase()}: ${info.name} · ${fmt.bytes(info.bytes || 0)}` }));
+        }
+      }
+      if (!out.spectrum && !out.audio) body.appendChild(h("div", { class: "small muted mt-10", text: "No analyzable IQ/audio data found for this recording." }));
+    } catch (err) {
+      body.replaceChildren(h("div", { class: "callout danger", text: err.message || "Analysis failed" }));
+    }
+  }
+
+  async function decodeRecordingModal(rec) {
+    const tools = await getDecodeTools();
+    const available = Object.entries(tools.tools || {}).filter(([, v]) => v.available).map(([k]) => k);
+    const decoderSel = select([
+      { value: "", label: available.length ? "Select decoder" : "No external decoders installed" },
+      ...available.map((k) => ({ value: k, label: k.toUpperCase() })),
+    ], "");
+    const output = h("pre", { class: "small mono", style: { whiteSpace: "pre-wrap", maxHeight: "40vh", overflow: "auto", margin: "0" }, text: "Decoder output will appear here." });
+    const run = btn("RUN DECODE", { tone: "primary", icon: "play", disabled: !available.length, onClick: async () => {
+      const decoder = decoderSel.value;
+      if (!decoder) { toast("Select a decoder", "warn"); return; }
+      run.disabled = true;
+      output.textContent = "Running decoder…";
+      try {
+        const out = await api.post(`/api/sdr/recordings/${rec.id}/decode`, { decoder });
+        output.textContent = out.output || out.error || "(no output)";
+        if (out.error) toast(out.error, "error"); else toast("Decode complete");
+      } catch (err) { output.textContent = err.message || "Decode failed"; toast(err.message, "error"); }
+      finally { run.disabled = false; }
+    } });
+    const copyBtn = btn("COPY", { tone: "ghost", onClick: async () => {
+      try { await navigator.clipboard.writeText(output.textContent || ""); toast("Copied decoder output"); }
+      catch { toast("Clipboard copy failed", "warn"); }
+    } });
+    const exportBtn = btn("EXPORT", { tone: "ghost", onClick: () => {
+      const blob = new Blob([output.textContent || ""], { type: "text/plain" });
+      const a = h("a", { href: URL.createObjectURL(blob), download: `darksec-recording-${rec.id}-decode.txt` });
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    } });
+    const toolInfo = Object.entries(tools.tools || {}).map(([k, v]) => `${k}: ${v.available ? "available" : "missing"}`).join(" · ");
+    const body = h("div", { class: "col gap-8" },
+      h("div", { class: "tiny muted", text: "Runs an installed external decoder on the recording's audio file. Output is unverified." }),
+      h("div", { class: "tiny muted mono", text: toolInfo || "No decoder tool info." }),
+      field("DECODER", decoderSel),
+      output,
+    );
+    const m = modal({ title: `Decode recording #${rec.id}`, sub: rec.name || "", wide: true, body,
+      actions: [copyBtn, exportBtn, btn("CLOSE", { tone: "ghost", onClick: () => m.close() }), run] });
+  }
+
+  async function editRecordingNote(rec) {
+    const nameIn = input({ type: "text", value: rec.name || "", maxlength: "120" });
+    const noteIn = h("textarea", { class: "input", rows: "4", style: { width: "100%" } });
+    noteIn.value = rec.note || "";
+    const body = h("div", { class: "col gap-8" }, field("NAME", nameIn), field("NOTE", noteIn));
+    const m = modal({ title: `Recording #${rec.id}`, sub: "Edit metadata", body,
+      actions: [
+        btn("CANCEL", { tone: "ghost", onClick: () => m.close() }),
+        btn("SAVE", { tone: "primary", icon: "check", onClick: async () => {
+          try {
+            await api.post(`/api/sdr/recordings/${rec.id}/note`, { name: nameIn.value, note: noteIn.value });
+            toast("Recording updated"); m.close(); loadRecordings();
+          } catch (err) { toast(err.message, "error"); }
+        } }),
+      ] });
+  }
+
   async function loadRecordings() {
     try {
       const out = await api.get("/api/sdr/recordings");
-      paintRecordings(out.items || []);
+      lastRecordings = out.items || [];
+      paintRecordings(lastRecordings);
     } catch (err) { toast(err.message, "error"); }
   }
   function paintRecordings(items) {
-    const target = recPanel.querySelector("#sdr-rec-list");
+    const target = recList;
     target.replaceChildren();
-    if (!items.length) {
-      target.appendChild(emptyState("No recordings", "Capture a signal to create a real local recording.", "radio"));
+    const q = recFilterValue;
+    const filtered = !q ? items : items.filter((r) => {
+      const hay = `${r.name || ""} ${r.note || ""} ${r.kind || ""} ${mhz(r.freq_hz)} ${r.id}`.toLowerCase();
+      return hay.includes(q);
+    });
+    if (!filtered.length) {
+      target.appendChild(emptyState(q ? "No matching recordings" : "No recordings", q ? "Adjust the filter to see recordings." : "Capture a signal to create a real local recording.", "radio"));
       return;
     }
-    for (const rec of items) {
+    for (const rec of filtered) {
       const wrap = h("div", { class: "rec-item" });
       const info = h("div", { class: "grow" });
       info.appendChild(h("div", { class: "rec-name", text: rec.name || `Recording #${rec.id}` }));
       const meta = noteFields(rec.note);
+      const noteText = String(rec.note || "").trim();
       info.appendChild(h("div", { class: "rec-sub",
         text: `${mhz(rec.freq_hz)} · ${String(rec.kind || "").toUpperCase()} · ${backendName(meta.backend || "hackrf")} · ${fmt.bytes(rec.size || 0)} · ${fmt.ago(rec.ts)}` }));
+      if (noteText && !noteText.includes("=")) info.appendChild(h("div", { class: "tiny muted", text: noteText.slice(0, 140) }));
       wrap.appendChild(info);
       if (rec.audio_path) {
         const audio = h("audio", { controls: true, preload: "none", src: `/api/sdr/recordings/${rec.id}/audio` });
@@ -1665,16 +2310,26 @@ export async function render(root, params = {}) {
           style: { height: "38px", border: "1px solid var(--line)" },
         }));
       }
+      const actions = h("div", { class: "row wrap gap-4" });
+      actions.appendChild(btn("TUNE", { size: "sm", tone: "ghost", title: "Load into capture controls", onClick: () => tuneFromRecording(rec) }));
+      if (Number(rec.freq_hz) > 0) actions.appendChild(btn("LIVE", { size: "sm", tone: "ghost", title: "Tune live receiver", onClick: () => {
+        tuneTo(Number(rec.freq_hz));
+        if (rec.kind && ["nfm","wfm","am","usb","lsb"].includes(rec.kind)) setMode(rec.kind);
+        toast(`Live receiver tuned to ${mhz(rec.freq_hz)}`);
+      } }));
+      actions.appendChild(btn("ANALYZE", { size: "sm", tone: "ghost", onClick: () => analyzeRecording(rec) }));
+      if (rec.audio_path) actions.appendChild(btn("DECODE", { size: "sm", tone: "ghost", onClick: () => decodeRecordingModal(rec) }));
+      actions.appendChild(btn("NOTE", { size: "sm", tone: "ghost", onClick: () => editRecordingNote(rec) }));
       if (rec.iq_path) {
-        wrap.appendChild(btn("IQ", { size: "sm", tone: "ghost", icon: "download", title: "Download IQ",
+        actions.appendChild(btn("IQ", { size: "sm", tone: "ghost", icon: "download", title: "Download IQ",
           onClick: () => { location.href = `/api/sdr/recordings/${rec.id}/iq?download=true`; } }));
-        const fmt = noteFields(rec.note).format;
-        if (!fmt || fmt === "i8") {
-          wrap.appendChild(btn("TX", { size: "sm", tone: "danger", title: "Replay this IQ",
+        const fmtMeta = noteFields(rec.note).format;
+        if (!fmtMeta || fmtMeta === "i8") {
+          actions.appendChild(btn("TX", { size: "sm", tone: "danger", title: "Replay this IQ",
             onClick: () => openTx(rec) }));
         }
       }
-      wrap.appendChild(btn("DEL", { size: "sm", tone: "ghost", onClick: async () => {
+      actions.appendChild(btn("DEL", { size: "sm", tone: "ghost", onClick: async () => {
         const ok = await confirmDialog({
           title: "Delete recording", confirmText: "DELETE", danger: true,
           message: `Delete recording #${rec.id} and all of its local files? This cannot be undone.`,
@@ -1683,6 +2338,7 @@ export async function render(root, params = {}) {
         try { await api.del(`/api/sdr/recordings/${rec.id}`); toast("Recording deleted"); loadRecordings(); }
         catch (err) { toast(err.message, "error"); }
       } }));
+      wrap.appendChild(actions);
       target.appendChild(wrap);
     }
   }
@@ -1992,34 +2648,64 @@ export async function render(root, params = {}) {
   paintRecordings(recs);
 
   /* ---------------------------------------------------------------- jobs */
-  if (recentJobs.length) {
-    const jobsPanel = panel({
-      title: "Recent jobs",
-      sub: "Capture history",
-      icon: "clock",
-      cls: "span-3",
-      body: h("div", { class: "scroll-x" }, (() => {
-        const table = h("table", { class: "data" });
-        table.innerHTML = "<thead><tr><th>ID</th><th>NAME</th><th>FREQ</th><th>MODE</th><th>STATUS</th><th>CREATED</th></tr></thead>";
-        const tbody = h("tbody");
-        for (const j of recentJobs) {
-          const tr = h("tr");
-          tr.append(
-            h("td", { class: "mono", text: j.id }),
-            h("td", { text: j.name || "—" }),
-            h("td", { class: "num", text: mhz(j.freq_hz) }),
-            h("td", { text: String(j.demod || j.kind || "—").toUpperCase() }),
-            h("td", {}, badge(String(j.status || "").toUpperCase(), statusTone(j.status))),
-            h("td", { text: fmt.date(j.created) }),
-          );
-          tbody.appendChild(tr);
-        }
-        table.appendChild(tbody);
-        return table;
-      })()),
-    });
-    paneCapture.appendChild(jobsPanel);
+  const jobsBody = h("div", { class: "scroll-x" });
+  let lastJobs = recentJobs || [];
+  function paintJobs(items) {
+    jobsBody.replaceChildren();
+    if (!items.length) {
+      jobsBody.appendChild(h("div", { class: "small muted", text: "No capture jobs yet." }));
+      return;
+    }
+    const table = h("table", { class: "data" });
+    table.innerHTML = "<thead><tr><th>ID</th><th>NAME</th><th>FREQ</th><th>MODE</th><th>STATUS</th><th>CREATED</th><th></th></tr></thead>";
+    const tbody = h("tbody");
+    for (const j of items) {
+      const tr = h("tr");
+      const actions = h("td");
+      if (["running", "queued", "processing"].includes(String(j.status))) {
+        actions.appendChild(btn("STOP", { size: "sm", tone: "danger", onClick: async () => {
+          try { await api.post(`/api/sdr/jobs/${encodeURIComponent(j.id)}/stop`, {}); toast("Stop requested"); loadJobs(); }
+          catch (err) { toast(err.message, "error"); }
+        } }));
+      }
+      tr.append(
+        h("td", { class: "mono", text: j.id }),
+        h("td", { text: j.name || "—" }),
+        h("td", { class: "num", text: mhz(j.freq_hz) }),
+        h("td", { text: String(j.demod || j.kind || "—").toUpperCase() }),
+        h("td", {}, badge(String(j.status || "").toUpperCase(), statusTone(j.status))),
+        h("td", { text: fmt.date(j.created) }),
+        actions,
+      );
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    jobsBody.appendChild(table);
   }
+  async function loadJobs() {
+    try {
+      const out = await api.get("/api/sdr/jobs?limit=25");
+      lastJobs = out.items || [];
+      paintJobs(lastJobs);
+    } catch (err) { jobsBody.replaceChildren(h("div", { class: "small danger-text", text: err.message })); }
+  }
+  const jobsPanel = panel({
+    title: "Recent jobs",
+    sub: "Capture history",
+    icon: "clock",
+    cls: "span-3",
+    tools: [
+      btn("EXPORT", { size: "sm", tone: "ghost", onClick: () => {
+        const blob = new Blob([JSON.stringify({ exported_at: new Date().toISOString(), jobs: lastJobs }, null, 2)], { type: "application/json" });
+        const a = h("a", { href: URL.createObjectURL(blob), download: "darksec-sdr-jobs.json" });
+        document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      } }),
+      btn("REFRESH", { size: "sm", icon: "refresh", onClick: () => loadJobs() }),
+    ],
+    body: jobsBody,
+  });
+  paneCapture.appendChild(jobsPanel);
+  paintJobs(recentJobs);
 
   const cards = await referenceSection("COMMS", { limit: 6 });
   if (cards) paneSystem.appendChild(panel({ title: "Radio field cards", sub: "Receive and procedure reference", icon: "book", body: cards }));
@@ -2029,6 +2715,7 @@ export async function render(root, params = {}) {
   return () => {
     if (sweepAbort) stopSweep();
     if (pollTimer) clearInterval(pollTimer);
+    if (capScheduleTimer) clearInterval(capScheduleTimer);
     window.removeEventListener("keydown", liveKeyHandler);
     if (adsbPoll) { clearInterval(adsbPoll); adsbPoll = null; }
     stopLive();
