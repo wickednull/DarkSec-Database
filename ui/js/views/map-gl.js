@@ -190,8 +190,28 @@ function destination(lon, lat, bearingDeg, distKm) {
   return [(lon2*180/Math.PI+540)%360-180, lat2*180/Math.PI];
 }
 
+function mapLoadingPage({ kicker = "COMMAND // TERRAIN", title = "Preparing map", desc = "", status = "Loading map data" } = {}) {
+  return h("div", { class: "map-loading-page" },
+    h("div", { class: "map-loading-card" },
+      h("div", { class: "map-loading-kicker", text: kicker }),
+      h("h2", { class: "map-loading-title", text: title }),
+      h("p", { class: "map-loading-desc", text: desc }),
+      h("div", { class: "map-loading-status" }, h("span", { class: "spinner" }), h("span", { text: status })),
+      h("div", { class: "map-loading-meta" },
+        h("div", {}, "Large offline tile caches ", h("span", { text: "can take a minute or two to index and warm up on first load." })),
+        h("div", {}, "USB or slow storage ", h("span", { text: "may add a little extra time — the map will appear as soon as it’s ready." })),
+      ),
+    ),
+  );
+}
+
 export async function render(root, params = {}) {
-  root.replaceChildren(loading("INITIALISING GL MAP"));
+  root.replaceChildren(mapLoadingPage({
+    kicker: "COMMAND // TERRAIN (GL)",
+    title: "Preparing your 3D map",
+    desc: "Loading the local basemap, terrain, cached intelligence, and map layers. Everything stays local on this device.",
+    status: "Initialising 3D map",
+  }));
   const settings = store.settings || {};
   const homeLat = Number.isFinite(Number(settings.lat)) ? Number(settings.lat) : 39.8283;
   const homeLon = Number.isFinite(Number(settings.lon)) ? Number(settings.lon) : -98.5795;

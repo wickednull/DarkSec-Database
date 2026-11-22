@@ -69,6 +69,21 @@ function niceDistance(m) {
   return { m: units[units.length - 1], label: U.distM(units[units.length - 1]) };
 }
 
+function mapLoadingPage({ kicker = "COMMAND // TERRAIN", title = "Preparing map", desc = "", status = "Loading map data" } = {}) {
+  return h("div", { class: "map-loading-page" },
+    h("div", { class: "map-loading-card" },
+      h("div", { class: "map-loading-kicker", text: kicker }),
+      h("h2", { class: "map-loading-title", text: title }),
+      h("p", { class: "map-loading-desc", text: desc }),
+      h("div", { class: "map-loading-status" }, h("span", { class: "spinner" }), h("span", { text: status })),
+      h("div", { class: "map-loading-meta" },
+        h("div", {}, "Large offline tile caches ", h("span", { text: "can take a minute or two to index and warm up on first load." })),
+        h("div", {}, "USB or slow storage ", h("span", { text: "may add a little extra time — the map will appear as soon as it’s ready." })),
+      ),
+    ),
+  );
+}
+
 export async function render(root, params = {}) {
   const want = params.renderer || params.mode || localStorage.getItem("darksec.map.renderer") || "2d";
   if (want === "gl" || want === "3d") {
@@ -76,7 +91,12 @@ export async function render(root, params = {}) {
     return mapGl.render(root, { ...params, renderer: "gl" });
   }
   try { localStorage.setItem("darksec.map.renderer", "2d"); } catch {}
-  root.replaceChildren(loading("INITIALISING OFFLINE MAP"));
+  root.replaceChildren(mapLoadingPage({
+    kicker: "COMMAND // TERRAIN",
+    title: "Preparing your offline map",
+    desc: "Loading basemaps, cached tiles, waypoints, and intelligence layers. Everything stays local on this device.",
+    status: "Initialising 2D map",
+  }));
   let layers, waypoints, tracks, coordNow;
   const settings = store.settings || {};
   const configuredLat = Number(settings.lat), configuredLon = Number(settings.lon);
