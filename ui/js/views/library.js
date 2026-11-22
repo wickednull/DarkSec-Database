@@ -157,7 +157,9 @@ export async function render(root, params) {
   });
   root.appendChild(jobPanel);
 
-  const bar = progressBar(job.running ? Math.round((job.done / Math.max(1, job.total)) * 100) : (stats.text_indexed ? 100 : 0));
+  const bar = progressBar(job.running
+    ? (job.done >= job.total ? 100 : Math.min(99, Math.floor((job.done / Math.max(1, job.total)) * 100)))
+    : (stats.text_indexed ? 100 : 0));
   const jobLine = h("div", { class: "small muted", text: job.running
     ? `${job.message || "working"} · ${fmt.num(job.done, 0)} / ${fmt.num(job.total, 0)} · ${job.current || ""}`
     : `${fmt.num(stats.documents || 0, 0)} documents catalogued. Metadata is fast; deep text extraction is not.` });
@@ -183,7 +185,9 @@ export async function render(root, params) {
 
   function updateJob(j) {
     if (!j) return;
-    const pct = j.total ? Math.round((j.done / j.total) * 100) : 0;
+    const pct = j.total
+      ? (j.done >= j.total ? 100 : Math.min(99, Math.floor((j.done / j.total) * 100)))
+      : 0;
     bar.replaceChildren();
     const fill = h("span");
     fill.style.width = `${j.running ? pct : (j.finished ? 100 : 0)}%`;

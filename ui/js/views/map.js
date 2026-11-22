@@ -831,7 +831,9 @@ export async function render(root, params = {}) {
       for (const job of [...running, ...recent]) {
         const total = Number(job.total) || 0;
         const done = Number(job.completed) || 0;
-        const pct = total ? Math.round(done / total * 100) : (job.state === "running" ? 0 : 100);
+        const pct = total
+          ? (done >= total ? 100 : Math.min(99, Math.floor((done / total) * 100)))
+          : (job.state === "running" ? 0 : 100);
         const bar = h("div", { class: "progress-track" },
           h("div", { class: "bar", style: { width: `${pct}%` } }));
         const logText = (job.log || []).map((line) =>
@@ -1106,7 +1108,9 @@ export async function render(root, params = {}) {
           let job;
           try { job = await api.get(`/api/map/cache/job/${jobId}`); }
           catch { resolve(); return; }
-          const pct = job.total ? Math.round(job.completed / job.total * 100) : 0;
+          const pct = job.total
+            ? (job.completed >= job.total ? 100 : Math.min(99, Math.floor((job.completed / job.total) * 100)))
+            : 0;
           progressBar.style.width = `${pct}%`;
           progressText.textContent =
             `${pct}% · ${job.completed}/${job.total} · ${job.downloaded} new · ` +

@@ -1544,9 +1544,10 @@ export async function render(root, params = {}) {
       ["Backend", backendName(job.backend || "hackrf")],
       ["Job ID", job.id],
     ]));
-    const pct = Math.round((Number(job.progress) || 0) * 100);
+    const rawPct = (Number(job.progress) || 0) * 100;
+    const pct = job.status === "complete" ? 100 : (rawPct >= 100 ? 100 : Math.min(99, Math.floor(rawPct)));
     wrap.appendChild(h("div", { class: "row between tiny muted mt-6" },
-      h("span", { text: pct >= 100 ? "COMPLETE" : "CAPTURING" }),
+      h("span", { text: job.status === "complete" ? "COMPLETE" : "CAPTURING" }),
       h("span", { text: `${pct}%` })));
     wrap.appendChild(progressBar(pct, job.status === "error" ? "bad" : ""));
     if (job.error) wrap.appendChild(h("div", { class: "callout danger small mt-10", text: job.error }));

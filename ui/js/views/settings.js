@@ -1659,7 +1659,9 @@ export async function render(root) {
     bundleCancelBtn.disabled = !running;
     const total = Number(job.total_bytes || 0);
     const done = Number(job.downloaded_bytes || 0);
-    const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    const pct = total > 0
+      ? (done >= total ? 100 : Math.min(99, Math.floor((done / total) * 100)))
+      : 0;
     const fill = bundleProgress.querySelector("span");
     if (fill) fill.style.width = `${pct}%`;
     let text = "";
@@ -1766,7 +1768,9 @@ export async function render(root) {
     }
     const job = stats.job || {};
     if (job.running) {
-      const pct = job.total ? Math.round((job.done / job.total) * 100) : 0;
+      const pct = job.total
+        ? (job.done >= job.total ? 100 : Math.min(99, Math.floor((job.done / job.total) * 100)))
+        : 0;
       target.appendChild(h("div", { class: "small muted mt-10", text: `${job.message || "Indexing"} — ${job.done}/${job.total} (${pct}%)${job.errors ? ` · ${job.errors} errors` : ""}` }));
       target.appendChild(progressBar(pct));
       if (job.current) target.appendChild(h("div", { class: "tiny dim truncate", text: job.current }));
@@ -2134,7 +2138,9 @@ export async function render(root) {
           let state;
           try { state = await api.get(`/api/map/cache/relocate/${job.id}`); }
           catch (err) { m.close(); reject(err); return; }
-          const pct = state.total ? Math.round(state.completed / state.total * 100) : 100;
+          const pct = state.total
+            ? (state.completed >= state.total ? 100 : Math.min(99, Math.floor((state.completed / state.total) * 100)))
+            : 100;
           bar.style.width = `${pct}%`;
           text.textContent = `${pct}% · ${state.completed}/${state.total} files · ${state.copied} copied · ${state.skipped} already there · ${state.failed} failed`;
           if (state.state === "done") { done = true; m.close(); resolve(state); return; }
