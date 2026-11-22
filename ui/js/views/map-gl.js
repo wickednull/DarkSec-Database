@@ -30,15 +30,16 @@ function loadMapLibre() {
   return maplibrePromise;
 }
 
-function rasterStyle(revision = "", source = "", generation = 0, labelsOverlay = false, mbtilesRaster = false) {
+function rasterStyle(revision = "", source = "", generation = 0, labelsOverlay = false, mbtilesRaster = false, mbtilesAttribution = "") {
   const params = new URLSearchParams();
   if (revision) params.set("r", revision);
   if (source) params.set("s", source);
   if (generation) params.set("b", String(generation));
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const tile = `${location.origin}/api/map/tiles/{z}/{x}/{y}.png${suffix}`;
+  const attribution = mbtilesAttribution || "Local/offline tiles · DarkSec";
   const sources = {
-    local: { type: "raster", tiles: [tile], tileSize: 256, attribution: "Local/offline tiles · DarkSec" },
+    local: { type: "raster", tiles: [tile], tileSize: 256, attribution },
   };
   const layers = [
     { id: "bg", type: "background", paint: { "background-color": "#030806" } },
@@ -207,10 +208,10 @@ export async function render(root, params = {}) {
   const hasLinkZoom = Number.isFinite(linkZoom);
   const glCenter = hasLink ? [linkLon, linkLat] : [homeLon, homeLat];
   const glZoom = hasLinkZoom ? Math.max(-2, Math.min(18, linkZoom)) : 3.5;
-  let intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud, mapLayers;
+  let intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud, mapLayers, cacheStatus;
   let statusBox = null, coordBox = null;
   try {
-    [intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud, mapLayers] = await Promise.all([
+    [intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud, mapLayers, cacheStatus] = await Promise.all([
       api.get("/api/map/intel").catch(() => null),
       api.get("/api/records/waypoints?limit=2000").then(r=>r.items||[]).catch(() => []),
       api.get("/api/records/tracks?limit=500").then(r=>r.items||[]).catch(() => []),
@@ -220,14 +221,15 @@ export async function render(root, params = {}) {
       api.get("/api/map/overlays/rain").catch(() => null),
       api.get("/api/map/overlays/cloud").catch(() => null),
       api.get("/api/map/layers").catch(() => null),
+      api.get("/api/map/cache/status").catch(() => null),
     ]);
   } catch (err) { root.replaceChildren(h("div", { class: "callout danger", text: err.message })); return; }
 
   let maplibregl;
   try { maplibregl = await loadMapLibre(); } catch (err) { root.replaceChildren(h("div", { class: "callout danger", text: err.message })); return; }
 
-  const state = { maxAgeHours: 0, show: { hazards:true, conflict:true, aircraft:true, sats:true, satsOverheadOnly:false, maritime:true, cables:true, cctv:true, cctvAlpr:true, wind:false, rain:false, cloud:false, terrain: !!demStatus?.available, waypoints:true, tracks:true, daynight:true, home:!hidePosition }, live: true, lastRefresh: Date.now() };
-  let map = null, popup = null, daynightTimer = null, glLiveTimer = null, liveTimer = null, freshTimer = null, inspector = null;
+  const state = { maxAgeHours: 0, show: { hazards:true, conflict:true, aircraft:true, sats:true, satsOverheadOnly:false, maritime:true, cables:true, cctv:true, cctvAlpr:true, wind:false, rain:false, cloud:false, terrain: !!demStatus?.available, waypoints:true, tracks:true, daynight:true, home:!hidePosition, scale:true }, live: true, lastRefresh: Date.now() };
+  let map = null, popup = null, scaleControl = null, daynightTimer = null, glLiveTimer = null, liveTimer = null, freshTimer = null, inspector = null;
   let movingFetchedAt = Date.now();
   let movingTimer = null, movingPollTimer = null;
   let mapStyle = null;
@@ -240,8 +242,23 @@ export async function render(root, params = {}) {
       toast(`Vector basemap style unavailable: ${err.message || err}`, "warn", 7000);
     }
   }
-  if (!mapStyle) mapStyle = rasterStyle(mbInfo.revision || "", mapLayers?.activeSource || "", mapLayers?.cacheGeneration || 0, labelsOverlay, !!(mbInfo.raster && mbInfo.usable));
+  const usingVector = mbInfo.vector && mbUsable;
+  if (!mapStyle) {
+    const mbNames = (mbInfo.archives || []).filter((a) => a.usable).map((a) => a.name || a.file).filter(Boolean).slice(0, 3).join(", ");
+    const mbAttr = (mbInfo.raster && mbInfo.usable) ? `MBTiles · ${mbNames || "operator archive"}` : "";
+    mapStyle = rasterStyle(mbInfo.revision || "", mapLayers?.activeSource || "", mapLayers?.cacheGeneration || 0, labelsOverlay, !!(mbInfo.raster && mbInfo.usable), mbAttr);
+  }
   mapStyle = await ensureVectorGlyphs(mapStyle);
+  const rasterLabelOverlays = !usingVector && labelsOverlay && (
+    ["esri_imagery", "usgs_imagery"].includes(mapLayers?.activeSource || "") || !!(mbInfo.raster && mbInfo.usable)
+  );
+  const labelCacheCount = (id) => {
+    const src = (cacheStatus?.sources || []).find((s) => s.source === id || s.id === id);
+    return Number(src?.tile_count || 0);
+  };
+  const missingLabelOverlays = rasterLabelOverlays
+    && labelCacheCount("esri_labels_places") <= 0
+    && labelCacheCount("esri_labels_roads") <= 0;
   let intelAlpr = { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };
   let alprFetchTimer = null, alprQueryKey = "";
 
@@ -276,6 +293,12 @@ export async function render(root, params = {}) {
     mapErrorBox.textContent = message;
   }
   root.appendChild(alertStrip(`${vectorNote}Local/offline basemap + cached intel. DEM ${demStatus?.available ? 'available (' + (demStatus.encoding||'terrarium') + ')' : 'not configured/cached'} · overlays cached via operator refresh (online required to fetch). Cables auto-populate from a cached public dataset on feed refresh (online first time; attribution required). CCTV can load nearby OSM surveillance locations via feed refresh when operator position is set. Maritime/AIS works with a configured GeoJSON/JSON source or local file (fielddata/maps/ais.geojson).`, demStatus?.available ? "cyan" : "amber"));
+  if (missingLabelOverlays) {
+    root.appendChild(alertStrip(
+      "Road/place label overlays are not cached. External raster/imagery packs without baked labels will look unlabeled offline until you download an offline map pack with labels enabled (or auto-cache labels while online).",
+      "amber",
+    ));
+  }
 
   if (mbInfo.configured && !mbInfo.usable) {
     const why = mbInfo.error
@@ -308,7 +331,7 @@ export async function render(root, params = {}) {
   const readout = h("div", {
     class: "col gap-2",
     style: {
-      position: "absolute", left: "10px", bottom: "10px", zIndex: "3",
+      position: "absolute", left: "10px", bottom: "44px", zIndex: "3",
       background: "rgba(3,8,6,0.78)", border: "1px solid rgba(93,255,154,0.14)",
       padding: "6px 8px", maxWidth: "min(560px, calc(100% - 20px))", pointerEvents: "none",
     },
@@ -320,20 +343,34 @@ export async function render(root, params = {}) {
   ], "0");
   ageSel.addEventListener('change', () => { state.maxAgeHours = Number(ageSel.value)||0; refreshIntelSources(); });
   const layerBox = h("div", { class: "col gap-4" });
+  function toggleScale(on) {
+    if (!map || !scaleControl) return;
+    try { map.removeControl(scaleControl); } catch {}
+    if (on) try { map.addControl(scaleControl, "bottom-left"); } catch {}
+  }
   for (const [key,label] of [
     ["hazards","Hazard/disaster events"],["conflict","Conflict events"],
     ["aircraft","Aircraft"],["sats","Satellites"],["maritime","Maritime/AIS"],
     ["cables","Cables/landing points"],["cctv","CCTV/cameras (OSM)"],
     ["wind","Wind overlay (cached)"],["rain","Rain/precip overlay (cached)"],["cloud","Cloud overlay (cached)"],
-    ["terrain","DEM terrain/hillshade (if available)"],
+    ["terrain", `DEM terrain/hillshade (${demStatus?.available ? "available" : "not available"})`],
     ["waypoints","Waypoints"],["tracks","Tracks"],["daynight","Day/night terminator"],["home","Home/position"],
+    ["scale","Scale bar"],
   ]) {
-    layerBox.appendChild(checkbox(label, !!state.show[key], (on)=>{
+    const cb = checkbox(label, !!state.show[key], (on)=>{
       state.show[key]=on;
+      if (key === "scale") { toggleScale(on); return; }
       if (["wind","rain","cloud"].includes(key)) refreshOverlaySources();
       if (["hazards","conflict","cctv"].includes(key)) refreshIntelSources();
       setVis(key,on);
-    }));
+    });
+    if (key === "terrain" && !demStatus?.available) {
+      const inp = cb.querySelector("input");
+      if (inp) inp.disabled = true;
+      cb.classList.add("dim");
+      cb.title = "Configure a DEM MBTiles source in Settings → Offline maps";
+    }
+    layerBox.appendChild(cb);
   }
   layerBox.appendChild(h("div", { class:"tiny muted mt-6", text:"CCTV / satellite filters" }));
   layerBox.appendChild(checkbox("Show global ALPR cameras (DeFlock/OSM)", !!state.show.cctvAlpr, (on)=>{ state.show.cctvAlpr=on; refreshIntelSources(); setAlprVis(); }));
@@ -472,7 +509,8 @@ export async function render(root, params = {}) {
     if (glRepaintTicks >= 6) clearInterval(glRepaintTimer);
   }, 2000);
   map.addControl(new maplibregl.NavigationControl({ visualizePitch:true, showCompass:true, showZoom:true }), "top-right");
-  map.addControl(new maplibregl.ScaleControl({ maxWidth:120, unit: U.isImperial() ? "imperial" : "metric" }), "bottom-left");
+  scaleControl = new maplibregl.ScaleControl({ maxWidth:120, unit: U.isImperial() ? "imperial" : "metric" });
+  if (state.show.scale) map.addControl(scaleControl, "bottom-left");
   try { if (typeof map.setProjection === 'function') map.setProjection({ type:'globe' }); } catch (e) { console.warn('Initial globe projection failed', e); }
   popup = new maplibregl.Popup({ closeButton:true, closeOnClick:true, maxWidth:'340px' });
 
@@ -725,24 +763,16 @@ export async function render(root, params = {}) {
   async function refreshData({ silent = false } = {}){
     if (!silent) toast('Refreshing map data', 'warn');
     try {
-      if (silent) {
-        const i = await api.get('/api/map/intel').catch(()=>null);
-        if (i) {
-          intel = i;
-          refreshIntelSources();
-          await refreshAlpr(true);
-          state.lastRefresh = Date.now();
-          updateFreshness();
-        }
-        return;
-      }
-      const [i,w,t,ds] = await Promise.all([
+      const [i, w, t, ds] = await Promise.all([
         api.get('/api/map/intel').catch(()=>null),
         api.get('/api/records/waypoints?limit=2000').then(r=>r.items||[]).catch(()=>[]),
         api.get('/api/records/tracks?limit=500').then(r=>r.items||[]).catch(()=>[]),
-        api.get('/api/map/dem/status').catch(()=>null),
+        silent ? Promise.resolve(null) : api.get('/api/map/dem/status').catch(()=>null),
       ]);
-      intel = i; waypoints = w; tracks = t; if (ds) demStatus = ds;
+      if (i) intel = i;
+      if (Array.isArray(w)) waypoints = w;
+      if (Array.isArray(t)) tracks = t;
+      if (ds) demStatus = ds;
       if (map?.getSource('waypoints')) map.getSource('waypoints').setData(fc(waypoints.map(wp=>pt(wp.lon,wp.lat,{kind:'waypoint',title:wp.name,type:wp.type||'WAYPOINT',note:(wp.note||'').slice(0,180)})).filter(Boolean)));
       if (map?.getSource('tracks')) map.getSource('tracks').setData(tracksGeo());
       refreshIntelSources();
@@ -1032,7 +1062,7 @@ export async function render(root, params = {}) {
     // vector geometry is not left unpainted (black map) until user movement.
     try { map.resize(); map.triggerRepaint(); } catch {}
     setTimeout(() => { try { map.resize(); map.triggerRepaint(); } catch {} }, 600);
-    statusBox.textContent = `GL map loaded · globe projection (toggle available) · local raster tiles /api/map/tiles · DEM ${demStatus?.available ? 'ready (' + (demStatus.encoding||'terrarium') + ')' : 'not configured/cached'}. Refresh feeds for cables/CCTV/maritime, then enable/inspect layers.`;
+    statusBox.textContent = `GL map ready · Globe projection · Local/offline basemap · DEM ${demStatus?.available ? `ready (${demStatus.encoding || "terrarium"})` : "not configured"}. Refresh data to load cached intel layers.`;
     // DEM terrain/hillshade hooks (offline local raster-dem tiles only)
     if (demStatus?.available && demStatus.tile_url) {
       try {

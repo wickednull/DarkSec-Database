@@ -210,9 +210,11 @@ export async function render(root, params = {}) {
   let cacheInfo = {
     tile_count: Number(layers.cache?.tile_count) || 0,
     total_mb: Number(layers.cache?.total_mb) || 0,
+    sources: Array.isArray(layers.cache?.sources) ? layers.cache.sources : [],
   };
   let activeSource = layers.activeSource || "esri_imagery";
   let cacheStatusEl = null;
+  let labelStatusEl = null;
   let autoPackEl = null;
   let mapOnline = false;
   const autoPackEnabled = settings.map_auto_pack !== false;
@@ -368,6 +370,7 @@ export async function render(root, params = {}) {
   displayOpts.appendChild(checkbox("Auto-refresh map intel (60s)", liveEnabled, (on) => { liveEnabled = on; scheduleLive(); }));
   layerRows.appendChild(displayOpts);
   cacheStatusEl = h("div", { class: "map-cache-status tiny muted", text: cacheStatusText() });
+  labelStatusEl = h("div", { class: "tiny muted", text: "" });
   autoPackEl = h("div", { class: "tiny muted", text: autoPackEnabled ? "Auto-cache: checking connection…" : "Auto-cache: off (Settings → Offline maps)" });
   const intelSummaryEl = h("div", { class: "map-cache-status tiny", text: "Intel not loaded" });
   const ageFilter = select([
@@ -387,6 +390,7 @@ export async function render(root, params = {}) {
       intelSummaryEl,
       h("div", { class: "tiny dim mt-10", text: `${raster.length} raster source(s) · MBTiles ${mbtilesInfo.configured ? (mbtilesInfo.usable ? `${mbtilesInfo.count || 1} archive(s)${mbtilesInfo.vector ? " · vector (3D GL)" : ""}` : "configured · unusable") : "not configured"}` }),
       cacheStatusEl,
+      labelStatusEl,
       autoPackEl,
       h("div", { class: "row gap-6 mt-8" },
         btn("MANAGE OFFLINE MAP", { size: "sm", icon: "download", tone: "primary", onClick: openDownloadDialog }),
@@ -553,13 +557,42 @@ export async function render(root, params = {}) {
     for (const s of r.sources || []) sourceMeta[s.id] = s;
     updateAttribution();
     updateAutoPackText();
+    updateLabelStatus();
     scheduleAutoPack(true);
-  }).catch(() => { updateAutoPackText(); });
+  }).catch(() => { updateAutoPackText(); updateLabelStatus(); });
   updateAttribution();
+  updateLabelStatus();
 
   function cacheStatusText() {
     if (!cacheInfo.tile_count) return "No offline tiles stored";
     return `${cacheInfo.tile_count.toLocaleString()} tiles · ${cacheInfo.total_mb} MB cached`;
+  }
+
+  function labelCacheCount(id) {
+    const src = (cacheInfo.sources || []).find((s) => s.source === id || s.id === id);
+    return Number(src?.tile_count || 0);
+  }
+
+  function updateLabelStatus() {
+    if (!labelStatusEl) return;
+    if (!labelOverlaysActive()) {
+      labelStatusEl.textContent = labelsOverlay ? "Labels: basemap/source labels" : "Labels overlay: off";
+      labelStatusEl.className = "tiny muted";
+      return;
+    }
+    const places = labelCacheCount("esri_labels_places");
+    const roads = labelCacheCount("esri_labels_roads");
+    if (places > 0 || roads > 0) {
+      labelStatusEl.textContent = mapOnline
+        ? `Label overlays cached: ${places.toLocaleString()} place · ${roads.toLocaleString()} road tiles`
+        : `Offline label overlays: ${places.toLocaleString()} place · ${roads.toLocaleString()} road tiles`;
+      labelStatusEl.className = "tiny muted";
+      return;
+    }
+    labelStatusEl.textContent = mapOnline
+      ? "Label overlays not cached yet — download an offline pack with labels or enable auto-cache."
+      : "Offline: road/place label overlays not cached for this area. Download an offline pack with labels while online.";
+    labelStatusEl.className = "tiny warn-text";
   }
 
   function updateAutoPackText() {
@@ -623,14 +656,30 @@ export async function render(root, params = {}) {
   async function refreshCache() {
     try {
       const st = await api.get("/api/map/cache/status");
-      cacheInfo = { tile_count: st.tile_count || 0, total_mb: st.total_mb || 0 };
+      cacheInfo = {
+        tile_count: st.tile_count || 0,
+        total_mb: st.total_mb || 0,
+        sources: Array.isArray(st.sources) ? st.sources : [],
+      };
       if (cacheStatusEl) cacheStatusEl.textContent = cacheStatusText();
+      updateLabelStatus();
       const l = await api.get("/api/map/layers").catch(() => null);
       if (l) {
         layers = l;
-        if (l.activeSource) activeSource = l.activeSource;
+        const nextSource = l.activeSource || activeSource;
+        if (nextSource !== activeSource) {
+          activeSource = nextSource;
+          tileCache.clear();
+          labelTileCache.clear();
+        }
         mbtilesInfo = l.mbtiles || {};
-        tileRevision = mbtilesInfo.revision || "";
+        const nextRevision = mbtilesInfo.revision || "";
+        if (nextRevision !== tileRevision) {
+          tileRevision = nextRevision;
+          tileCache.clear();
+        } else {
+          tileRevision = nextRevision;
+        }
         const nextGeneration = Number(l.cacheGeneration) || 0;
         if (nextGeneration !== cacheGeneration) {
           cacheGeneration = nextGeneration;
@@ -639,6 +688,7 @@ export async function render(root, params = {}) {
         }
         tileAvailable = !!((l.raster || []).length || mbtilesInfo.raster);
         updateAttribution();
+        updateLabelStatus();
       }
     } catch { /* offline: keep last known values */ }
   }
@@ -1011,8 +1061,16 @@ export async function render(root, params = {}) {
           zoom_min: zMin, zoom_max: zMax, source, label: "manual",
           include_labels: withLabels,
         });
-        activeSource = source;
+        if (source !== activeSource) {
+          activeSource = source;
+          tileCache.clear();
+          labelTileCache.clear();
+        } else {
+          activeSource = source;
+        }
         try { await store.saveSettings({ tile_source: source }); } catch {}
+        updateAttribution();
+        updateLabelStatus();
         dl.close();
         toast("Download started — progress, log and cancel are in the Downloads panel", "warn", 6000);
         await loadDownloadJobs();
@@ -2620,7 +2678,7 @@ export async function render(root, params = {}) {
   if (coordNow && !hidePosition) readout.appendChild(h("div", { class: "tiny", text: coordNow.mgrs || "" }));
   resizeObs = new ResizeObserver(() => draw());
   resizeObs.observe(shell);
-  setTimeout(() => { draw(); updateReadout({ lat: view.lat, lon: view.lon }); }, 40);
+  setTimeout(() => { if (!disposed) { draw(); updateReadout({ lat: view.lat, lon: view.lon }); } }, 40);
   scheduleLive();
   if (params.download && !hidePosition) {
     setTimeout(() => { if (!disposed) openDownloadDialog(); }, 400);
