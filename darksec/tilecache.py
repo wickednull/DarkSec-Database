@@ -446,16 +446,25 @@ def get_cached(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Optional
     return None
 
 
-def find_cached_ancestor(z: int, x: int, y: int, source: str = DEFAULT_SOURCE,
-                         max_up: int = 6) -> Optional[tuple[str, bytes]]:
-    """Nearest cached parent tile from the same source, for offline overzoom."""
+def find_cached_ancestor_scaled(z: int, x: int, y: int, source: str = DEFAULT_SOURCE,
+                                max_up: int = 6) -> Optional[tuple[bytes, int]]:
+    """Nearest cached parent tile plus how many zoom levels it is above."""
     for up in range(1, max_up + 1):
         zz = z - up
         if zz < 0:
             break
         data = get_cached(zz, x >> up, y >> up, source)
         if data is not None:
-            return source, data
+            return data, up
+    return None
+
+
+def find_cached_ancestor(z: int, x: int, y: int, source: str = DEFAULT_SOURCE,
+                         max_up: int = 6) -> Optional[tuple[str, bytes]]:
+    """Nearest cached parent tile from the same source, for offline overzoom."""
+    hit = find_cached_ancestor_scaled(z, x, y, source, max_up=max_up)
+    if hit is not None:
+        return source, hit[0]
     return None
 
 

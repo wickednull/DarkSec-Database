@@ -128,6 +128,43 @@ def test_basemap_overzooms_active_source_parent(tmp_path, monkeypatch, client):
         client.put("/api/settings", json={"tile_source": "esri_imagery"})
 
 
+def test_overzoom_tile_is_cropped_not_repeated(tmp_path, monkeypatch, client):
+    import io
+
+    from PIL import Image, ImageDraw
+
+    from darksec import tilecache
+
+    use_tmp_cache(monkeypatch, tmp_path)
+    parent_img = Image.new("RGB", (256, 256))
+    draw = ImageDraw.Draw(parent_img)
+    draw.rectangle((0, 0, 127, 127), fill=(255, 0, 0))
+    draw.rectangle((128, 0, 255, 127), fill=(0, 255, 0))
+    draw.rectangle((0, 128, 127, 255), fill=(0, 0, 255))
+    draw.rectangle((128, 128, 255, 255), fill=(255, 255, 0))
+    buf = io.BytesIO()
+    parent_img.save(buf, format="PNG")
+    parent = tilecache.tile_path(9, 1, 1, "usgs_topo")
+    parent.parent.mkdir(parents=True, exist_ok=True)
+    parent.write_bytes(buf.getvalue())
+    monkeypatch.setattr(tilecache, "is_online", lambda **_: False)
+    try:
+        assert client.put("/api/settings", json={"tile_source": "usgs_topo"}).status_code == 200
+        # Each child tile must show only its quadrant of the parent, not the
+        # whole parent image repeated in every tile slot.
+        top_left = client.get("/api/map/tiles/10/2/2.png")
+        assert top_left.headers.get("x-tile-source") == "usgs_topo-overzoom"
+        img = Image.open(io.BytesIO(top_left.content))
+        assert img.size == (128, 128)
+        assert img.getpixel((10, 10)) == (255, 0, 0)
+
+        bottom_right = client.get("/api/map/tiles/10/3/3.png")
+        img = Image.open(io.BytesIO(bottom_right.content))
+        assert img.getpixel((10, 10)) == (255, 255, 0)
+    finally:
+        client.put("/api/settings", json={"tile_source": "esri_imagery"})
+
+
 def test_cache_clear_bumps_browser_generation(client, tmp_path, monkeypatch):
     use_tmp_cache(monkeypatch, tmp_path)
     first = client.get("/api/map/layers").json()["cacheGeneration"]

@@ -1157,9 +1157,9 @@ def lookup_tile(z: int, x: int, y: int, raw: str | None = None) -> tuple[bytes, 
     return None
 
 
-def lookup_tile_ancestor(z: int, x: int, y: int, raw: str | None = None,
-                         max_up: int = 5) -> tuple[bytes, str] | None:
-    """Nearest lower-zoom raster tile in the archive, for offline overzoom."""
+def lookup_tile_ancestor_scaled(z: int, x: int, y: int, raw: str | None = None,
+                                max_up: int = 5) -> tuple[bytes, str, int] | None:
+    """Nearest lower-zoom raster tile plus how many zoom levels it is above."""
     raw = configured_path() if raw is None else raw
     for path in resolve_sources(raw):
         archive = _archive_for(path)
@@ -1171,7 +1171,7 @@ def lookup_tile_ancestor(z: int, x: int, y: int, raw: str | None = None,
                 break
             data = archive.tile(zz, x >> up, y >> up)
             if data:
-                return data, archive.path.name
+                return data, archive.path.name, up
     loose = _configured_loose(raw)
     if loose and loose.get("raster"):
         for up in range(1, max_up + 1):
@@ -1180,8 +1180,15 @@ def lookup_tile_ancestor(z: int, x: int, y: int, raw: str | None = None,
                 break
             data = loose_lookup(loose, zz, x >> up, y >> up)
             if data:
-                return data, f"{loose.get('name') or 'loose-tiles'}-overzoom"
+                return data, f"{loose.get('name') or 'loose-tiles'}-overzoom", up
     return None
+
+
+def lookup_tile_ancestor(z: int, x: int, y: int, raw: str | None = None,
+                         max_up: int = 5) -> tuple[bytes, str] | None:
+    """Nearest lower-zoom raster tile in the archive, for offline overzoom."""
+    hit = lookup_tile_ancestor_scaled(z, x, y, raw, max_up=max_up)
+    return (hit[0], hit[1]) if hit else None
 
 
 def lookup_vector_tile(z: int, x: int, y: int, raw: str | None = None) -> tuple[bytes, str] | None:

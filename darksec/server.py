@@ -5484,8 +5484,45 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             headers["X-Tile-Source"] = source
         return Response(content=data, media_type=ctype, headers=headers)
 
-    def _bundled_ancestor_tile(z: int, x: int, y: int) -> bytes | None:
-        """Nearest lower-zoom bundled tile, for offline overzoom fallback."""
+    def _crop_overzoom(data: bytes, up: int, x: int, y: int) -> bytes:
+        """Crop a parent tile to the requested child's quadrant.
+
+        Returning the whole parent for every child made overzoom repeat the
+        same image in a grid. Cropping keeps one parent image scaled across its
+        real extent, so zooming in looks continuous instead of tiled.
+        """
+        if up <= 0:
+            return data
+        try:
+            import io
+            from PIL import Image
+            img = Image.open(io.BytesIO(data))
+            img.load()
+            width, height = img.size
+            n = 1 << up
+            tile_w = width / n
+            tile_h = height / n
+            left = (x % n) * tile_w
+            top = (y % n) * tile_h
+            box = (
+                max(0, min(width - 1, int(left))),
+                max(0, min(height - 1, int(top))),
+                max(1, min(width, int(left + tile_w + 0.5))),
+                max(1, min(height, int(top + tile_h + 0.5))),
+            )
+            if box[2] <= box[0] or box[3] <= box[1]:
+                return data
+            crop = img.crop(box)
+            if crop.mode not in ("1", "L", "LA", "P", "RGB", "RGBA"):
+                crop = crop.convert("RGB")
+            out = io.BytesIO()
+            crop.save(out, format="PNG")
+            return out.getvalue()
+        except Exception:
+            return data
+
+    def _bundled_ancestor_tile(z: int, x: int, y: int) -> tuple[bytes, int] | None:
+        """Nearest lower-zoom bundled tile plus its zoom offset."""
         for dirname, maxz in (("overview", 5), ("us_tiles", 6)):
             for zz in range(min(z - 1, maxz), -1, -1):
                 shift = z - zz
@@ -5494,7 +5531,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     path = config.MAP_TILE_DIR / dirname / str(zz) / str(xx) / f"{yy}.{ext}"
                     if path.exists() and path.stat().st_size > 0:
                         try:
-                            return path.read_bytes()
+                            return path.read_bytes(), shift
                         except OSError:
                             continue
         return None
@@ -5562,9 +5599,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         data = _mbtiles_tile(z, x, y)
         if data:
             return _tile_response(data, "mbtiles")
-        ancestor = mbtiles.lookup_tile_ancestor(z, x, y)
+        ancestor = mbtiles.lookup_tile_ancestor_scaled(z, x, y)
         if ancestor:
-            return _tile_response(ancestor[0], "mbtiles-overzoom")
+            data, _name, up = ancestor
+            return _tile_response(_crop_overzoom(data, up, x, y), "mbtiles-overzoom")
 
         src = _active_tile_source()
         blob = tilecache.get_cached(z, x, y, src)
@@ -5579,9 +5617,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             return _tile_response(blob, src)
         # Offline or upstream unavailable: overzoom the nearest cached parent
         # from the same source before falling back to the bundled overview.
-        parent = tilecache.find_cached_ancestor(z, x, y, src)
+        parent = tilecache.find_cached_ancestor_scaled(z, x, y, src)
         if parent:
-            return _tile_response(parent[1], f"{src}-overzoom")
+            data, up = parent
+            return _tile_response(_crop_overzoom(data, up, x, y), f"{src}-overzoom")
         # An offline pack may have been downloaded with a different source than
         # the currently selected one. Prefer that cached tile over returning a
         # blank map (or the bundled world overview).
@@ -5599,7 +5638,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     return _tile_response(data, dirname)
         fallback = _bundled_ancestor_tile(z, x, y)
         if fallback:
-            return _tile_response(fallback, "bundled-overview")
+            data, up = fallback
+            return _tile_response(_crop_overzoom(data, up, x, y), "bundled-overview")
         raise HTTPException(status_code=404, detail="Tile not cached",
                             headers={"Cache-Control": "max-age=5"})
 
