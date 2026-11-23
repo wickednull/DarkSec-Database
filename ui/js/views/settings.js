@@ -506,6 +506,12 @@ export async function render(root) {
     for (const o of opts) tileSource.appendChild(h("option", { value: o.value, text: o.label }));
     tileSource.value = opts.some((o) => o.value === current) ? current : opts[0].value;
   }).catch(() => {});
+  const cartoApiKey = input({
+    value: settings.carto_api_key || "",
+    placeholder: "CARTO basemaps API key (optional)",
+    type: "password",
+    autocomplete: "off",
+  });
   const mbtiles = input({ value: settings.mbtiles_path || "", placeholder: "/path/to/region.mbtiles or /media/USB/maps" });
   const mbStatusText = h("div", { class: "tiny muted", text: settings.mbtiles_path ? "Checking archive…" : "No local archive configured." });
   const mbSuggest = h("div", { class: "col gap-4 mt-6" });
@@ -538,6 +544,7 @@ export async function render(root) {
       h("div", { class: "settings-subhead", text: "Tile source" }),
       h("div", { class: "form-grid" },
         field("Tile source", tileSource, "Used for live view and for new offline downloads. Bundled and cached tiles are always preferred."),
+        field("CARTO basemaps API key", cartoApiKey, "Used for the Dark tactical (CARTO) basemap. Leave blank if your CARTO access does not require a key."),
         field("MBTiles / tile path", mbRow, "A single .mbtiles archive (or a .pbf/.mvt file that is really an SQLite archive), a folder of archives, or a folder of loose {z}/{x}/{y}.pbf vector tiles — including a mounted USB drive. Raster tiles draw on both maps; vector PBF tiles draw in the 3D GL map. Read in place, read-only — keep the drive mounted while using it.")),
       mbStatus,
       field("Tile cache location", cacheRow, "Where downloaded raster tiles are stored. Point this at a USB folder for large offline packs. Empty uses the app's maps/tiles/cache. Existing tiles can be copied when you switch."),
@@ -1036,6 +1043,7 @@ export async function render(root) {
     }
     const patch = {
       tile_source: tileSource.value, mbtiles_path: nextMbtiles,
+      carto_api_key: cartoApiKey.value.trim(),
       map_vector: mapVector.querySelector("input").checked,
       map_auto_pack: mapAutoPack.querySelector("input").checked,
       map_space_background: mapSpace.querySelector("input").checked,
@@ -1053,7 +1061,10 @@ export async function render(root) {
         }
         const choice = await cacheSwitchChoice(stats.path || oldCache || "the current folder",
           destination, stats.tile_count, stats.total_mb, stats.disk_mb);
-        if (choice === "cancel") return;
+        if (choice === "cancel") {
+          toast("Tile cache location unchanged", "warn");
+          return;
+        }
         if (choice === "copy") {
           if (!destination) {
             toast("Could not determine the default cache folder", "error");
@@ -1069,9 +1080,13 @@ export async function render(root) {
         }
       }
     }
-    await saveSimple(patch, "Map settings saved");
-    settings.map_cache_path = nextCache;
-    refreshCacheStatus(true);
+    const ok = await saveSimple(patch, "Map settings saved");
+    if (!ok) return;
+    settings.map_cache_path = String(store.settings.map_cache_path ?? nextCache);
+    mapCache.value = settings.map_cache_path;
+    await refreshCacheStatus(true);
+    await loadCacheSummary();
+    loadLayers(layersBox);
   }
 
   async function saveFeed() {
@@ -1087,8 +1102,10 @@ export async function render(root) {
       await store.saveSettings(patch);
       toast(label || "Settings saved");
       status = await store.loadStatus({ force: true });
+      return true;
     } catch (err) {
       toast(err.message || "Could not save settings", "error");
+      return false;
     }
   }
 
@@ -2038,8 +2055,8 @@ export async function render(root) {
         size: "sm", tone: it.default ? "" : "primary", icon: "check",
         onClick: () => {
           mapCache.value = it.path;
-          refreshCacheStatus(true);
           m.close();
+          saveMap();
         },
       });
       list.appendChild(h("div", { class: "list-item" },

@@ -184,6 +184,7 @@ def default_settings() -> dict:
         "sdr_tx_enabled": False,
         "sdr_tx_attested": False,
         "tile_source": "local",
+        "carto_api_key": "",
         "mbtiles_path": "",
         "dem_mbtiles_path": "",
         "dem_encoding": "terrarium",

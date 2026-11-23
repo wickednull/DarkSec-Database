@@ -36,8 +36,20 @@ from pathlib import Path
 from typing import Optional
 
 import requests
+from urllib.parse import quote_plus
 
 from . import config
+
+_CARTO_API_KEY = ""
+
+
+def set_carto_api_key(key: str) -> None:
+    global _CARTO_API_KEY
+    _CARTO_API_KEY = str(key or "").strip()
+
+
+def carto_api_key() -> str:
+    return _CARTO_API_KEY
 
 # ---------------------------------------------------------------------------
 # Providers
@@ -138,8 +150,12 @@ TILE_FETCH_WAIT = 0.75
 # Error images returned with HTTP 200. Reject by hash and by marker text.
 _ERROR_HASHES = {
     "8e8d1ff492c2bdae445a83ccdb8e449f",  # OSM "Access blocked"
+    "df9307c738f2c6dbc0f8d31837019f98",  # CARTO "API key required" watermark
 }
-_BLOCK_MARKERS = (b"Access blocked", b"Access denied", b"blocked by policy")
+_BLOCK_MARKERS = (
+    b"Access blocked", b"Access denied", b"blocked by policy",
+    b"API KEY REQUIRED", b"API key required", b"carto.com/basemaps/apikey",
+)
 
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
@@ -295,6 +311,16 @@ def _looks_like_image(data: bytes) -> bool:
     return False
 
 
+def _has_block_markers(data: bytes) -> bool:
+    return any(m in data[:4096] for m in _BLOCK_MARKERS)
+
+
+def _is_error_tile(data: bytes) -> bool:
+    if _has_block_markers(data):
+        return True
+    return hashlib.md5(data).hexdigest() in _ERROR_HASHES
+
+
 def is_cached(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> bool:
     key = (source, int(z), int(x), int(y))
     if _mem_get(key) is not None:
@@ -409,7 +435,7 @@ def get_cached(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Optional
     except OSError:
         _neg_put(key)
         return None
-    if _looks_like_image(data):
+    if _looks_like_image(data) and not _is_error_tile(data):
         _mem_put(key, data)
         return data
     try:
@@ -518,6 +544,9 @@ def fetch_tile(z: int, x: int, y: int, source: str = DEFAULT_SOURCE) -> Optional
     if _source_in_cooldown(source):
         return None
     url = src["url_template"].format(z=z, x=x, y=y)
+    if _CARTO_API_KEY and "cartocdn.com" in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}key={quote_plus(_CARTO_API_KEY)}"
     _throttle()
     try:
         resp = requests.get(
@@ -1347,7 +1376,7 @@ def verify_cache(source: Optional[str] = None, fix: bool = True) -> dict:
                 data = f.read_bytes()
             except OSError:
                 continue
-            if _looks_like_image(data):
+            if _looks_like_image(data) and not _is_error_tile(data):
                 continue
             invalid += 1
             if len(details) < 8:

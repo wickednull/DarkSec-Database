@@ -2798,6 +2798,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             app.state.lan_manager = LanManager()
         lm = app.state.lan_manager
         app.state.lan_easy_access = bool(db.get_setting("lan_easy_access", True))
+        tilecache.set_carto_api_key(str(db.get_setting("carto_api_key", "") or ""))
         if lan:
             # --lan already binds the main server to all interfaces; do not open
             # a second listener on another port.
@@ -3976,6 +3977,10 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 value = str(p)
             if key == "dem_encoding" and value and str(value) not in ("terrarium", "mapbox", "custom"):
                 raise HTTPException(status_code=400, detail="dem_encoding must be terrarium, mapbox, or custom")
+            if key == "carto_api_key":
+                value = str(value or "").strip()
+                if len(value) > 256:
+                    raise HTTPException(status_code=400, detail="carto_api_key is too long")
             if key == "assistant_history_encrypted":
                 if value != bool(current.get("assistant_history_encrypted")):
                     try:
@@ -3992,6 +3997,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
             if key == "map_cache_path":
                 from . import tilecache as _tilecache
                 _tilecache.invalidate_cache_path(str(value or ""))
+            if key == "carto_api_key":
+                tilecache.set_carto_api_key(str(value or ""))
             if key == "lan_easy_access":
                 request.app.state.lan_easy_access = bool(value)
         if {"assistant_personality", "assistant_personalities"} & set(payload):
@@ -6516,6 +6523,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
         def worker():
             consecutive_errors = 0
             last_error_at = 0.0
+            last_error_msg = ""
             last_reconnect_at = 0.0
             while not stop.is_set():
                 with threading.Lock():
@@ -6535,18 +6543,43 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 source = sdr._live_source(chosen, center, rate, params["gain"], ppm,
                                           host, port, lna, vga, amp, 0, stop_event=stop,
                                           direct=resolved["mode"])
+                source_center = center
+                source_rate = rate
+                source_gain = float(params["gain"])
                 frame = 0
                 try:
                     for data, sample_format in source:
-                        if stop.is_set() or restart.is_set():
+                        if stop.is_set():
                             break
+                        if restart.is_set():
+                            with threading.Lock():
+                                new_params = dict(control)
+                            new_center = float(new_params["freq_hz"])
+                            new_rate = float(new_params["rate_hz"])
+                            new_gain = float(new_params["gain"])
+                            source_changed = (new_center != source_center or new_rate != source_rate)
+                            if chosen != "hackrf":
+                                source_changed = source_changed or (new_gain != source_gain)
+                            if source_changed:
+                                print(f"[SDR] source restart: center {new_center}!={source_center} rate {new_rate}!={source_rate} gain {new_gain}!={source_gain} backend={chosen}", file=__import__("sys").stderr, flush=True)
+                                break
+                            # Mode/squelch-only change: update demod without restarting source.
+                            params = new_params
+                            demod = sdr._LiveDemod(params["mode"], source_rate, squelch=params["squelch"])
+                            restart.clear()
+                            print(f"[SDR] in-place demod change: mode={params['mode']} squelch={params['squelch']}", file=__import__("sys").stderr, flush=True)
+                            push({"type": "status", "backend": chosen, "center_hz": source_center,
+                                  "rate": source_rate, "audio_rate": sdr.live_audio_rate(source_rate),
+                                  "mode": params["mode"], "direct_mode": resolved["mode"],
+                                  "direct_requested": resolved["requested"],
+                                  "warning": resolved["warning"]})
                         iq = demod._bytes_to_iq(data, sample_format)
                         pcm = demod.process(iq)
                         if pcm:
                             push(("audio", pcm))
                         frame += 1
                         if frame % 2 == 0:
-                            spec = spectrum.process(iq, center, rate)
+                            spec = spectrum.process(iq, source_center, source_rate)
                             if spec:
                                 push(spec)
                 except Exception as exc:
@@ -6554,6 +6587,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     consecutive_errors += 1
                     fatal = bool(getattr(exc, "fatal", False))
                     message = str(exc)[:700]
+                    last_error_msg = message
                     if fatal or now - last_error_at > 5.0:
                         last_error_at = now
                         push({"type": "error", "error": message, "fatal": fatal})
@@ -6564,7 +6598,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                               "direct_mode": resolved["mode"], "fatal": True})
                         stop.set()
                     elif consecutive_errors >= 4:
-                        push({"type": "error", "error": "Receiver disconnected repeatedly; press PLAY to retry."})
+                        detail = f" Last error: {last_error_msg}" if last_error_msg else ""
+                        push({"type": "error", "error": f"Receiver disconnected repeatedly; press PLAY to retry.{detail}"})
                         stop.set()
                 else:
                     consecutive_errors = 0
@@ -6574,11 +6609,14 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     except Exception:
                         pass
                 if not stop.is_set():
+                    was_restart = restart.is_set()
+                    if was_restart:
+                        consecutive_errors = 0
                     now = time.monotonic()
                     if now - last_reconnect_at > 5.0:
                         last_reconnect_at = now
                         push({"type": "status",
-                              "status": "retuning" if restart.is_set() else "reconnecting",
+                              "status": "retuning" if was_restart else "reconnecting",
                               "backend": chosen, "rate": rate,
                               "audio_rate": sdr.live_audio_rate(rate),
                               "center_hz": control.get("freq_hz"),

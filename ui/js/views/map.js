@@ -230,7 +230,7 @@ export async function render(root, params = {}) {
     if (fit != null) view.zoom = fit;
     if (Number.isFinite(minz)) view.zoom = Math.max(view.zoom, minz);
     if (Number.isFinite(maxz)) view.zoom = Math.min(view.zoom, maxz);
-    view.zoom = Math.max(1, Math.min(18, view.zoom));
+    view.zoom = Math.max(2, Math.min(18, view.zoom));
   }
   const visible = {
     countries: true, states: true, land: true, lakes: true, rivers: true,
@@ -554,6 +554,21 @@ export async function render(root, params = {}) {
     return { x: p.x * c.scale - c.x + canvas.clientWidth / 2,
       y: p.y * c.scale - c.y + canvas.clientHeight / 2 };
   }
+  function latLonToScreenCopies(lat, lon, w, hh, margin = 40) {
+    const c = centerWorld();
+    const p = project(lat, lon);
+    const baseX = p.x * c.scale - c.x + w / 2;
+    const y = p.y * c.scale - c.y + hh / 2;
+    const out = [];
+    const worldW = c.scale;
+    const kMin = Math.floor((-margin - baseX) / worldW);
+    const kMax = Math.ceil((w + margin - baseX) / worldW);
+    for (let k = kMin; k <= kMax; k++) {
+      const x = baseX + k * worldW;
+      if (x >= -margin && x <= w + margin && y >= -margin && y <= hh + margin) out.push({ x, y });
+    }
+    return out;
+  }
 
   function draw() {
     if (raf) return;
@@ -566,6 +581,9 @@ export async function render(root, params = {}) {
     const dpr = window.devicePixelRatio || 1;
     const w = Math.max(1, canvas.clientWidth || 900);
     const hh = Math.max(1, canvas.clientHeight || 560);
+    const minZ = Math.max(2, Math.ceil(Math.log2(w / TILE)));
+    if (view.zoom < minZ) view.zoom = minZ;
+    if (view.zoom > 18) view.zoom = 18;
     const pw = Math.round(w * dpr), ph = Math.round(hh * dpr);
     if (canvas.width !== pw || canvas.height !== ph) {
       canvas.width = pw; canvas.height = ph;
@@ -575,8 +593,9 @@ export async function render(root, params = {}) {
     ctx.clearRect(0, 0, w, hh);
     ctx.fillStyle = "#030806";
     ctx.fillRect(0, 0, w, hh);
+    const _dbgMinZ = minZ;
     hudZoom.lastChild.textContent = String(view.zoom);
-    hudCenter.textContent = hidePosition ? "OP//MASKED" : `${view.lat.toFixed(4)} ${view.lon.toFixed(4)}`;
+    hudCenter.textContent = hidePosition ? "OP//MASKED" : `${view.lat.toFixed(4)} ${view.lon.toFixed(4)} z=${view.zoom} minZ=${_dbgMinZ} w=${w}`;
 
     if (visible.basemap) drawTiles(ctx, w, hh);
 
@@ -945,6 +964,13 @@ export async function render(root, params = {}) {
 
   function openDownloadDialog() {
     const sourceSel = select([], activeSource, { id: "dl-source" });
+    const cartoKey = input({
+      value: (store.settings || settings).carto_api_key || "",
+      placeholder: "CARTO basemaps API key (optional)",
+      type: "password",
+      autocomplete: "off",
+    });
+    const cartoKeyField = field("CARTO basemaps API key", cartoKey, "Used for the Dark tactical (CARTO) basemap. Leave blank if your CARTO access does not require a key.");
     const radiusSel = select([
       { value: "5", label: `${U.distKm(5)} radius` }, { value: "10", label: `${U.distKm(10)} radius` },
       { value: "25", label: `${U.distKm(25)} radius` }, { value: "50", label: `${U.distKm(50)} radius` },
@@ -972,12 +998,15 @@ export async function render(root, params = {}) {
     const progressText = h("div", { class: "tiny muted", text: "" });
     progressWrap.append(progressTrack, progressText);
 
+    const syncCartoKey = () => { cartoKeyField.style.display = sourceSel.value === "carto_dark" ? "" : "none"; };
+    sourceSel.addEventListener("change", syncCartoKey);
     const body = h("div", { class: "col gap-12" },
       h("div", { class: "tiny muted", text:
         "Downloads real map tiles while you have a connection, then serves them from disk with no network. " +
         "Only the area you choose is stored. Nothing is uploaded. Progress, log and cancel are in the Downloads panel on the map." }),
       downloading ? h("div", { class: "callout warn", text: "A download is already running. Manage or cancel it in the Downloads panel before starting another." }) : null,
       field("Tile source", sourceSel),
+      cartoKeyField,
       field("Area", radiusSel),
       field("Detail (max zoom)", zoomSel),
       fullStack,
@@ -990,12 +1019,36 @@ export async function render(root, params = {}) {
       targetEl,
       progressWrap);
 
+    async function applySource() {
+      const source = sourceSel.value || activeSource;
+      if (source !== activeSource) {
+        activeSource = source;
+        tileCache.clear();
+        labelTileCache.clear();
+      } else {
+        activeSource = source;
+      }
+      try {
+        const patch = { tile_source: source };
+        const key = cartoKey.value.trim();
+        if (key !== String((store.settings || settings).carto_api_key || "")) patch.carto_api_key = key;
+        await store.saveSettings(patch);
+      } catch (err) {
+        toast(`Source saved locally but settings update failed: ${err.message}`, "warn");
+      }
+      updateAttribution();
+      updateLabelStatus();
+      draw();
+      toast(`Basemap source set to ${sourceMeta[source]?.name || source}`, "success");
+    }
+
     const dl = modal({
       title: "Download offline map pack",
       sub: "Operator-triggered · stored locally",
       body,
       wide: true,
       actions: [
+        btn("SET BASEMAP", { size: "sm", tone: "ghost", onClick: applySource }),
         btn("VERIFY CACHE", { size: "sm", icon: "check", onClick: async () => {
           if (downloading) { toast("Cancel the active download before verifying the cache", "warn"); return; }
           try {
@@ -1102,6 +1155,7 @@ export async function render(root, params = {}) {
       }
       sourceSel.value = activeSource;
       if (!sourceSel.value && r.sources?.length) sourceSel.value = r.sources[0].id;
+      syncCartoKey();
       if (!r.online) {
         estimateEl.textContent = "No internet connection detected. You can review options, but downloads will fail.";
         estimateEl.className = "callout danger";
@@ -1160,7 +1214,12 @@ export async function render(root, params = {}) {
         } else {
           activeSource = source;
         }
-        try { await store.saveSettings({ tile_source: source }); } catch {}
+        try {
+          const patch = { tile_source: source };
+          const key = cartoKey.value.trim();
+          if (key !== String((store.settings || settings).carto_api_key || "")) patch.carto_api_key = key;
+          await store.saveSettings(patch);
+        } catch {}
         updateAttribution();
         updateLabelStatus();
         dl.close();
@@ -1344,13 +1403,25 @@ export async function render(root, params = {}) {
     return [];
   }
 
-  function tracePath(ctx, coords, c, w, hh) {
+  function tracePath(ctx, coords, c, w, hh, xOffset = 0) {
     let started = false;
+    let prevLon = null;
+    let lonAdj = 0;
+    const worldW = c.scale;
     for (const p of coords) {
       if (!p || p.length < 2) continue;
-      const pr = project(p[1], p[0]);
-      const x = pr.x * c.scale - c.x + w / 2;
-      const y = pr.y * c.scale - c.y + hh / 2;
+      let lon = p[0];
+      const lat = p[1];
+      if (prevLon !== null) {
+        const d = lon - prevLon;
+        if (d > 180) lonAdj -= 360;
+        else if (d < -180) lonAdj += 360;
+      }
+      prevLon = lon;
+      lon += lonAdj;
+      const pr = project(lat, lon);
+      const x = pr.x * worldW - c.x + w / 2 + xOffset;
+      const y = pr.y * worldW - c.y + hh / 2;
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
     }
@@ -1360,13 +1431,23 @@ export async function render(root, params = {}) {
   function drawFeatures(ctx, data, layer, c, w, hh, style) {
     ctx.beginPath();
     let found = false;
-    for (const f of data.features) {
-      if (f.properties?.layer !== layer) continue;
-      for (const poly of featurePaths(f)) {
-        if (f.geometry.type === "Polygon" || f.geometry.type === "MultiPolygon") {
-          for (const ring of poly) if (tracePath(ctx, ring, c, w, hh)) { ctx.closePath(); found = true; }
-        } else {
-          for (const line of poly) if (tracePath(ctx, line, c, w, hh)) found = true;
+    const worldW = c.scale;
+    // Draw enough world copies to cover the viewport; avoids duplicate features.
+    const kMin = Math.floor((c.x - w / 2) / worldW) - 1;
+    const kMax = Math.floor((c.x + w / 2) / worldW) + 1;
+    for (let k = kMin; k <= kMax; k++) {
+      const xOffset = k * worldW;
+      const copyLeft = xOffset - c.x + w / 2;
+      const copyRight = copyLeft + worldW;
+      if (copyRight < -200 || copyLeft > w + 200) continue;
+      for (const f of data.features) {
+        if (f.properties?.layer !== layer) continue;
+        for (const poly of featurePaths(f)) {
+          if (f.geometry.type === "Polygon" || f.geometry.type === "MultiPolygon") {
+            for (const ring of poly) if (tracePath(ctx, ring, c, w, hh, xOffset)) { ctx.closePath(); found = true; }
+          } else {
+            for (const line of poly) if (tracePath(ctx, line, c, w, hh, xOffset)) found = true;
+          }
         }
       }
     }
@@ -1382,19 +1463,19 @@ export async function render(root, params = {}) {
       if (f.properties?.layer !== "places") continue;
       const p = f.properties;
       if (p.latitude == null || p.longitude == null) continue;
-      const s = latLonToScreen(p.latitude, p.longitude);
-      if (s.x < -20 || s.y < -20 || s.x > w + 20 || s.y > hh + 20) continue;
       const pop = Number(p.pop_max) || 0;
       if (view.zoom < 5 && pop < 1_000_000) continue;
-      ctx.fillStyle = "rgba(255,176,46,.9)";
-      ctx.beginPath(); ctx.arc(s.x, s.y, pop > 2_000_000 ? 2.5 : 1.5, 0, Math.PI * 2); ctx.fill();
-      if (visible.labels && (view.zoom >= 6 || pop > 2_000_000)) {
-        ctx.fillStyle = "rgba(210,235,220,.78)";
-        ctx.strokeStyle = "rgba(0,0,0,.7)";
-        ctx.lineWidth = 2;
-        const label = p.name.length > 22 ? p.name.slice(0, 21) + "…" : p.name;
-        ctx.strokeText(label, s.x + 5, s.y - 1);
-        ctx.fillText(label, s.x + 5, s.y - 1);
+      for (const s of latLonToScreenCopies(p.latitude, p.longitude, w, hh, 20)) {
+        ctx.fillStyle = "rgba(255,176,46,.9)";
+        ctx.beginPath(); ctx.arc(s.x, s.y, pop > 2_000_000 ? 2.5 : 1.5, 0, Math.PI * 2); ctx.fill();
+        if (visible.labels && (view.zoom >= 6 || pop > 2_000_000)) {
+          ctx.fillStyle = "rgba(210,235,220,.78)";
+          ctx.strokeStyle = "rgba(0,0,0,.7)";
+          ctx.lineWidth = 2;
+          const label = p.name.length > 22 ? p.name.slice(0, 21) + "…" : p.name;
+          ctx.strokeText(label, s.x + 5, s.y - 1);
+          ctx.fillText(label, s.x + 5, s.y - 1);
+        }
       }
     }
   }
@@ -1413,14 +1494,19 @@ export async function render(root, params = {}) {
     }
     const step = spacing * 2;
     for (let lon = -180; lon < 180; lon += step) {
-      const x = latLonToScreen(view.lat, lon).x;
-      if (x < 0 || x > w) continue;
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, hh); ctx.stroke();
-      if (visible.labels) ctx.fillText(`${Math.abs(lon)}°${lon >= 0 ? "E" : "W"}`, x + 3, hh - 22);
+      for (const s of latLonToScreenCopies(view.lat, lon, w, hh, 0)) {
+        const x = s.x;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, hh); ctx.stroke();
+        if (visible.labels) ctx.fillText(`${Math.abs(lon)}°${lon >= 0 ? "E" : "W"}`, x + 3, hh - 22);
+      }
     }
   }
 
   function drawTracks(ctx, w, hh) {
+    const c = centerWorld();
+    const worldW = c.scale;
+    const kMin = Math.floor((c.x - w / 2) / worldW) - 1;
+    const kMax = Math.floor((c.x + w / 2) / worldW) + 1;
     for (const t of tracks) {
       let gj;
       try { gj = JSON.parse(t.geojson); } catch { continue; }
@@ -1428,17 +1514,37 @@ export async function render(root, params = {}) {
         : gj.type === "MultiLineString" ? gj.coordinates
         : gj.type === "Feature" && gj.geometry?.type === "LineString" ? [gj.geometry.coordinates] : [];
       for (const line of lines) {
-        ctx.beginPath();
-        for (const p of line || []) {
-          if (!p || p.length < 2) continue;
-          const s = latLonToScreen(p[1], p[0]);
-          if (!Number.isFinite(s.x)) continue;
-          if (s === line[0]) ctx.moveTo(s.x, s.y); else ctx.lineTo(s.x, s.y);
-        }
         ctx.strokeStyle = t.color || "#48d7ff";
         ctx.globalAlpha = 0.8;
         ctx.lineWidth = 1.6;
-        ctx.stroke();
+        for (let k = kMin; k <= kMax; k++) {
+          const xOffset = k * worldW;
+          const copyLeft = xOffset - c.x + w / 2;
+          const copyRight = copyLeft + worldW;
+          if (copyRight < -200 || copyLeft > w + 200) continue;
+          ctx.beginPath();
+          let started = false;
+          let prevLon = null;
+          let lonAdj = 0;
+          for (const p of line || []) {
+            if (!p || p.length < 2) continue;
+            let lon = p[0];
+            const lat = p[1];
+            if (prevLon !== null) {
+              const d = lon - prevLon;
+              if (d > 180) lonAdj -= 360;
+              else if (d < -180) lonAdj += 360;
+            }
+            prevLon = lon;
+            lon += lonAdj;
+            const pr = project(lat, lon);
+            const x = pr.x * worldW - c.x + w / 2 + xOffset;
+            const y = pr.y * worldW - c.y + hh / 2;
+            if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+            if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+        }
         ctx.globalAlpha = 1;
       }
     }
@@ -1446,53 +1552,52 @@ export async function render(root, params = {}) {
 
   function drawWaypoints(ctx, w, hh) {
     for (const wp of waypoints) {
-      const s = latLonToScreen(Number(wp.lat), Number(wp.lon));
-      if (s.x < -30 || s.y < -30 || s.x > w + 30 || s.y > hh + 30) continue;
-      const color = TYPE_COLOR[wp.type] || TYPE_COLOR.WAYPOINT;
-      const isSel = selected?.id === wp.id;
-      const size = isSel ? 7 : 5;
-      ctx.save();
-      ctx.translate(s.x, s.y);
-      if (wp.type === "HAZARD") {
-        ctx.fillStyle = color;
-        ctx.beginPath(); ctx.moveTo(0, -size); ctx.lineTo(size, size); ctx.lineTo(-size, size); ctx.closePath(); ctx.fill();
-      } else if (wp.type === "LZ") {
-        ctx.strokeStyle = color; ctx.lineWidth = 1.6;
-        ctx.beginPath(); ctx.arc(0, 0, size, 0, Math.PI * 2); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(-size, 0); ctx.lineTo(size, 0); ctx.stroke();
-      } else {
-        ctx.fillStyle = color;
-        ctx.beginPath(); ctx.moveTo(0, -size); ctx.lineTo(size, 0); ctx.lineTo(0, size); ctx.lineTo(-size, 0); ctx.closePath(); ctx.fill();
-      }
-      if (isSel) {
-        ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.arc(0, 0, size + 5, 0, Math.PI * 2); ctx.stroke();
-      }
-      ctx.restore();
-      if (visible.labels && (isSel || view.zoom >= 7)) {
-        ctx.font = "9px JetBrains Mono, monospace";
-        ctx.textBaseline = "middle";
-        ctx.strokeStyle = "rgba(0,0,0,.82)"; ctx.lineWidth = 2.4;
-        ctx.strokeText(wp.name, s.x + 8, s.y);
-        ctx.fillStyle = isSel ? "#ffffff" : color;
-        ctx.fillText(wp.name, s.x + 8, s.y);
+      for (const s of latLonToScreenCopies(Number(wp.lat), Number(wp.lon), w, hh, 30)) {
+        const color = TYPE_COLOR[wp.type] || TYPE_COLOR.WAYPOINT;
+        const isSel = selected?.id === wp.id;
+        const size = isSel ? 7 : 5;
+        ctx.save();
+        ctx.translate(s.x, s.y);
+        if (wp.type === "HAZARD") {
+          ctx.fillStyle = color;
+          ctx.beginPath(); ctx.moveTo(0, -size); ctx.lineTo(size, size); ctx.lineTo(-size, size); ctx.closePath(); ctx.fill();
+        } else if (wp.type === "LZ") {
+          ctx.strokeStyle = color; ctx.lineWidth = 1.6;
+          ctx.beginPath(); ctx.arc(0, 0, size, 0, Math.PI * 2); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(-size, 0); ctx.lineTo(size, 0); ctx.stroke();
+        } else {
+          ctx.fillStyle = color;
+          ctx.beginPath(); ctx.moveTo(0, -size); ctx.lineTo(size, 0); ctx.lineTo(0, size); ctx.lineTo(-size, 0); ctx.closePath(); ctx.fill();
+        }
+        if (isSel) {
+          ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.arc(0, 0, size + 5, 0, Math.PI * 2); ctx.stroke();
+        }
+        ctx.restore();
+        if (visible.labels && (isSel || view.zoom >= 7)) {
+          ctx.font = "9px JetBrains Mono, monospace";
+          ctx.textBaseline = "middle";
+          ctx.strokeStyle = "rgba(0,0,0,.82)"; ctx.lineWidth = 2.4;
+          ctx.strokeText(wp.name, s.x + 8, s.y);
+          ctx.fillStyle = isSel ? "#ffffff" : color;
+          ctx.fillText(wp.name, s.x + 8, s.y);
+        }
       }
     }
   }
 
   function intelPoint(ctx, vw, vh, lat, lon, sev, mag) {
-    const s = latLonToScreen(lat, lon);
-    if (s.x < -20 || s.y < -20 || s.x > vw + 20 || s.y > vh + 20) return;
-    const critical = ["CRITICAL", "SEVERE", "EXTREME"].includes(String(sev || "").toUpperCase());
-    const color = critical ? "#ff5c5c" : ["ALERT", "SEVERE"].includes(String(sev || "").toUpperCase()) ? "#ffb02e" : "#5dff9a";
-    const r = critical ? 4.5 : (mag != null ? 2.5 + Math.min(4, Number(mag) || 0) : 2.5);
-    ctx.fillStyle = critical ? "#ff5c5c" : ["ALERT", "SEVERE"].includes(String(sev || "").toUpperCase()) ? "#ffb02e" : "#5dff9a";
-    ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2); ctx.fill();
-    if (view.zoom >= 8) {
-      ctx.font = "8px JetBrains Mono, monospace";
-      ctx.textBaseline = "top";
-      ctx.fillStyle = "#c8e6d4";
-      ctx.fillText(`${sev || "EVENT"}${mag != null ? ` M${mag}` : ""}`, s.x + 7, s.y + 2);
+    for (const s of latLonToScreenCopies(lat, lon, vw, vh, 20)) {
+      const critical = ["CRITICAL", "SEVERE", "EXTREME"].includes(String(sev || "").toUpperCase());
+      const r = critical ? 4.5 : (mag != null ? 2.5 + Math.min(4, Number(mag) || 0) : 2.5);
+      ctx.fillStyle = critical ? "#ff5c5c" : ["ALERT", "SEVERE"].includes(String(sev || "").toUpperCase()) ? "#ffb02e" : "#5dff9a";
+      ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2); ctx.fill();
+      if (view.zoom >= 8) {
+        ctx.font = "8px JetBrains Mono, monospace";
+        ctx.textBaseline = "top";
+        ctx.fillStyle = "#c8e6d4";
+        ctx.fillText(`${sev || "EVENT"}${mag != null ? ` M${mag}` : ""}`, s.x + 7, s.y + 2);
+      }
     }
   }
 
@@ -2037,8 +2142,17 @@ export async function render(root, params = {}) {
   }
 
   /* ---------------------------------------------------------- map actions */
+  function minViewZoom() {
+    const rect = canvas.getBoundingClientRect?.();
+    const w = Math.max(256, rect?.width || canvas.clientWidth || canvas.parentElement?.clientWidth || 800);
+    // Prevent showing multiple wrapped copies of Earth on a wide screen.
+    return Math.max(2, Math.ceil(Math.log2(w / TILE)));
+  }
+  function clampViewZoom(z) {
+    return clamp(z, minViewZoom(), 18);
+  }
   function zoomAt(newZoom, px = null, py = null) {
-    newZoom = clamp(Math.round(newZoom), 1, 18);
+    newZoom = clampViewZoom(Math.round(newZoom));
     if (newZoom === view.zoom) return;
     if (px === null) { px = canvas.clientWidth / 2; py = canvas.clientHeight / 2; }
     const before = screenToLatLon(px, py);
@@ -2052,7 +2166,7 @@ export async function render(root, params = {}) {
   function home() {
     view.lat = hidePosition ? 20 : homeLat;
     view.lon = hidePosition ? 0 : homeLon;
-    view.zoom = hidePosition ? 1.6 : 10;
+    view.zoom = clampViewZoom(hidePosition ? 2 : 10);
     selected = null;
     draw();
   }
