@@ -154,6 +154,8 @@ export async function render(root, params = {}) {
   let downloadJobsBox = null;
   let downloadJobsTimer = null;
   let downloadJobsHadRunning = false;
+  const downloadLogOpen = new Set();
+  const downloadLogScroll = new Map();
   const sourceMeta = {};
   let satTrack = null;
   const satTrackCache = new Map();
@@ -950,16 +952,29 @@ export async function render(root, params = {}) {
           : badge(String(job.state || "done").toUpperCase(),
                   job.state === "done" ? "green" : job.state === "cancelled" ? "amber" : "red");
         const sourceName = sourceMeta[job.source]?.name || job.source;
-        downloadJobsBox.appendChild(h("div", { class: "col gap-4", style: { borderTop: "1px solid var(--line)", paddingTop: "8px" } },
+        const logPre = h("pre", { class: "update-log", style: { margin: "6px 0 0", whiteSpace: "pre-wrap", maxHeight: "180px" }, text: logText || "No log entries." });
+        logPre.addEventListener("scroll", () => downloadLogScroll.set(job.id, logPre.scrollTop));
+        const jobEl = h("div", { class: "col gap-4", style: { borderTop: "1px solid var(--line)", paddingTop: "8px" } },
           h("div", { class: "row gap-6 wrap" },
             h("div", { class: "grow" },
               h("div", { class: "small", text: `${job.label === "auto" ? "Auto-cache" : "Offline pack"} · ${sourceName}` }),
               h("div", { class: "tiny muted", text: `${pct}% · z${job.zoom_range?.[0]}–${job.zoom_range?.[1]} · ${done}/${total || "?"} · ${job.downloaded || 0} new · ${job.already_cached || 0} cached · ${job.failed || 0} failed` })),
             cancel),
           bar,
-          h("details", {},
+          h("details", {
+            open: downloadLogOpen.has(job.id),
+            ontoggle: (e) => {
+              if (e.currentTarget.open) downloadLogOpen.add(job.id);
+              else downloadLogOpen.delete(job.id);
+            },
+          },
             h("summary", { class: "tiny muted", text: `Log · ${(job.log || []).length} line(s)` }),
-            h("pre", { class: "update-log", style: { margin: "6px 0 0", whiteSpace: "pre-wrap", maxHeight: "180px" }, text: logText || "No log entries." }))));
+            logPre));
+        downloadJobsBox.appendChild(jobEl);
+        if (downloadLogOpen.has(job.id)) {
+          const maxScroll = Math.max(0, logPre.scrollHeight - logPre.clientHeight);
+          logPre.scrollTop = Math.min(Number(downloadLogScroll.get(job.id) || 0), maxScroll);
+        }
       }
       downloading = running.some((job) => job.label !== "auto");
       if (running.length) {
