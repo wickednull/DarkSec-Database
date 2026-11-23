@@ -22,6 +22,8 @@ export async function render(root) {
   const settings = { ...store.settings };
   let disposed = false;
   let pollTimer = null;
+  let cachePollTimer = null;
+  let cacheStatusPollTimer = null;
   const cleanups = [];
   let gpsCandidate = null;
   let phoneSessionId = null;
@@ -2009,13 +2011,22 @@ export async function render(root) {
       let extra = "";
       if (fetchCount) {
         try {
-          const st = await api.get("/api/map/cache/status");
-          const logicalMb = Number(st.total_mb || 0);
-          const diskMb = Number(st.disk_mb || 0);
-          const size = diskMb > 0 && Math.abs(diskMb - logicalMb) > Math.max(64, logicalMb * 0.15)
-            ? `${logicalMb.toFixed(2)} MB data, ${diskMb.toFixed(2)} MB on disk`
-            : `${logicalMb.toFixed(2)} MB`;
-          extra = ` · current cache ${Number(st.tile_count || 0).toLocaleString()} tiles (${size})`;
+          const st = await api.get("/api/map/cache/status?wait=0");
+          if (st?.pending) {
+            extra = " · counting cache…";
+            if (cacheStatusPollTimer) clearTimeout(cacheStatusPollTimer);
+            cacheStatusPollTimer = setTimeout(() => {
+              cacheStatusPollTimer = null;
+              if (!disposed) refreshCacheStatus(true);
+            }, 1500);
+          } else {
+            const logicalMb = Number(st.total_mb || 0);
+            const diskMb = Number(st.disk_mb || 0);
+            const size = diskMb > 0 && Math.abs(diskMb - logicalMb) > Math.max(64, logicalMb * 0.15)
+              ? `${logicalMb.toFixed(2)} MB data, ${diskMb.toFixed(2)} MB on disk`
+              : `${logicalMb.toFixed(2)} MB`;
+            extra = ` · current cache ${Number(st.tile_count || 0).toLocaleString()} tiles (${size})`;
+          }
         } catch { /* leave count out */ }
       }
       cacheStatus.className = "tiny muted";
@@ -2288,13 +2299,26 @@ export async function render(root) {
   }
 
   async function loadCacheSummary() {
-    cacheSummary.replaceChildren(loading("Loading cache…"));
+    if (cachePollTimer) { clearTimeout(cachePollTimer); cachePollTimer = null; }
+    if (!cacheSummary.childNodes.length) cacheSummary.replaceChildren(loading("Loading cache…"));
     try {
-      const st = await api.get("/api/map/cache/status");
+      const st = await api.get("/api/map/cache/status?wait=0");
+      if (disposed) return;
+      if (st?.pending) {
+        cacheSummary.replaceChildren(
+          h("div", { class: "row gap-6 items-center" }, h("span", { class: "spinner" }), h("div", { class: "tiny muted", text: "Counting cached tiles…" })),
+          h("div", { class: "tiny muted", text: "Large USB caches can take a little while. The rest of Settings stays usable." }));
+        cachePollTimer = setTimeout(() => {
+          cachePollTimer = null;
+          if (!disposed) loadCacheSummary();
+        }, 1500);
+        return;
+      }
       cacheSummary.replaceChildren();
       const free = st.free_gb != null ? `${st.free_gb} GB free` : "free space unknown";
       cacheSummary.appendChild(h("div", { class: "tiny muted wrap-any", text:
         `${Number(st.tile_count || 0).toLocaleString()} tiles · ${cacheSizeLabel(st.total_mb, st.disk_mb)} · ${free} · ${st.path || "unknown path"}` }));
+      refreshCacheStatus(true);
       const cached = (st.sources || []).filter((src) => Number(src.tile_count) > 0);
       if (!cached.length) {
         cacheSummary.appendChild(h("div", { class: "tiny muted", text: "No downloaded raster tiles yet." }));
@@ -2672,6 +2696,8 @@ export async function render(root) {
     disposed = true;
     if (pollTimer) clearInterval(pollTimer);
     if (bundlePoll) clearTimeout(bundlePoll);
+    if (cachePollTimer) clearTimeout(cachePollTimer);
+    if (cacheStatusPollTimer) clearTimeout(cacheStatusPollTimer);
     for (const fn of cleanups) try { fn(); } catch {}
   };
 }

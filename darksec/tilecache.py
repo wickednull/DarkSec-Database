@@ -1289,31 +1289,96 @@ def _refresh_stats(key: tuple, source: Optional[str]) -> None:
             _stats_refreshing.discard(key)
 
 
-def cache_stats(source: Optional[str] = None) -> dict:
+def _pending_stats(source: Optional[str] = None) -> dict:
+    """Fast placeholder returned while a background cache scan is running."""
+    info = disk_info()
+    result = {
+        "tile_count": 0,
+        "total_bytes": 0,
+        "total_mb": 0.0,
+        "disk_bytes": 0,
+        "disk_mb": 0.0,
+        "path": str(cache_root()),
+        "free_bytes": info["free_bytes"],
+        "free_gb": info["free_gb"],
+        "sources": [],
+        "pending": True,
+    }
+    if source:
+        meta = TILE_SOURCES.get(source, {})
+        result.update({
+            "source": source,
+            "name": meta.get("name", source),
+            "zoom_range": [],
+            "max_zoom": meta.get("max_zoom"),
+            "attribution": meta.get("attribution", ""),
+        })
+    return result
+
+
+def cache_stats(source: Optional[str] = None, wait: bool = True) -> dict:
     """Count cached tiles and total size. source=None aggregates every source.
 
     Stale-while-revalidate: after the first scan the previous numbers are
     returned immediately while one worker rescans, so a cache with tens of
     thousands of files never stalls the Settings or Map panel.
+
+    ``wait=False`` also makes the *first* scan non-blocking: it returns zeros
+    with ``pending: True`` and counts in a background thread. The Settings
+    panel polls until pending clears. Concurrent callers share the same scan
+    instead of walking a large USB cache several times at once.
     """
     key = (source or "*", str(cache_root()))
     now = time.monotonic()
+    start_refresh = False
     with _stats_lock:
         cached = _stats_cache.get(key)
         if cached and now - cached[0] < STATS_TTL:
             return copy.deepcopy(cached[1])
         refreshing = key in _stats_refreshing
-        if cached is not None and not refreshing:
-            _stats_refreshing.add(key)
-    if cached is not None:
         if not refreshing:
+            _stats_refreshing.add(key)
+            start_refresh = True
+    if not wait:
+        if start_refresh:
+            threading.Thread(target=_refresh_stats, args=(key, source), daemon=True,
+                             name="tile-stats").start()
+        if cached is not None:
+            # Stale numbers are better than a flickering "counting…" label;
+            # the background refresh updates them shortly.
+            return copy.deepcopy(cached[1])
+        return _pending_stats(source)
+    if cached is not None:
+        if start_refresh:
             threading.Thread(target=_refresh_stats, args=(key, source), daemon=True,
                              name="tile-stats").start()
         return copy.deepcopy(cached[1])
-    result = _compute_stats(source)
-    with _stats_lock:
-        _stats_cache[key] = (time.monotonic(), copy.deepcopy(result))
-    return result
+    if not start_refresh:
+        # Another request already started the same scan (for example after a
+        # cache-path switch). Wait for it instead of duplicating a full walk.
+        deadline = time.monotonic() + 300.0
+        while time.monotonic() < deadline:
+            with _stats_lock:
+                cached = _stats_cache.get(key)
+                if cached is not None:
+                    return copy.deepcopy(cached[1])
+                if key not in _stats_refreshing:
+                    break
+            time.sleep(0.05)
+        with _stats_lock:
+            if key not in _stats_refreshing:
+                _stats_refreshing.add(key)
+                start_refresh = True
+        if not start_refresh:
+            return _pending_stats(source)
+    try:
+        result = _compute_stats(source)
+        with _stats_lock:
+            _stats_cache[key] = (time.monotonic(), copy.deepcopy(result))
+        return result
+    finally:
+        with _stats_lock:
+            _stats_refreshing.discard(key)
 
 
 def clear_cache(source: Optional[str] = None) -> dict:

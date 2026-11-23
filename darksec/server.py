@@ -5612,14 +5612,19 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                             headers={"Cache-Control": "max-age=5"})
 
     @app.get("/api/map/cache/status")
-    def cache_status(source: str | None = None):
-        """Report cache size and coverage (per source and total)."""
+    def cache_status(source: str | None = None, wait: int = Query(1, ge=0, le=1)):
+        """Report cache size and coverage (per source and total).
+
+        ``wait=0`` returns immediately with ``pending: true`` while a large
+        cache is counted in the background, so the Settings page stays usable
+        right after switching to a USB cache.
+        """
         from . import tilecache
         if source and source not in tilecache.TILE_SOURCES:
             base = tilecache.cache_root() / "".join(ch for ch in source if ch.isalnum() or ch in "-_")
             if not source or not base.exists():
                 raise HTTPException(status_code=400, detail="Unknown tile source")
-        return tilecache.cache_stats(source)
+        return tilecache.cache_stats(source, wait=bool(wait))
 
     @app.get("/api/map/cache/sources")
     def cache_sources():

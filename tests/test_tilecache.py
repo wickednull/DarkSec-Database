@@ -1,6 +1,7 @@
 """Offline tile cache: source consistency, ancestor overzoom and repair."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from test_mbtiles import PNG, make_mbtiles
@@ -438,6 +439,33 @@ def test_pack_limit_still_refuses_a_continent_scale_job():
     est = tilecache.estimate_tiles(-60, -120, 60, 120, 0, 12, "esri_imagery")
     assert est["total"] > tilecache.MAX_DOWNLOAD_TILES
     assert est["over_limit"] is True
+
+
+def test_cache_stats_nowait_counts_in_background(monkeypatch, tmp_path):
+    from darksec import config, tilecache
+
+    monkeypatch.setattr(config, "MAP_TILE_DIR", tmp_path)
+    tilecache._invalidate_stats()
+    img = tmp_path / "cache" / "esri_imagery" / "10" / "3" / "4.png"
+    img.parent.mkdir(parents=True)
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"z" * 64)
+
+    first = tilecache.cache_stats(wait=False)
+    assert first.get("pending") is True
+    assert first["tile_count"] == 0
+
+    deadline = time.monotonic() + 5
+    stats = first
+    while time.monotonic() < deadline:
+        stats = tilecache.cache_stats(wait=False)
+        if not stats.get("pending"):
+            break
+        time.sleep(0.02)
+    assert not stats.get("pending")
+    assert stats["tile_count"] == 1
+    assert stats["total_bytes"] > 0
+
+    tilecache._invalidate_stats()
 
 
 def test_cache_stats_reports_disk_bytes_and_unknown_dirs(monkeypatch, tmp_path):
