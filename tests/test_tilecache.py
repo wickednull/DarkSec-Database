@@ -252,8 +252,41 @@ def test_relocate_copies_existing_tiles(tmp_path, monkeypatch):
         import time
         time.sleep(0.02)
     assert state["state"] == "done"
+    assert state["verified"] == 1
     assert (dest / "esri_imagery" / "9" / "1" / "2.jpg").read_bytes() == JPEG
     assert not (dest / "esri_imagery" / "9" / "1" / "2.jpg.part").exists()
+
+
+def test_relocate_overwrites_stale_same_size_destination(tmp_path, monkeypatch):
+    import os
+    import time
+
+    from darksec import tilecache
+
+    src = tmp_path / "old-cache"
+    rel = Path("esri_imagery") / "9" / "1" / "2.jpg"
+    source_file = src / rel
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(JPEG)
+    dest = tmp_path / "usb" / "DarkSec-Tiles"
+    dest_file = dest / rel
+    dest_file.parent.mkdir(parents=True)
+    dest_file.write_bytes(b"X" * len(JPEG))  # same size, wrong content
+    old_ts = time.time() - 30
+    os.utime(dest_file, (old_ts, old_ts))
+
+    monkeypatch.setattr(tilecache, "cache_root", lambda: src)
+    monkeypatch.setattr(tilecache, "_downloads_running", lambda: False)
+    job = tilecache.start_relocate(str(dest), remove_source=True, switch_cache=False)
+    for _ in range(100):
+        state = tilecache.relocate_status(job["id"])
+        if state["state"] != "running":
+            break
+        time.sleep(0.02)
+    assert state["state"] == "done", state
+    assert state["verified"] == 1
+    assert dest_file.read_bytes() == JPEG
+    assert not source_file.exists()
 
 
 def test_usgs_imagery_uses_the_live_service():

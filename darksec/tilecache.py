@@ -23,6 +23,7 @@ and is kept only as a fallback.
 from __future__ import annotations
 
 import copy
+import filecmp
 import hashlib
 import math
 import os
@@ -1031,7 +1032,7 @@ def start_relocate(destination: str, remove_source: bool = False,
         "state": "running" if files else "done",
         "source": str(src), "destination": str(dest),
         "total": len(files), "completed": 0,
-        "copied": 0, "skipped": 0, "failed": 0,
+        "copied": 0, "skipped": 0, "verified": 0, "failed": 0,
         "total_bytes": total_bytes, "done_bytes": 0,
         "remove_source": bool(remove_source),
         "switch_cache": bool(switch_cache),
@@ -1044,30 +1045,61 @@ def start_relocate(destination: str, remove_source: bool = False,
     return dict(job)
 
 
+def _same_cached_file(source: Path, target: Path) -> bool:
+    """True when the destination copy is safe to keep (not just same size)."""
+    try:
+        a = source.stat()
+        b = target.stat()
+    except OSError:
+        return False
+    if a.st_size != b.st_size:
+        return False
+    # copy2 preserves mtime; FAT/exFAT only keeps 2-second precision.
+    try:
+        if abs(a.st_mtime - b.st_mtime) <= 2:
+            return True
+    except OSError:
+        pass
+    try:
+        return filecmp.cmp(source, target, shallow=False)
+    except OSError:
+        return False
+
+
 def _run_relocate(job: dict, files: list[Path]) -> None:
     src = Path(job["source"])
     dest = Path(job["destination"])
     try:
         for i, f in enumerate(files):
             try:
+                size = f.stat().st_size
+            except OSError:
+                size = 0
+            try:
                 rel = f.relative_to(src)
                 target = dest / rel
-                if target.exists() and target.stat().st_size == f.stat().st_size:
+                if target.is_file() and _same_cached_file(f, target):
                     job["skipped"] += 1
+                    job["verified"] += 1
+                    job["done_bytes"] += size
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     tmp = target.with_suffix(target.suffix + ".part")
                     shutil.copy2(f, tmp)
+                    if size and tmp.stat().st_size != size:
+                        try:
+                            tmp.unlink()
+                        except OSError:
+                            pass
+                        raise OSError("copied file size does not match source")
                     tmp.replace(target)
                     job["copied"] += 1
-                    try:
-                        job["done_bytes"] += f.stat().st_size
-                    except OSError:
-                        pass
+                    job["verified"] += 1
+                    job["done_bytes"] += size
             except OSError:
                 job["failed"] += 1
             job["completed"] = i + 1
-        if job["remove_source"] and job["failed"] == 0:
+        if job["remove_source"] and job["failed"] == 0 and job["verified"] == job["total"]:
             for f in files:
                 try:
                     f.unlink()
@@ -1079,7 +1111,12 @@ def _run_relocate(job: dict, files: list[Path]) -> None:
                     d.rmdir()
                 except OSError:
                     pass
-        job["state"] = "done" if job["failed"] == 0 else "partial"
+        job["state"] = "done" if job["failed"] == 0 and job["verified"] == job["total"] else "partial"
+        if job["state"] != "done" and not job["error"]:
+            job["error"] = (
+                f"{job['failed']} copy error(s); "
+                f"{job['total'] - job['verified']} file(s) not verified"
+            )[:300]
         if job["state"] == "done" and job.get("switch_cache"):
             try:
                 from .db import Database

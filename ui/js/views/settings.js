@@ -2125,11 +2125,11 @@ export async function render(root) {
             if (!ok) return;
             m.close();
             try {
-              await copyCacheTo(item.path, true, true);
+              const result = await copyCacheTo(item.path, true, true);
               await store.loadStatus({ force: true }).catch(() => null);
               settings.map_cache_path = item.path;
               mapCache.value = item.path;
-              toast("Tile cache moved to USB", "success");
+              toast(`Moved ${Number(result?.verified ?? result?.total ?? 0).toLocaleString()} verified tile file(s) to USB`, "success", 9000);
               await refreshCacheStatus(true);
               await loadCacheSummary();
               loadLayers(layersBox);
@@ -2190,8 +2190,9 @@ export async function render(root) {
             if (!ok) return;
             m.close();
             try {
-              await copyCacheTo(item.path, false, false);
-              toast("Tile cache copied to USB", "success");
+              const result = await copyCacheTo(item.path, false, false);
+              const verified = Number(result?.verified ?? result?.total ?? 0);
+              toast(`Copied ${verified.toLocaleString()} verified tile file(s) to ${item.path}. Select it as the tile cache to use it.`, "success", 9000);
               await refreshCacheStatus(true);
               await loadCacheSummary();
             } catch (err) {
@@ -2223,8 +2224,8 @@ export async function render(root) {
           h("div", { class: "progress-track" }, bar),
           text,
           h("div", { class: "tiny muted", text: removeSource
-            ? "Keep the USB drive connected. Files are copied and size-checked, then removed from the current cache. The active cache switches only if every file succeeds."
-            : "Keep the USB drive connected. The current cache stays active until the copy finishes." })),
+            ? "Keep the USB drive connected. Files are copied and verified, then removed from the current cache. The active cache switches only if every file verifies."
+            : "Keep the USB drive connected. Files are copied and verified; the current cache stays active until the copy finishes." })),
         actions: [],
         onClose: () => {
           if (!done) reject(new Error("Dialog closed; the server operation may still be running"));
@@ -2242,7 +2243,10 @@ export async function render(root) {
             ? (state.completed >= state.total ? 100 : Math.min(99, Math.floor((state.completed / state.total) * 100)))
             : 100;
           bar.style.width = `${pct}%`;
-          text.textContent = `${pct}% · ${state.completed}/${state.total} files · ${state.copied} copied · ${state.skipped} already there · ${state.failed} failed`;
+          const verified = Number(state.verified) || 0;
+          text.textContent = state.state === "running" && state.total && state.completed >= state.total
+            ? `Verifying ${verified}/${state.total} files…`
+            : `${pct}% · ${state.completed}/${state.total} files · ${state.copied} copied · ${state.skipped} already there · ${verified} verified · ${state.failed} failed`;
           if (state.state === "done") { done = true; m.close(); resolve(state); return; }
           if (state.state === "partial" || state.state === "error") {
             done = true;
