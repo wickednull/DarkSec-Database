@@ -526,6 +526,7 @@ export async function render(root) {
   const cacheSummary = h("div", { class: "col gap-4" }, loading("Loading cache…"));
   const cacheRefresh = btn("REFRESH CACHE INFO", { size: "sm", icon: "refresh", onClick: () => loadCacheSummary() });
   const cacheVerify = btn("VERIFY & REPAIR", { size: "sm", icon: "check", onClick: verifyTileCache });
+  const cacheCopy = btn("COPY TO USB", { size: "sm", icon: "copy", onClick: copyCacheToUsb });
   const cacheTransfer = btn("TRANSFER TO USB", { size: "sm", icon: "upload", onClick: transferCacheToUsb });
   const cacheClear = btn("CLEAR ALL TILES", { size: "sm", tone: "danger", icon: "trash", onClick: clearAllTiles });
   const cacheDownload = btn("DOWNLOAD OFFLINE PACK", { size: "sm", icon: "download", onClick: () => { location.hash = "#/map?download=1"; } });
@@ -543,7 +544,7 @@ export async function render(root) {
       cacheStatus,
       h("div", { class: "settings-subhead", text: "Cache maintenance" }),
       cacheSummary,
-      h("div", { class: "settings-actions" }, cacheRefresh, cacheTransfer, cacheVerify, cacheClear, cacheDownload),
+      h("div", { class: "settings-actions" }, cacheRefresh, cacheCopy, cacheTransfer, cacheVerify, cacheClear, cacheDownload),
       h("div", { class: "tiny muted", text: "Download progress, per-tile logs and cancel controls are in the Map → Downloads panel." }),
       mapVector,
       mapAutoPack,
@@ -2109,6 +2110,65 @@ export async function render(root) {
     const m = modal({
       title: "Transfer tile cache to USB",
       sub: "Move cached raster tiles off the internal drive",
+      wide: true,
+      body,
+      actions: [btn("CLOSE", { tone: "ghost", onClick: () => m.close() })],
+    });
+  }
+
+  async function copyCacheToUsb() {
+    let st = null;
+    try { st = await api.get("/api/map/cache/status"); }
+    catch (err) { toast(err.message || "Could not read tile cache", "error"); return; }
+    if (!Number(st?.tile_count)) {
+      toast("No cached tiles to copy", "warn");
+      return;
+    }
+    let out = null;
+    try { out = await api.get("/api/map/cache/locations"); }
+    catch (err) { toast(err.message || "Could not scan USB folders", "error"); return; }
+    const current = String(st.path || "");
+    const items = (out.items || []).filter((item) =>
+      item.writable && !item.default && String(item.path) !== current);
+    const body = h("div", { class: "col gap-8" });
+    body.appendChild(h("div", { class: "small", text:
+      `Current cache: ${Number(st.tile_count).toLocaleString()} tiles · ${st.total_mb || 0} MB at ${current}. ` +
+      "Copy it to a USB folder as a backup. The current cache stays active and is not changed." }));
+    const list = h("div", { class: "list" });
+    if (!items.length) {
+      body.appendChild(emptyState("No writable USB folder found",
+        "Plug in the drive, wait for it to mount, then try again. The current cache is unchanged."));
+    } else {
+      for (const item of items) {
+        const free = item.free_gb != null ? `${item.free_gb} GB free` : "free space unknown";
+        list.appendChild(h("div", { class: "list-item" },
+          h("div", { class: "li-main" },
+            h("div", { class: "li-title truncate", text: item.path }),
+            h("div", { class: "li-sub", text: `${free}${item.exists ? " · existing folder" : " · will be created"}` })),
+          btn("COPY HERE", { size: "sm", tone: "primary", icon: "copy", onClick: async () => {
+            const ok = await confirmDialog({
+              title: "Copy tile cache to USB",
+              message: `Copy ${Number(st.tile_count).toLocaleString()} tiles (${st.total_mb || 0} MB) from ${current} to ${item.path}? ` +
+                "The current cache stays in place. Files already present and the same size are skipped.",
+              confirmText: "COPY",
+            });
+            if (!ok) return;
+            m.close();
+            try {
+              await copyCacheTo(item.path, false, false);
+              toast("Tile cache copied to USB", "success");
+              await refreshCacheStatus(true);
+              await loadCacheSummary();
+            } catch (err) {
+              toast(err.message || "Copy failed", "error", 9000);
+            }
+          } })));
+      }
+      body.appendChild(list);
+    }
+    const m = modal({
+      title: "Copy tile cache to USB",
+      sub: "Backup cached raster tiles without changing the active cache",
       wide: true,
       body,
       actions: [btn("CLOSE", { tone: "ghost", onClick: () => m.close() })],

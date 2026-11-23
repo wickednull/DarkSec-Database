@@ -70,18 +70,40 @@ function niceDistance(m) {
 }
 
 function mapLoadingPage({ kicker = "COMMAND // TERRAIN", title = "Preparing map", desc = "", status = "Loading map data" } = {}) {
-  return h("div", { class: "map-loading-page" },
+  const statusText = h("span", { text: status });
+  const pctText = h("strong", { text: "0%" });
+  const barFill = h("div", { class: "map-loading-bar-fill indeterminate" });
+  const bar = h("div", { class: "map-loading-bar" }, barFill);
+  const el = h("div", { class: "map-loading-page" },
     h("div", { class: "map-loading-card" },
       h("div", { class: "map-loading-kicker", text: kicker }),
       h("h2", { class: "map-loading-title", text: title }),
       h("p", { class: "map-loading-desc", text: desc }),
-      h("div", { class: "map-loading-status" }, h("span", { class: "spinner" }), h("span", { text: status })),
+      h("div", { class: "map-loading-status" }, h("span", { class: "spinner" }), statusText),
+      h("div", { class: "map-loading-bar-wrap" },
+        h("div", { class: "map-loading-bar-head" }, h("span", { text: "Map startup" }), pctText),
+        bar,
+      ),
       h("div", { class: "map-loading-meta" },
         h("div", {}, "Large offline tile caches ", h("span", { text: "can take a minute or two to index and warm up on first load." })),
         h("div", {}, "USB or slow storage ", h("span", { text: "may add a little extra time — the map will appear as soon as it’s ready." })),
       ),
     ),
   );
+  el.setProgress = (pct, text) => {
+    if (text) statusText.textContent = text;
+    if (pct == null || !Number.isFinite(Number(pct))) {
+      pctText.textContent = "…";
+      barFill.classList.add("indeterminate");
+      barFill.style.width = "35%";
+      return;
+    }
+    const clamped = Math.max(0, Math.min(100, Math.round(Number(pct))));
+    pctText.textContent = `${clamped}%`;
+    barFill.classList.remove("indeterminate");
+    barFill.style.width = `${clamped}%`;
+  };
+  return el;
 }
 
 export async function render(root, params = {}) {
@@ -91,12 +113,14 @@ export async function render(root, params = {}) {
     return mapGl.render(root, { ...params, renderer: "gl" });
   }
   try { localStorage.setItem("darksec.map.renderer", "2d"); } catch {}
-  root.replaceChildren(mapLoadingPage({
+  const boot = mapLoadingPage({
     kicker: "COMMAND // TERRAIN",
     title: "Preparing your offline map",
     desc: "Loading basemaps, cached tiles, waypoints, and intelligence layers. Everything stays local on this device.",
     status: "Initialising 2D map",
-  }));
+  });
+  root.replaceChildren(boot);
+  boot.setProgress(8, "Initialising 2D map");
   let layers, waypoints, tracks, coordNow;
   const settings = store.settings || {};
   const configuredLat = Number(settings.lat), configuredLon = Number(settings.lon);
@@ -133,14 +157,21 @@ export async function render(root, params = {}) {
   const sourceMeta = {};
   let satTrack = null;
   const satTrackCache = new Map();
+  boot.setProgress(20, "Fetching map layers and local data");
   try {
+    let fetchDone = 0;
+    const fetchTotal = 6;
+    const tickFetch = (msg) => {
+      fetchDone += 1;
+      boot.setProgress(20 + Math.round((fetchDone / fetchTotal) * 42), msg);
+    };
     const [l, w, t, intel, cel, dec] = await Promise.all([
-      api.get("/api/map/layers").catch(() => ({ vector: [], raster: [] })),
-      api.get("/api/records/waypoints?limit=2000").catch(() => ({ items: [] })),
-      api.get("/api/records/tracks?limit=500").catch(() => ({ items: [] })),
-      api.get("/api/map/intel").catch(() => null),
-      api.get(`/api/nav/celestial?lat=${homeLat}&lon=${homeLon}&elevation=${Number(settings.elevation_m) || 0}`).catch(() => null),
-      api.get(`/api/nav/declination?lat=${homeLat}&lon=${homeLon}&date=${new Date().toISOString().slice(0, 10)}`).catch(() => null),
+      api.get("/api/map/layers").catch(() => ({ vector: [], raster: [] })).then((r) => { tickFetch("Map layers loaded"); return r; }),
+      api.get("/api/records/waypoints?limit=2000").catch(() => ({ items: [] })).then((r) => { tickFetch("Waypoints loaded"); return r; }),
+      api.get("/api/records/tracks?limit=500").catch(() => ({ items: [] })).then((r) => { tickFetch("Tracks loaded"); return r; }),
+      api.get("/api/map/intel").catch(() => null).then((r) => { tickFetch("Intelligence loaded"); return r; }),
+      api.get(`/api/nav/celestial?lat=${homeLat}&lon=${homeLon}&elevation=${Number(settings.elevation_m) || 0}`).catch(() => null).then((r) => { tickFetch("Celestial data loaded"); return r; }),
+      api.get(`/api/nav/declination?lat=${homeLat}&lon=${homeLon}&date=${new Date().toISOString().slice(0, 10)}`).catch(() => null).then((r) => { tickFetch("Declination loaded"); return r; }),
     ]);
     layers = l;
     waypoints = w.items || [];
@@ -157,6 +188,7 @@ export async function render(root, params = {}) {
     sunInfo = cel;
     declInfo = dec;
     try { coordNow = await api.get(`/api/map/coords?lat=${homeLat}&lon=${homeLon}`); } catch { coordNow = null; }
+    boot.setProgress(65, "Local data loaded");
   } catch (err) {
     root.replaceChildren(h("div", { class: "callout danger", text: err.message }));
     return;
@@ -226,6 +258,21 @@ export async function render(root, params = {}) {
   const tileCache = new Map();
   const labelTileCache = new Map();
   const labelsOverlay = settings.map_labels_overlay !== false;
+  let bootTilesNeeded = 0;
+  let bootTilesDone = 0;
+  let bootTilesActive = true;
+  const bootTileDone = () => {
+    if (!bootTilesActive) return;
+    bootTilesDone += 1;
+    const total = Math.max(1, bootTilesNeeded);
+    const pct = 85 + Math.min(14, Math.round((bootTilesDone / total) * 14));
+    boot.setProgress(pct, `Loading visible map tiles (${Math.min(bootTilesDone, total)}/${total})`);
+    if (bootTilesDone >= total) {
+      bootTilesActive = false;
+      boot.setProgress(100, "Map ready");
+      setTimeout(() => { if (boot.isConnected) boot.remove(); }, 250);
+    }
+  };
   let downloading = false;
   let cacheInfo = {
     tile_count: Number(layers.cache?.tile_count) || 0,
@@ -243,7 +290,11 @@ export async function render(root, params = {}) {
   let autoPackTimer = null;
   let lastPackKey = "";
 
+  boot.setProgress(85, "Building map interface");
   root.replaceChildren();
+  root.style.position = "relative";
+  boot.classList.add("map-loading-overlay");
+  root.appendChild(boot);
   root.appendChild(pageHead({
     kicker: "COMMAND // TERRAIN",
     title: "Map & Terrain",
@@ -333,6 +384,7 @@ export async function render(root, params = {}) {
   const side = h("div", { class: "map-side" });
   layout.appendChild(side);
   root.appendChild(layout);
+  boot.setProgress(88, "Loading visible map tiles");
 
   /* ------------------------------------------------------------ side panels */
   const search = h("input", { class: "input", type: "search", placeholder: "Filter waypoints…", autocomplete: "off" });
@@ -1229,11 +1281,15 @@ export async function render(root, params = {}) {
     if (labelTileCache.has(key)) return labelTileCache.get(key);
     const img = new Image();
     img.decoding = "async";
-    img.onload = () => draw();
+    if (bootTilesActive) bootTilesNeeded += 1;
+    let bootCounted = false;
+    const countBoot = () => { if (!bootCounted) { bootCounted = true; bootTileDone(); } };
+    img.onload = () => { countBoot(); draw(); };
     img.onerror = () => {
       // The server queues missing tiles in the background; let a later redraw
       // try again instead of pinning a permanently blank label tile.
       labelTileCache.delete(key);
+      countBoot();
     };
     img.src = `/api/map/cache/tiles/${source}/${z}/${x}/${y}.png?v=5&s=${source}&b=${cacheGeneration}`;
     labelTileCache.set(key, img);
@@ -1248,7 +1304,10 @@ export async function render(root, params = {}) {
     if (tileCache.has(key)) return tileCache.get(key);
     const img = new Image();
     img.decoding = "async";
-    img.onload = () => draw();
+    if (bootTilesActive) bootTilesNeeded += 1;
+    let bootCounted = false;
+    const countBoot = () => { if (!bootCounted) { bootCounted = true; bootTileDone(); } };
+    img.onload = () => { countBoot(); draw(); };
     img.onerror = () => {
       img.dataset.failed = "1";
       // A tile that failed while offline should get another chance after the
@@ -1256,7 +1315,7 @@ export async function render(root, params = {}) {
       // The server also queues missing tiles in the background, so short
       // retries pick them up quickly once the fetch lands.
       const attempts = Number(img.dataset.retries || 0);
-      if (attempts >= 3) return;
+      if (attempts >= 3) { countBoot(); return; }
       img.dataset.retries = String(attempts + 1);
       const delay = [1200, 4000, 9000][attempts] || 9000;
       setTimeout(() => {
@@ -2720,7 +2779,22 @@ export async function render(root, params = {}) {
   if (coordNow && !hidePosition) readout.appendChild(h("div", { class: "tiny", text: coordNow.mgrs || "" }));
   resizeObs = new ResizeObserver(() => draw());
   resizeObs.observe(shell);
-  setTimeout(() => { if (!disposed) { draw(); updateReadout({ lat: view.lat, lon: view.lon }); } }, 40);
+  setTimeout(() => {
+    if (disposed) return;
+    draw();
+    updateReadout({ lat: view.lat, lon: view.lon });
+    if (bootTilesActive && bootTilesNeeded === 0) {
+      bootTilesActive = false;
+      boot.setProgress(100, "Map ready");
+      setTimeout(() => { if (boot.isConnected) boot.remove(); }, 250);
+    }
+  }, 40);
+  setTimeout(() => {
+    if (!bootTilesActive || !boot.isConnected) return;
+    bootTilesActive = false;
+    boot.setProgress(100, "Map ready");
+    setTimeout(() => { if (boot.isConnected) boot.remove(); }, 250);
+  }, 12000);
   scheduleLive();
   if (params.download && !hidePosition) {
     setTimeout(() => { if (!disposed) openDownloadDialog(); }, 400);

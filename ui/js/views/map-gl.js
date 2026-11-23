@@ -191,27 +191,51 @@ function destination(lon, lat, bearingDeg, distKm) {
 }
 
 function mapLoadingPage({ kicker = "COMMAND // TERRAIN", title = "Preparing map", desc = "", status = "Loading map data" } = {}) {
-  return h("div", { class: "map-loading-page" },
+  const statusText = h("span", { text: status });
+  const pctText = h("strong", { text: "0%" });
+  const barFill = h("div", { class: "map-loading-bar-fill indeterminate" });
+  const bar = h("div", { class: "map-loading-bar" }, barFill);
+  const el = h("div", { class: "map-loading-page" },
     h("div", { class: "map-loading-card" },
       h("div", { class: "map-loading-kicker", text: kicker }),
       h("h2", { class: "map-loading-title", text: title }),
       h("p", { class: "map-loading-desc", text: desc }),
-      h("div", { class: "map-loading-status" }, h("span", { class: "spinner" }), h("span", { text: status })),
+      h("div", { class: "map-loading-status" }, h("span", { class: "spinner" }), statusText),
+      h("div", { class: "map-loading-bar-wrap" },
+        h("div", { class: "map-loading-bar-head" }, h("span", { text: "Map startup" }), pctText),
+        bar,
+      ),
       h("div", { class: "map-loading-meta" },
         h("div", {}, "Large offline tile caches ", h("span", { text: "can take a minute or two to index and warm up on first load." })),
         h("div", {}, "USB or slow storage ", h("span", { text: "may add a little extra time — the map will appear as soon as it’s ready." })),
       ),
     ),
   );
+  el.setProgress = (pct, text) => {
+    if (text) statusText.textContent = text;
+    if (pct == null || !Number.isFinite(Number(pct))) {
+      pctText.textContent = "…";
+      barFill.classList.add("indeterminate");
+      barFill.style.width = "35%";
+      return;
+    }
+    const clamped = Math.max(0, Math.min(100, Math.round(Number(pct))));
+    pctText.textContent = `${clamped}%`;
+    barFill.classList.remove("indeterminate");
+    barFill.style.width = `${clamped}%`;
+  };
+  return el;
 }
 
 export async function render(root, params = {}) {
-  root.replaceChildren(mapLoadingPage({
+  const boot = mapLoadingPage({
     kicker: "COMMAND // TERRAIN (GL)",
     title: "Preparing your 3D map",
     desc: "Loading the local basemap, terrain, cached intelligence, and map layers. Everything stays local on this device.",
     status: "Initialising 3D map",
-  }));
+  });
+  root.replaceChildren(boot);
+  boot.setProgress(8, "Initialising 3D map");
   const settings = store.settings || {};
   const homeLat = Number.isFinite(Number(settings.lat)) ? Number(settings.lat) : 39.8283;
   const homeLon = Number.isFinite(Number(settings.lon)) ? Number(settings.lon) : -98.5795;
@@ -230,26 +254,33 @@ export async function render(root, params = {}) {
   const glZoom = hasLinkZoom ? Math.max(-2, Math.min(18, linkZoom)) : 3.5;
   let intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud, mapLayers, cacheStatus;
   let statusBox = null, coordBox = null;
+  boot.setProgress(20, "Fetching map data and overlays");
   try {
+    let fetchDone = 0;
+    const fetchTotal = 10;
+    const tickFetch = (msg) => { fetchDone += 1; boot.setProgress(20 + Math.round((fetchDone / fetchTotal) * 35), msg); };
     [intel, waypoints, tracks, demStatus, overlayStatus, overlayWind, overlayRain, overlayCloud, mapLayers, cacheStatus] = await Promise.all([
-      api.get("/api/map/intel").catch(() => null),
-      api.get("/api/records/waypoints?limit=2000").then(r=>r.items||[]).catch(() => []),
-      api.get("/api/records/tracks?limit=500").then(r=>r.items||[]).catch(() => []),
-      api.get("/api/map/dem/status").catch(() => ({ available:false })),
-      api.get("/api/map/overlays/status").catch(() => ({ overlays:[] })),
-      api.get("/api/map/overlays/wind").catch(() => null),
-      api.get("/api/map/overlays/rain").catch(() => null),
-      api.get("/api/map/overlays/cloud").catch(() => null),
-      api.get("/api/map/layers").catch(() => null),
-      api.get("/api/map/cache/status").catch(() => null),
+      api.get("/api/map/intel").catch(() => null).then((r) => { tickFetch("Intelligence loaded"); return r; }),
+      api.get("/api/records/waypoints?limit=2000").then(r=>r.items||[]).catch(() => []).then((r) => { tickFetch("Waypoints loaded"); return r; }),
+      api.get("/api/records/tracks?limit=500").then(r=>r.items||[]).catch(() => []).then((r) => { tickFetch("Tracks loaded"); return r; }),
+      api.get("/api/map/dem/status").catch(() => ({ available:false })).then((r) => { tickFetch("DEM status loaded"); return r; }),
+      api.get("/api/map/overlays/status").catch(() => ({ overlays:[] })).then((r) => { tickFetch("Overlay status loaded"); return r; }),
+      api.get("/api/map/overlays/wind").catch(() => null).then((r) => { tickFetch("Wind overlay loaded"); return r; }),
+      api.get("/api/map/overlays/rain").catch(() => null).then((r) => { tickFetch("Rain overlay loaded"); return r; }),
+      api.get("/api/map/overlays/cloud").catch(() => null).then((r) => { tickFetch("Cloud overlay loaded"); return r; }),
+      api.get("/api/map/layers").catch(() => null).then((r) => { tickFetch("Map layers loaded"); return r; }),
+      api.get("/api/map/cache/status").catch(() => null).then((r) => { tickFetch("Cache status loaded"); return r; }),
     ]);
   } catch (err) { root.replaceChildren(h("div", { class: "callout danger", text: err.message })); return; }
+  boot.setProgress(55, "Loading WebGL engine");
 
   let maplibregl;
   try { maplibregl = await loadMapLibre(); } catch (err) { root.replaceChildren(h("div", { class: "callout danger", text: err.message })); return; }
+  boot.setProgress(72, "Preparing map style and sources");
 
   const state = { maxAgeHours: 0, show: { hazards:true, conflict:true, aircraft:true, sats:true, satsOverheadOnly:false, maritime:true, cables:true, cctv:true, cctvAlpr:true, wind:false, rain:false, cloud:false, terrain: !!demStatus?.available, waypoints:true, tracks:true, daynight:true, home:!hidePosition, scale:true }, live: true, lastRefresh: Date.now() };
   let map = null, popup = null, scaleControl = null, daynightTimer = null, glLiveTimer = null, liveTimer = null, freshTimer = null, inspector = null;
+  let disposed = false;
   let movingFetchedAt = Date.now();
   let movingTimer = null, movingPollTimer = null;
   let mapStyle = null;
@@ -282,7 +313,11 @@ export async function render(root, params = {}) {
   let intelAlpr = { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };
   let alprFetchTimer = null, alprQueryKey = "";
 
+  boot.setProgress(85, "Building 3D map interface");
   root.replaceChildren();
+  root.style.position = "relative";
+  boot.classList.add("map-loading-overlay");
+  root.appendChild(boot);
   root.appendChild(pageHead({
     kicker: "COMMAND // TERRAIN (GL)",
     title: "Map & Terrain — 3D/GL",
@@ -459,6 +494,49 @@ export async function render(root, params = {}) {
       }
     }
   }
+  let glBootActive = true;
+  const glBootTiles = new Set();
+  const glBootDone = new Set();
+  let glBootFallback = null;
+  const finishGlBoot = (status = "3D map ready") => {
+    if (!glBootActive || disposed) return;
+    glBootActive = false;
+    if (glBootFallback) { clearTimeout(glBootFallback); glBootFallback = null; }
+    boot.setProgress(100, status);
+    setTimeout(() => { if (boot.isConnected) boot.remove(); }, 250);
+  };
+  const updateGlBoot = () => {
+    if (!glBootActive || disposed) return;
+    const total = glBootTiles.size;
+    const done = glBootDone.size;
+    if (total <= 0) {
+      boot.setProgress(90, "Waiting for map tiles…");
+      return;
+    }
+    const pct = 90 + Math.min(9, Math.floor((done / total) * 9));
+    boot.setProgress(pct, `Loading map tiles (${Math.min(done, total)}/${total})`);
+  };
+  map.on("dataloading", (e) => {
+    if (!glBootActive || !e.tile) return;
+    glBootTiles.add(e.tile.uid);
+    updateGlBoot();
+  });
+  const onGlTileData = (e) => {
+    if (!glBootActive || !e.tile) return;
+    glBootTiles.add(e.tile.uid);
+    if (e.dataType === "source") glBootDone.add(e.tile.uid);
+    updateGlBoot();
+  };
+  map.on("data", onGlTileData);
+  map.on("sourcedata", onGlTileData);
+  map.on("idle", () => {
+    if (!glBootActive) return;
+    finishGlBoot("3D map ready");
+  });
+  glBootFallback = setTimeout(() => {
+    if (!glBootActive) return;
+    finishGlBoot("3D map ready");
+  }, 15000);
   let vectorTileSeen = false;
   let watchdogShown = false;
   let labelsStripped = false;
@@ -1076,6 +1154,7 @@ export async function render(root, params = {}) {
   });
   updateStats();
   map.on('load', () => {
+    if (glBootActive) boot.setProgress(90, "Style loaded, rendering tiles…");
     if (spaceBackground) applySpaceBackground(map, lightTheme);
     try { if (typeof map.setProjection === 'function') map.setProjection({ type:'globe' }); } catch (e) { console.warn('Initial globe projection failed', e); }
     // The layout can settle after the style's first frame; resize/repaint so
@@ -1260,5 +1339,5 @@ export async function render(root, params = {}) {
     refreshAlpr(true);
   });
 
-  return () => { try { clearInterval(daynightTimer); clearInterval(glLiveTimer); clearInterval(liveTimer); clearInterval(freshTimer); clearInterval(movingTimer); clearInterval(movingPollTimer); clearInterval(glRepaintTimer); clearTimeout(alprFetchTimer); glResize?.disconnect(); popup?.remove(); map?.remove(); } catch {} };
+  return () => { disposed = true; try { clearInterval(daynightTimer); clearInterval(glLiveTimer); clearInterval(liveTimer); clearInterval(freshTimer); clearInterval(movingTimer); clearInterval(movingPollTimer); clearInterval(glRepaintTimer); clearTimeout(alprFetchTimer); glResize?.disconnect(); popup?.remove(); map?.remove(); } catch {} };
 }
