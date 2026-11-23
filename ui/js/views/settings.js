@@ -2250,7 +2250,17 @@ export async function render(root) {
       ? `${fmtSize(logical)} data, ${fmtSize(disk)} on disk`
       : `${fmtSize(logical)}`;
     return new Promise((resolve) => {
-      const m = modal({
+      let settled = false;
+      let m = null;
+      // Resolve before closing: modal.close() fires onClose synchronously, so
+      // closing first would always resolve as "cancel" and never switch.
+      const finish = (choice) => {
+        if (settled) return;
+        settled = true;
+        resolve(choice);
+        m?.close();
+      };
+      m = modal({
         title: "Change tile cache location",
         sub: "Existing offline tiles",
         wide: true,
@@ -2258,11 +2268,11 @@ export async function render(root) {
           h("div", { class: "small", text: `The current cache contains ${Number(tiles).toLocaleString()} tiles (${sizeText}) at ${oldPath}.` }),
           h("div", { class: "small", text: `Copy them to ${newPath || "the app folder"} before switching? Copying is safer; switching without copying leaves the old tiles unused.` })),
         actions: [
-          btn("CANCEL", { tone: "ghost", onClick: () => { m.close(); resolve("cancel"); } }),
-          btn("SWITCH ONLY", { onClick: () => { m.close(); resolve("switch"); } }),
-          btn("COPY & SWITCH", { tone: "primary", onClick: () => { m.close(); resolve("copy"); } }),
+          btn("CANCEL", { tone: "ghost", onClick: () => finish("cancel") }),
+          btn("SWITCH ONLY", { onClick: () => finish("switch") }),
+          btn("COPY & SWITCH", { tone: "primary", onClick: () => finish("copy") }),
         ],
-        onClose: () => resolve("cancel"),
+        onClose: () => { if (!settled) { settled = true; resolve("cancel"); } },
       });
     });
   }
