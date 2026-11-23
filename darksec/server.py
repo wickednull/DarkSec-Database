@@ -5297,12 +5297,15 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                     "maxZoom": max_zoom,
                     "attribution": attr,
                 })
-        cache_full = tilecache.cache_stats()
+        # Never block the map on a full cache count. Layers are exposed from a
+        # cheap directory check; counts arrive in the background and are only
+        # used for labels/sizes.
+        cache_full = tilecache.cache_stats(wait=False)
         stats = {s["source"]: s for s in cache_full.get("sources", [])}
         mb = mbtiles.describe_source()
-        for src in tilecache.sources_info():
+        for src in tilecache.sources_info(stats, wait=False):
             s = stats.get(src["id"], {})
-            if not s.get("tile_count"):
+            if not s.get("tile_count") and not tilecache.source_has_tiles(src["id"]):
                 continue
             layers.append({
                 "id": src["id"],
@@ -5342,6 +5345,8 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
                 "disk_mb": cache_full.get("disk_mb", 0),
                 "total_bytes": cache_full.get("total_bytes", 0),
                 "disk_bytes": cache_full.get("disk_bytes", 0),
+                "sources": cache_full.get("sources", []),
+                "pending": bool(cache_full.get("pending")),
             },
         }
 
@@ -5629,7 +5634,7 @@ def create_app(port: int = 0, token: str | None = None, open_browser: bool = Fal
     @app.get("/api/map/cache/sources")
     def cache_sources():
         from . import tilecache
-        return {"sources": tilecache.sources_info(), "default": tilecache.DEFAULT_SOURCE,
+        return {"sources": tilecache.sources_info(wait=False), "default": tilecache.DEFAULT_SOURCE,
                 "online": tilecache.is_online()}
 
     @app.get("/api/map/cache/check")

@@ -1173,7 +1173,30 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _stats_cache: dict[tuple, tuple[float, dict]] = {}
 _stats_lock = threading.Lock()
 _stats_refreshing: set[tuple] = set()
+_scan_progress: dict[tuple, dict] = {}
 STATS_TTL = 5.0
+
+
+def _scan_progress_update(key, **fields) -> None:
+    """Publish live scan counters for the Settings cache progress bar."""
+    if key is None:
+        return
+    with _stats_lock:
+        progress = _scan_progress.get(key)
+        if progress is None:
+            progress = {
+                "active": True,
+                "phase": "scanning",
+                "current_source": None,
+                "source_index": 0,
+                "sources_total": 0,
+                "sources_done": 0,
+                "files": 0,
+                "bytes": 0,
+                "disk_bytes": 0,
+            }
+            _scan_progress[key] = progress
+        progress.update(fields)
 
 
 def _invalidate_stats() -> None:
@@ -1208,7 +1231,7 @@ def _walk_images(base: Path):
                 continue
 
 
-def _compute_stats(source: Optional[str] = None) -> dict:
+def _compute_stats(source: Optional[str] = None, progress_key=None) -> dict:
     if source:
         sources = [source]
     else:
@@ -1224,11 +1247,17 @@ def _compute_stats(source: Optional[str] = None) -> dict:
                     sources.append(name)
         except OSError:
             pass
+    _scan_progress_update(progress_key, sources_total=len(sources), sources_done=0,
+                          current_source=None, source_index=0,
+                          files=0, bytes=0, disk_bytes=0)
     out = []
     total_tiles = 0
     total_bytes = 0
     total_disk_bytes = 0
-    for src in sources:
+    seen_files = 0
+    seen_bytes = 0
+    seen_disk = 0
+    for index, src in enumerate(sources, start=1):
         meta = TILE_SOURCES.get(src, {})
         base = cache_root() / _safe(src)
         tiles = 0
@@ -1240,9 +1269,19 @@ def _compute_stats(source: Optional[str] = None) -> dict:
                 tiles += 1
                 size += n_bytes
                 disk_size += n_disk
+                seen_files += 1
+                seen_bytes += n_bytes
+                seen_disk += n_disk
+                if progress_key is not None and (seen_files % 64) == 0:
+                    _scan_progress_update(progress_key, files=seen_files, bytes=seen_bytes,
+                                          disk_bytes=seen_disk, current_source=src,
+                                          source_index=index)
                 if z is not None:
                     min_z = min(min_z, z)
                     max_z = max(max_z, z)
+        _scan_progress_update(progress_key, files=seen_files, bytes=seen_bytes,
+                              disk_bytes=seen_disk, current_source=src,
+                              source_index=index, sources_done=index)
         total_tiles += tiles
         total_bytes += size
         total_disk_bytes += disk_size
@@ -1279,19 +1318,49 @@ def _compute_stats(source: Optional[str] = None) -> dict:
 
 def _refresh_stats(key: tuple, source: Optional[str]) -> None:
     try:
-        result = _compute_stats(source)
+        result = _compute_stats(source, progress_key=key)
         with _stats_lock:
             _stats_cache[key] = (time.monotonic(), copy.deepcopy(result))
     except Exception:
         pass
     finally:
         with _stats_lock:
+            _scan_progress.pop(key, None)
             _stats_refreshing.discard(key)
 
 
-def _pending_stats(source: Optional[str] = None) -> dict:
+def source_has_tiles(source: str) -> bool:
+    """Cheap presence check so layers work before the full cache count ends."""
+    base = cache_root() / _safe(source)
+    try:
+        with os.scandir(base) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        with os.scandir(entry.path) as sub:
+                            for _ in sub:
+                                return True
+                    elif (entry.is_file(follow_symlinks=False)
+                          and os.path.splitext(entry.name)[1].lower() in _IMAGE_SUFFIXES):
+                        return True
+                except OSError:
+                    continue
+    except OSError:
+        return False
+    return False
+
+
+def _pending_stats(source: Optional[str] = None, key=None) -> dict:
     """Fast placeholder returned while a background cache scan is running."""
     info = disk_info()
+    has_tiles = source_has_tiles(source) if source else any(
+        source_has_tiles(src) for src in TILE_SOURCES)
+    progress = None
+    if key is not None:
+        with _stats_lock:
+            live = _scan_progress.get(key)
+            if live is not None:
+                progress = copy.deepcopy(live)
     result = {
         "tile_count": 0,
         "total_bytes": 0,
@@ -1303,6 +1372,8 @@ def _pending_stats(source: Optional[str] = None) -> dict:
         "free_gb": info["free_gb"],
         "sources": [],
         "pending": True,
+        "has_tiles": has_tiles,
+        "progress": progress,
     }
     if source:
         meta = TILE_SOURCES.get(source, {})
@@ -1347,7 +1418,7 @@ def cache_stats(source: Optional[str] = None, wait: bool = True) -> dict:
             # Stale numbers are better than a flickering "counting…" label;
             # the background refresh updates them shortly.
             return copy.deepcopy(cached[1])
-        return _pending_stats(source)
+        return _pending_stats(source, key)
     if cached is not None:
         if start_refresh:
             threading.Thread(target=_refresh_stats, args=(key, source), daemon=True,
@@ -1370,14 +1441,15 @@ def cache_stats(source: Optional[str] = None, wait: bool = True) -> dict:
                 _stats_refreshing.add(key)
                 start_refresh = True
         if not start_refresh:
-            return _pending_stats(source)
+            return _pending_stats(source, key)
     try:
-        result = _compute_stats(source)
+        result = _compute_stats(source, progress_key=key)
         with _stats_lock:
             _stats_cache[key] = (time.monotonic(), copy.deepcopy(result))
         return result
     finally:
         with _stats_lock:
+            _scan_progress.pop(key, None)
             _stats_refreshing.discard(key)
 
 
@@ -1463,9 +1535,14 @@ def verify_cache(source: Optional[str] = None, fix: bool = True) -> dict:
     }
 
 
-def sources_info() -> list[dict]:
-    """Provider catalogue plus cached counts, for the source picker."""
-    stats = {s["source"]: s for s in cache_stats()["sources"]}
+def sources_info(stats: Optional[dict] = None, wait: bool = True) -> list[dict]:
+    """Provider catalogue plus cached counts, for the source picker.
+
+    Pass ``stats`` from an earlier ``cache_stats`` call to share one scan, or
+    ``wait=False`` to keep the picker usable while a large cache counts.
+    """
+    if stats is None:
+        stats = {s["source"]: s for s in cache_stats(wait=wait)["sources"]}
     out = []
     for key, src in TILE_SOURCES.items():
         if src.get("overlay"):

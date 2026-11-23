@@ -280,6 +280,8 @@ export async function render(root, params = {}) {
     disk_mb: Number(layers.cache?.disk_mb) || 0,
     sources: Array.isArray(layers.cache?.sources) ? layers.cache.sources : [],
   };
+  let cachePending = !!layers.cache?.pending;
+  let cacheRefreshTimer = null;
   let activeSource = layers.activeSource || "esri_imagery";
   let cacheStatusEl = null;
   let labelStatusEl = null;
@@ -672,6 +674,7 @@ export async function render(root, params = {}) {
   }
 
   function cacheStatusText() {
+    if (cachePending && !cacheInfo.tile_count) return "Offline tile cache ready";
     if (!cacheInfo.tile_count) return "No offline tiles stored";
     return `${cacheInfo.tile_count.toLocaleString()} tiles · ${cacheSizeText(cacheInfo)}`;
   }
@@ -690,6 +693,11 @@ export async function render(root, params = {}) {
     }
     const places = labelCacheCount("esri_labels_places");
     const roads = labelCacheCount("esri_labels_roads");
+    if (cachePending && places <= 0 && roads <= 0) {
+      labelStatusEl.textContent = "Label overlay cache: checking available tiles…";
+      labelStatusEl.className = "tiny muted";
+      return;
+    }
     if (places > 0 || roads > 0) {
       labelStatusEl.textContent = mapOnline
         ? `Label overlays cached: ${places.toLocaleString()} place · ${roads.toLocaleString()} road tiles`
@@ -763,13 +771,23 @@ export async function render(root, params = {}) {
 
   async function refreshCache() {
     try {
-      const st = await api.get("/api/map/cache/status");
-      cacheInfo = {
-        tile_count: st.tile_count || 0,
-        total_mb: st.total_mb || 0,
-        disk_mb: st.disk_mb || 0,
-        sources: Array.isArray(st.sources) ? st.sources : [],
-      };
+      const st = await api.get("/api/map/cache/status?wait=0");
+      cachePending = !!st.pending;
+      if (!cachePending) {
+        cacheInfo = {
+          tile_count: st.tile_count || 0,
+          total_mb: st.total_mb || 0,
+          disk_mb: st.disk_mb || 0,
+          sources: Array.isArray(st.sources) ? st.sources : [],
+        };
+      }
+      if (cachePending) {
+        if (cacheRefreshTimer) clearTimeout(cacheRefreshTimer);
+        cacheRefreshTimer = setTimeout(() => {
+          cacheRefreshTimer = null;
+          if (!disposed) refreshCache();
+        }, 2500);
+      }
       if (cacheStatusEl) cacheStatusEl.textContent = cacheStatusText();
       updateLabelStatus();
       const l = await api.get("/api/map/layers").catch(() => null);
@@ -1133,7 +1151,7 @@ export async function render(root, params = {}) {
       });
     }
     let lastEstimate = null;
-    api.get("/api/map/cache/status").then((st) => {
+    api.get("/api/map/cache/status?wait=0").then((st) => {
       cacheTarget = st;
       const free = st.free_gb != null ? `${st.free_gb} GB free` : "free space unknown";
       targetEl.textContent = `Destination: ${st.path} · ${free}`;
@@ -2947,6 +2965,7 @@ export async function render(root, params = {}) {
     if (movingPollTimer) clearInterval(movingPollTimer);
     if (downloadJobsTimer) clearInterval(downloadJobsTimer);
     if (alprFetchTimer) clearTimeout(alprFetchTimer);
+    if (cacheRefreshTimer) clearTimeout(cacheRefreshTimer);
     clearTimeout(readoutTimer);
     if (resizeObs) resizeObs.disconnect();
     document.removeEventListener("keydown", onKey);

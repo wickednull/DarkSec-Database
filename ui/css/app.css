@@ -787,6 +787,10 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 .map-shell canvas.hover-intel { cursor: pointer; }
 .progress-track { height: 6px; border: 1px solid var(--line); background: rgba(255, 255, 255, .03); overflow: hidden; }
 .progress-track .bar { height: 100%; background: var(--acc); transition: width .25s linear; }
+.progress-track .bar.indeterminate {
+  width: 35%;
+  animation: mapLoadSlide 1.2s ease-in-out infinite;
+}
 .map-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 9px; color: var(--muted); padding: 8px 10px; border-top: 1px solid var(--line); }
 .map-legend span { display: inline-flex; align-items: center; gap: 4px; }
 .map-legend i { width: 8px; height: 8px; display: inline-block; }

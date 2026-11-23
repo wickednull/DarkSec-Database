@@ -531,7 +531,7 @@ export async function render(root) {
   const mapAutoPack = checkbox("Cache viewed map areas automatically while online", settings.map_auto_pack !== false);
   const mapSpace = checkbox("Starfield space background in the 3D globe", settings.map_space_background !== false);
   const mapLabels = checkbox("Place/street labels over satellite imagery", settings.map_labels_overlay !== false);
-  const cacheSummary = h("div", { class: "col gap-4" }, loading("Loading cache…"));
+  const cacheSummary = h("div", { class: "col gap-4" });
   const cacheRefresh = btn("REFRESH CACHE INFO", { size: "sm", icon: "refresh", onClick: () => loadCacheSummary() });
   const cacheVerify = btn("VERIFY & REPAIR", { size: "sm", icon: "check", onClick: verifyTileCache });
   const cacheCopy = btn("COPY TO USB", { size: "sm", icon: "copy", onClick: copyCacheToUsb });
@@ -1054,15 +1054,19 @@ export async function render(root) {
     };
     if (nextCache !== oldCache) {
       let stats = null;
-      try { stats = await api.get("/api/map/cache/status"); } catch { stats = null; }
-      if (stats && Number(stats.tile_count) > 0) {
+      // Never wait for a full cache inventory here; the switch itself only
+      // needs to know whether anything is stored.
+      try { stats = await api.get("/api/map/cache/status?wait=0"); } catch { stats = null; }
+      const hasTiles = stats ? (stats.pending ? !!stats.has_tiles : Number(stats.tile_count) > 0) : false;
+      if (hasTiles) {
         let destination = nextCache;
         if (!destination) {
           const locations = await api.get("/api/map/cache/locations").catch(() => null);
           destination = (locations?.items || []).find((item) => item.default)?.path || "";
         }
         const choice = await cacheSwitchChoice(stats.path || oldCache || "the current folder",
-          destination, stats.tile_count, stats.total_mb, stats.disk_mb);
+          destination, stats.pending ? null : stats.tile_count,
+          stats.pending ? 0 : stats.total_mb, stats.pending ? 0 : stats.disk_mb);
         if (choice === "cancel") {
           toast("Tile cache location unchanged", "warn");
           return;
@@ -1074,7 +1078,7 @@ export async function render(root) {
           }
           try {
             await copyCacheTo(destination);
-            toast(`Copied ${Number(stats.tile_count).toLocaleString()} tiles`, "success");
+            toast(stats.pending ? "Copy finished" : `Copied ${Number(stats.tile_count).toLocaleString()} tiles`, "success");
           } catch (err) {
             toast(`Copy failed: ${err.message || err}`, "error");
             return;
@@ -2013,7 +2017,6 @@ export async function render(root) {
         try {
           const st = await api.get("/api/map/cache/status?wait=0");
           if (st?.pending) {
-            extra = " · counting cache…";
             if (cacheStatusPollTimer) clearTimeout(cacheStatusPollTimer);
             cacheStatusPollTimer = setTimeout(() => {
               cacheStatusPollTimer = null;
@@ -2083,9 +2086,10 @@ export async function render(root) {
 
   async function transferCacheToUsb() {
     let st = null;
-    try { st = await api.get("/api/map/cache/status"); }
+    try { st = await api.get("/api/map/cache/status?wait=0"); }
     catch (err) { toast(err.message || "Could not read tile cache", "error"); return; }
-    if (!Number(st?.tile_count)) {
+    const pending = !!st?.pending;
+    if (pending ? !st.has_tiles : !Number(st?.tile_count)) {
       toast("No cached tiles to transfer", "warn");
       return;
     }
@@ -2093,11 +2097,12 @@ export async function render(root) {
     try { out = await api.get("/api/map/cache/locations"); }
     catch (err) { toast(err.message || "Could not scan USB folders", "error"); return; }
     const current = String(st.path || "");
+    const countText = pending ? "Existing cached tiles" : `${Number(st.tile_count).toLocaleString()} tiles · ${st.total_mb || 0} MB`;
     const items = (out.items || []).filter((item) =>
       item.writable && !item.default && String(item.path) !== current);
     const body = h("div", { class: "col gap-8" });
     body.appendChild(h("div", { class: "small", text:
-      `Current cache: ${Number(st.tile_count).toLocaleString()} tiles · ${st.total_mb || 0} MB at ${current}. ` +
+      `Current cache: ${countText} at ${current}. ` +
       "Move it to a USB folder to free the internal drive. Files are copied, size-checked, then removed from the old cache." }));
     const list = h("div", { class: "list" });
     if (!items.length) {
@@ -2113,7 +2118,7 @@ export async function render(root) {
           btn("MOVE HERE", { size: "sm", tone: "primary", icon: "upload", onClick: async () => {
             const ok = await confirmDialog({
               title: "Move tile cache to USB",
-              message: `Move ${Number(st.tile_count).toLocaleString()} tiles (${st.total_mb || 0} MB) from ${current} to ${item.path}? ` +
+              message: `Move ${pending ? "existing cached tiles" : `${Number(st.tile_count).toLocaleString()} tiles (${st.total_mb || 0} MB)`} from ${current} to ${item.path}? ` +
                 "The active cache switches only after every file copies successfully.",
               confirmText: "MOVE", danger: true,
             });
@@ -2146,9 +2151,10 @@ export async function render(root) {
 
   async function copyCacheToUsb() {
     let st = null;
-    try { st = await api.get("/api/map/cache/status"); }
+    try { st = await api.get("/api/map/cache/status?wait=0"); }
     catch (err) { toast(err.message || "Could not read tile cache", "error"); return; }
-    if (!Number(st?.tile_count)) {
+    const pending = !!st?.pending;
+    if (pending ? !st.has_tiles : !Number(st?.tile_count)) {
       toast("No cached tiles to copy", "warn");
       return;
     }
@@ -2156,11 +2162,12 @@ export async function render(root) {
     try { out = await api.get("/api/map/cache/locations"); }
     catch (err) { toast(err.message || "Could not scan USB folders", "error"); return; }
     const current = String(st.path || "");
+    const countText = pending ? "Existing cached tiles" : `${Number(st.tile_count).toLocaleString()} tiles · ${st.total_mb || 0} MB`;
     const items = (out.items || []).filter((item) =>
       item.writable && !item.default && String(item.path) !== current);
     const body = h("div", { class: "col gap-8" });
     body.appendChild(h("div", { class: "small", text:
-      `Current cache: ${Number(st.tile_count).toLocaleString()} tiles · ${st.total_mb || 0} MB at ${current}. ` +
+      `Current cache: ${countText} at ${current}. ` +
       "Copy it to a USB folder as a backup. The current cache stays active and is not changed." }));
     const list = h("div", { class: "list" });
     if (!items.length) {
@@ -2176,7 +2183,7 @@ export async function render(root) {
           btn("COPY HERE", { size: "sm", tone: "primary", icon: "copy", onClick: async () => {
             const ok = await confirmDialog({
               title: "Copy tile cache to USB",
-              message: `Copy ${Number(st.tile_count).toLocaleString()} tiles (${st.total_mb || 0} MB) from ${current} to ${item.path}? ` +
+              message: `Copy ${pending ? "existing cached tiles" : `${Number(st.tile_count).toLocaleString()} tiles (${st.total_mb || 0} MB)`} from ${current} to ${item.path}? ` +
                 "The current cache stays in place. Files already present and the same size are skipped.",
               confirmText: "COPY",
             });
@@ -2260,6 +2267,9 @@ export async function render(root) {
     const sizeText = disk > 0 && Math.abs(disk - logical) > Math.max(64, logical * 0.15)
       ? `${fmtSize(logical)} data, ${fmtSize(disk)} on disk`
       : `${fmtSize(logical)}`;
+    const countText = tiles == null || !Number.isFinite(Number(tiles)) || Number(tiles) <= 0
+      ? "existing cached tiles"
+      : `${Number(tiles).toLocaleString()} tiles (${sizeText})`;
     return new Promise((resolve) => {
       let settled = false;
       let m = null;
@@ -2276,7 +2286,7 @@ export async function render(root) {
         sub: "Existing offline tiles",
         wide: true,
         body: h("div", { class: "col gap-8" },
-          h("div", { class: "small", text: `The current cache contains ${Number(tiles).toLocaleString()} tiles (${sizeText}) at ${oldPath}.` }),
+          h("div", { class: "small", text: `The current cache contains ${countText} at ${oldPath}.` }),
           h("div", { class: "small", text: `Copy them to ${newPath || "the app folder"} before switching? Copying is safer; switching without copying leaves the old tiles unused.` })),
         actions: [
           btn("CANCEL", { tone: "ghost", onClick: () => finish("cancel") }),
@@ -2300,18 +2310,37 @@ export async function render(root) {
 
   async function loadCacheSummary() {
     if (cachePollTimer) { clearTimeout(cachePollTimer); cachePollTimer = null; }
-    if (!cacheSummary.childNodes.length) cacheSummary.replaceChildren(loading("Loading cache…"));
     try {
       const st = await api.get("/api/map/cache/status?wait=0");
       if (disposed) return;
       if (st?.pending) {
+        // The switch and map are already usable; this bar reports the
+        // background indexing work with real file/byte/source counters.
+        const free = st.free_gb != null ? `${st.free_gb} GB free` : "free space unknown";
+        const p = st.progress || {};
+        const totalSources = Number(p.sources_total) || 0;
+        const doneSources = Number(p.sources_done) || 0;
+        const sourceIndex = Number(p.source_index) || 0;
+        const files = Number(p.files) || 0;
+        const bytes = Number(p.bytes) || 0;
+        const determinate = totalSources > 1;
+        const pct = determinate ? Math.min(99, Math.round((doneSources / totalSources) * 100)) : null;
+        const fill = h("div", { class: determinate ? "bar" : "bar indeterminate" });
+        if (determinate) fill.style.width = `${pct}%`;
+        const sourcePart = p.current_source ? ` · ${p.current_source}` : "";
+        const countPart = sourceIndex && totalSources ? ` · source ${sourceIndex}/${totalSources}` : "";
+        const info = files > 0
+          ? `${files.toLocaleString()} files · ${fmt.bytes(bytes)}${countPart}${sourcePart}`
+          : "Starting cache index…";
         cacheSummary.replaceChildren(
-          h("div", { class: "row gap-6 items-center" }, h("span", { class: "spinner" }), h("div", { class: "tiny muted", text: "Counting cached tiles…" })),
-          h("div", { class: "tiny muted", text: "Large USB caches can take a little while. The rest of Settings stays usable." }));
+          h("div", { class: "tiny muted wrap-any", text: `${free} · ${st.path || "unknown path"}` }),
+          h("div", { class: "progress-track" }, fill),
+          h("div", { class: "tiny muted", text: `Indexing cached tiles: ${info}` }),
+        );
         cachePollTimer = setTimeout(() => {
           cachePollTimer = null;
           if (!disposed) loadCacheSummary();
-        }, 1500);
+        }, 700);
         return;
       }
       cacheSummary.replaceChildren();

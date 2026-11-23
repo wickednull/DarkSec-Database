@@ -269,7 +269,7 @@ export async function render(root, params = {}) {
       api.get("/api/map/overlays/rain").catch(() => null).then((r) => { tickFetch("Rain overlay loaded"); return r; }),
       api.get("/api/map/overlays/cloud").catch(() => null).then((r) => { tickFetch("Cloud overlay loaded"); return r; }),
       api.get("/api/map/layers").catch(() => null).then((r) => { tickFetch("Map layers loaded"); return r; }),
-      api.get("/api/map/cache/status").catch(() => null).then((r) => { tickFetch("Cache status loaded"); return r; }),
+      api.get("/api/map/cache/status?wait=0").catch(() => null).then((r) => { tickFetch("Cache status loaded"); return r; }),
     ]);
   } catch (err) { root.replaceChildren(h("div", { class: "callout danger", text: err.message })); return; }
   boot.setProgress(55, "Loading WebGL engine");
@@ -307,7 +307,8 @@ export async function render(root, params = {}) {
     const src = (cacheStatus?.sources || []).find((s) => s.source === id || s.id === id);
     return Number(src?.tile_count || 0);
   };
-  const missingLabelOverlays = rasterLabelOverlays
+  const cachePending = !!cacheStatus?.pending;
+  const missingLabelOverlays = rasterLabelOverlays && !cachePending
     && labelCacheCount("esri_labels_places") <= 0
     && labelCacheCount("esri_labels_roads") <= 0;
   let intelAlpr = { mode: "points", points: [], clusters: [], in_view: 0, dataset_count: 0 };

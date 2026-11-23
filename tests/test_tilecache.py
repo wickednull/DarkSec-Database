@@ -136,6 +136,22 @@ def test_cache_clear_bumps_browser_generation(client, tmp_path, monkeypatch):
     assert second == first + 1
 
 
+def test_map_layers_exposes_cached_source_while_stats_pending(client, monkeypatch):
+    from darksec import tilecache
+
+    # The map must open without waiting for a full USB cache count: layers
+    # come from the cheap directory check and counts fill in later.
+    monkeypatch.setattr(tilecache, "cache_stats", lambda *a, **k: {
+        "tile_count": 0, "total_bytes": 0, "total_mb": 0,
+        "disk_bytes": 0, "disk_mb": 0, "sources": [], "pending": True,
+    })
+    monkeypatch.setattr(tilecache, "source_has_tiles", lambda src: src == "esri_imagery")
+
+    data = client.get("/api/map/layers").json()
+    assert data["cache"]["pending"] is True
+    assert "esri_imagery" in [layer["id"] for layer in data["raster"]]
+
+
 def test_fetched_tile_is_stored_under_lookup_extension(tmp_path, monkeypatch):
     from darksec import tilecache
 
@@ -453,6 +469,8 @@ def test_cache_stats_nowait_counts_in_background(monkeypatch, tmp_path):
     first = tilecache.cache_stats(wait=False)
     assert first.get("pending") is True
     assert first["tile_count"] == 0
+    assert first.get("has_tiles") is True
+    assert "progress" in first
 
     deadline = time.monotonic() + 5
     stats = first
