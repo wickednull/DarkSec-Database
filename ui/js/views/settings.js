@@ -2321,17 +2321,24 @@ export async function render(root) {
         const totalSources = Number(p.sources_total) || 0;
         const doneSources = Number(p.sources_done) || 0;
         const sourceIndex = Number(p.source_index) || 0;
-        const files = Number(p.files) || 0;
+        const filesDone = Number(p.files) || 0;
+        const filesTotal = Number(p.files_total) || 0;
+        const filesFound = Number(p.files_found) || 0;
         const bytes = Number(p.bytes) || 0;
-        const determinate = totalSources > 1;
-        const pct = determinate ? Math.min(99, Math.round((doneSources / totalSources) * 100)) : null;
+        const sizing = p.phase === "sizing" && filesTotal > 0;
+        const determinate = sizing || totalSources > 1;
+        const pct = sizing
+          ? Math.min(99, Math.floor((filesDone / filesTotal) * 100))
+          : (totalSources > 1 ? Math.min(99, Math.floor((doneSources / totalSources) * 100)) : null);
         const fill = h("div", { class: determinate ? "bar" : "bar indeterminate" });
         if (determinate) fill.style.width = `${pct}%`;
         const sourcePart = p.current_source ? ` · ${p.current_source}` : "";
         const countPart = sourceIndex && totalSources ? ` · source ${sourceIndex}/${totalSources}` : "";
-        const info = files > 0
-          ? `${files.toLocaleString()} files · ${fmt.bytes(bytes)}${countPart}${sourcePart}`
-          : "Starting cache index…";
+        const info = sizing
+          ? `${filesDone.toLocaleString()}/${filesTotal.toLocaleString()} files · ${fmt.bytes(bytes)}${countPart}${sourcePart}`
+          : filesFound > 0
+            ? `Preparing index · ${filesFound.toLocaleString()} files found${countPart}${sourcePart}`
+            : "Starting cache index…";
         cacheSummary.replaceChildren(
           h("div", { class: "tiny muted wrap-any", text: `${free} · ${st.path || "unknown path"}` }),
           h("div", { class: "progress-track" }, fill),

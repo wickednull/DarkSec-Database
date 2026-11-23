@@ -1206,8 +1206,8 @@ def _invalidate_stats() -> None:
             _stats_cache[key] = (0.0, data)
 
 
-def _walk_images(base: Path):
-    """Yield (zoom, size, allocated) for cached images without Path/rglob overhead."""
+def _iter_image_entries(base: Path):
+    """Yield (DirEntry, zoom) for cached images, cheap enough for a count pass."""
     stack = [(base, None)]
     while stack:
         directory, zoom = stack.pop()
@@ -1223,12 +1223,21 @@ def _walk_images(base: Path):
                     stack.append((Path(entry.path), z))
                 elif (entry.is_file(follow_symlinks=False)
                       and os.path.splitext(entry.name)[1].lower() in _IMAGE_SUFFIXES):
-                    st = entry.stat(follow_symlinks=False)
-                    allocated = getattr(st, "st_blocks", None)
-                    allocated_bytes = (allocated * 512) if allocated is not None else st.st_size
-                    yield zoom, st.st_size, allocated_bytes
+                    yield entry, zoom
             except OSError:
                 continue
+
+
+def _walk_images(base: Path):
+    """Yield (zoom, size, allocated) for cached images without Path/rglob overhead."""
+    for entry, zoom in _iter_image_entries(base):
+        try:
+            st = entry.stat(follow_symlinks=False)
+            allocated = getattr(st, "st_blocks", None)
+            allocated_bytes = (allocated * 512) if allocated is not None else st.st_size
+            yield zoom, st.st_size, allocated_bytes
+        except OSError:
+            continue
 
 
 def _compute_stats(source: Optional[str] = None, progress_key=None) -> dict:
@@ -1249,7 +1258,30 @@ def _compute_stats(source: Optional[str] = None, progress_key=None) -> dict:
             pass
     _scan_progress_update(progress_key, sources_total=len(sources), sources_done=0,
                           current_source=None, source_index=0,
-                          files=0, bytes=0, disk_bytes=0)
+                          files=0, bytes=0, disk_bytes=0,
+                          files_found=0, files_total=0, phase="enumerating")
+    files_total = 0
+    if progress_key is not None:
+        # A cheap first pass gets a real total, so the sizing pass can show a
+        # genuine percentage instead of an indeterminate bar.
+        found = 0
+        for index, src in enumerate(sources, start=1):
+            base = cache_root() / _safe(src)
+            if not base.exists():
+                continue
+            for _entry, _zoom in _iter_image_entries(base):
+                found += 1
+                if found % 512 == 0:
+                    _scan_progress_update(progress_key, phase="enumerating",
+                                          files_found=found, current_source=src,
+                                          source_index=index)
+            _scan_progress_update(progress_key, phase="enumerating", files_found=found,
+                                  current_source=src, source_index=index,
+                                  sources_done=index)
+        files_total = found
+        _scan_progress_update(progress_key, phase="sizing", files_total=files_total,
+                              files_found=found, files=0, sources_done=0,
+                              current_source=None, source_index=0)
     out = []
     total_tiles = 0
     total_bytes = 0
