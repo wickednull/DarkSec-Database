@@ -9,7 +9,7 @@
 
 <img width="1408" height="768" alt="DarkSec NIGHTWATCH" src="https://github.com/user-attachments/assets/f85d3ea1-0a1c-4673-ac2e-d6edaa46189d" />
 
-DarkSec NIGHTWATCH is a local-only, offline-first field console I wanted to be able to trust when the internet, cloud services, or a clean signal are not part of the plan. It runs a Python FastAPI backend on `127.0.0.1`, serves a bundled single-page interface, and keeps your data and hardware access on your machine.
+DarkSec NIGHTWATCH is a survival and intelligence console built for field operations including local LLM assistant. Combining global threat intelligence, navigation, SDR, communications, field medicine, CBRN references, resource management, encrypted storage, and an offline LLM assistant (Ollama model) with searchable knowledge library into one self-hosted platform. Built for preparedness
 
 The document library you already have stays where it is. NIGHTWATCH indexes PDFs and other files in place and stores metadata/extracted text in a local SQLite database — it doesn't rewrite or reorganize your library.
 
