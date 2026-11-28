@@ -3,7 +3,7 @@
    local files or an operator-supplied MBTiles archive. No tile server is
    contacted. Everything else is waypoints and tracks in the local database. */
 import { api, download } from "../api.js";
-import * as mapGl from "./map-gl.js?v=glyph-2";
+import * as mapGl from "./map-gl.js?v=glyph-3";
 import { store } from "../store.js";
 import {
   h, panel, pageHead, btn, iconBtn, icon, badge, toast, modal, field, input, select,
@@ -11,7 +11,7 @@ import {
 } from "../components.js";
 import * as U from "../units.js";
 import { openRecordForm, deleteRecord } from "../records.js";
-import { downloadText, readTextFile, positionConfidence, opsecActive } from "./shared.js?v=opsec-1";
+import { downloadText, readTextFile, positionConfidence, opsecActive, fullscreenToggle } from "./shared.js?v=opsec-2";
 
 const R = 6371008.8;
 const TILE = 256;
@@ -341,6 +341,7 @@ export async function render(root, params = {}) {
   const shell = h("div", { class: "map-shell" });
   const canvas = h("canvas");
   shell.appendChild(canvas);
+  const fullscreen = fullscreenToggle(shell, { onChange: () => draw() });
   const hud = h("div", { class: "map-hud" });
   const hudZoom = h("div", { class: "hud-box" }, "ZOOM ", h("b", { text: String(view.zoom) }));
   const hudCenter = h("div", { class: "hud-box" });
@@ -358,6 +359,7 @@ export async function render(root, params = {}) {
     ["pin", "Place waypoint on next click", () => togglePlace()],
     ["layers", "Fit all waypoints", () => fitWaypoints()],
     ["maximize", "Fit world", () => { view.lat = 20; view.lon = 0; view.zoom = 1; draw(); }],
+    ["fullscreen", "Fullscreen map (F)", () => fullscreen.toggle()],
   ];
   for (const [ic, title, fn] of toolDefs) {
     const b = iconBtn(ic, title, fn);
@@ -2953,6 +2955,11 @@ export async function render(root, params = {}) {
       canvas.classList.remove("picking"); updateModeHud(); draw();
     }
     if (e.key === "m" && !e.ctrlKey && !e.metaKey && document.activeElement?.tagName !== "INPUT") toggleMeasure();
+    if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey && !e.altKey
+        && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
+      e.preventDefault();
+      fullscreen.toggle();
+    }
   }
   document.addEventListener("keydown", onKey);
 
@@ -2983,6 +2990,7 @@ export async function render(root, params = {}) {
     if (cacheRefreshTimer) clearTimeout(cacheRefreshTimer);
     clearTimeout(readoutTimer);
     if (resizeObs) resizeObs.disconnect();
+    fullscreen.destroy();
     document.removeEventListener("keydown", onKey);
     tileCache.clear();
     labelTileCache.clear();

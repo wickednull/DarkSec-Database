@@ -389,10 +389,98 @@ def test_defcon_parser_extracts_current_level():
     assert data["driver"] == "Test driver"
     assert data["changed"] == "Jan 2, 2026"
     assert data["commands_raised"] == 2 and data["commands_total"] == 2
-    assert data["commands"] == [{
-        "slug": "centcom", "name": "CENTCOM",
-        "description": "Central Command", "level": 2,
+    assert len(data["commands"]) == 1
+    centcom = data["commands"][0]
+    assert centcom["slug"] == "centcom"
+    assert centcom["name"] == "CENTCOM"
+    assert centcom["description"] == "Central Command"
+    assert centcom["level"] == 2
+    assert centcom["category"] == "geographic"
+    assert centcom["url"].endswith("/commands/centcom")
+    assert data["command_summary"]["total"] == 1
+
+
+def test_defcon_parser_reads_readiness_alerts():
+    from darksec import defcon
+
+    page = """
+    <div class="current-badge level-3"></div>
+    <span class="badge-number">DEFCON 3</span>
+    <p class="hero-lead"><strong>DEFCON 3 (ROUND HOUSE):</strong> heightened readiness. Summary.</p>
+    <p class="section-sub"><strong>14 of 14 commands currently raised.</strong></p>
+    <a href="/commands/centcom" class="command-card">
+      <img alt="CENTCOM Readiness Alert: 2 (High)">
+      <div class="command-meta"><h3>CENTCOM</h3><p>Central Command</p></div>
+    </a>
+    <a href="/commands/bio-command" class="command-card">
+      <span class="badge badge--level-3" data-readiness-level="3">3 (Elevated)</span>
+      <div class="command-meta"><h3>BIOCOM</h3><p>Bio Command</p></div>
+    </a>
+    """
+    data = defcon._parse(page)
+    by_slug = {c["slug"]: c for c in data["commands"]}
+    assert by_slug["centcom"]["level"] == 2
+    assert by_slug["centcom"]["label"] == "High"
+    assert by_slug["bio-command"]["level"] == 3
+    assert by_slug["bio-command"]["label"] == "Elevated"
+    assert by_slug["bio-command"]["monitoring"] is True
+    assert data["command_summary"]["high"] == 1
+    assert data["command_summary"]["elevated"] == 1
+
+
+def test_defcon_parser_extracts_rapid_alerts_and_markets():
+    from darksec import defcon
+
+    page = """
+    <p class="hero-signals">
+      <a href="/financial-impact-monitor#live-markets" class="hero-signals__pill">
+        <span class="hero-signals__label">Oil</span>
+        <span data-live-price="oil-price-live">$91.80/bbl</span>
+        <span class="hero-signals__trend hero-signals__trend--down"></span>
+      </a>
+    </p>
+    <nav class="livebox__chips">
+      <a class="livebox__chip" href="/rapid-alerts?tab=group%3Amilitary" data-cat-key="group:military">Military <span class="livebox__chip-n">13<span class="livebox__sr"> alerts</span></span></a>
+    </nav>
+    <ul class="livebox__list">
+      <li class="livebox__row rapid-level--high" data-alert-id="34834" data-category="Counter-terrorism" data-cat-key="cat:Counter-terrorism" data-published="2026-11-27T15:02:53+00:00">
+        <time class="livebox__time" datetime="2026-11-27T15:02:53+00:00">Nov 27 15:02 UTC</time>
+        <a class="livebox__cat" href="/rapid-alerts?tab=cat%3ACounter-terrorism">Counter-terrorism</a>
+        <a class="livebox__title" href="/alert/2026-11-27-test-alert">U.S. Africa Command Conducts Airstrikes</a>
+      </li>
+    </ul>
+    <a class="livebox__open livebox__open--top" href="/rapid-alerts">Rapid Alerts: 108 in the last 24 hours</a>
+    """
+    data = defcon._parse(page)
+    assert data["alerts"][0]["id"] == "34834"
+    assert data["alerts"][0]["priority"] == "high"
+    assert data["alerts"][0]["url"].endswith("/alert/2026-11-27-test-alert")
+    assert data["alert_counts"][0]["label"] == "Military"
+    assert data["alert_counts"][0]["count"] == 13
+    assert data["alerts_total_24h"] == 108
+    assert data["market_signals"] == [{
+        "label": "Oil", "value": "$91.80/bbl", "trend": "down",
+        "url": "https://www.defconlevel.com/financial-impact-monitor#live-markets",
     }]
+
+
+def test_defcon_commands_page_enrichment():
+    from darksec import defcon
+
+    page = """
+    <a href="/commands/centcom" class="command-card">
+      <span class="badge badge--level-2" data-readiness-level="2">2 (High)</span>
+      <div class="command-card__details">
+        <h3 class="command-card__name">CENTCOM</h3>
+        <p class="command-card__desc command-card__fullname">Central Command</p>
+        <p class="command-card__desc">Middle East, Central Asia, South Asia, Egypt</p>
+      </div>
+    </a>
+    """
+    details = defcon._parse_commands_page(page)
+    assert details["centcom"]["level"] == 2
+    assert details["centcom"]["label"] == "High"
+    assert details["centcom"]["area"] == "Middle East, Central Asia, South Asia, Egypt"
 
 
 def test_defcon_shape(client):

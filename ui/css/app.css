@@ -681,6 +681,16 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 .list-item .li-time { font-size: 9px; color: var(--muted-2); white-space: nowrap; }
 .list-item.alert { border-left: 2px solid var(--red); }
 .list-item.warn { border-left: 2px solid var(--amber); }
+.defcon-command-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 7px; }
+.defcon-command {
+  border: 1px solid var(--line); border-left: 3px solid var(--muted-2);
+  background: rgba(255,255,255,.012); padding: 8px 10px; min-width: 0;
+}
+.defcon-command.red { border-left-color: var(--red); }
+.defcon-command.amber { border-left-color: var(--amber); }
+.defcon-command.green { border-left-color: var(--acc); }
+.defcon-command:hover { border-color: var(--line-strong); }
+.defcon-command-name { font-family: var(--font-head); font-size: 12px; letter-spacing: .08em; color: var(--text-strong); }
 .pill-row { display: flex; gap: 4px; flex-wrap: wrap; }
 .empty-state { text-align: center; padding: 28px 16px; color: var(--muted-2); }
 .empty-state .ic { width: 28px; height: 28px; margin-bottom: 8px; opacity: .5; }
@@ -746,6 +756,25 @@ body.opsec .opsec-mask { -webkit-text-security: disc; }
 /* ------------------------------------------------------------------ map */
 .map-layout { display: grid; grid-template-columns: minmax(0, 1fr) 296px; gap: 14px; min-height: 0; }
 .map-shell { position: relative; height: min(70vh, 760px); min-height: 420px; border: 1px solid var(--line); background: #030806; overflow: hidden; }
+/* Fullscreen maps: native Fullscreen API or the CSS fallback used when the
+   runtime blocks it. The side panel sits outside .map-shell and is hidden. */
+.map-shell:fullscreen,
+.map-shell.map-fullscreen {
+  width: 100vw; height: 100vh !important; min-height: 0 !important;
+  border: 0; border-radius: 0; background: #030806; z-index: 9999;
+}
+.map-shell.map-fullscreen { position: fixed; inset: 0; }
+body.map-fullscreen-lock { overflow: hidden; }
+.map-shell:fullscreen .map-tools,
+.map-shell.map-fullscreen .map-tools { top: 14px; right: 14px; }
+.map-fs-tool {
+  position: absolute; left: 10px; top: 10px; z-index: 4;
+  width: 32px; height: 32px; display: grid; place-content: center;
+  border: 1px solid var(--line); background: rgba(3, 8, 6, .86); color: var(--muted);
+  backdrop-filter: blur(4px);
+}
+.map-fs-tool:hover { color: var(--acc); border-color: var(--line-strong); background: rgba(var(--acc-rgb), .1); }
+.map-fs-tool .ic { width: 15px; height: 15px; }
 .map-shell canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
 .map-shell canvas.dragging { cursor: grabbing; }
 .map-shell canvas.picking { cursor: crosshair; }

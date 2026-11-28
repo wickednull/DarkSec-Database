@@ -8,7 +8,7 @@ import { positionConfidence, opsecActive } from "./views/shared.js?v=opsec-1";
 import { setSoundEnabled } from "./sound.js";
 
 import * as dashboard from "./views/dashboard.js?v=better-2";
-import * as mapView from "./views/map.js?v=map-fix-2";
+import * as mapView from "./views/map.js?v=map-fix-3";
 import * as library from "./views/library.js?v=better-1";
 import * as manual from "./views/manual.js";
 import * as navView from "./views/nav.js?v=opsec-1";
@@ -20,7 +20,7 @@ import * as cbrn from "./views/cbrn.js?v=opsec-1";
 import * as security from "./views/security.js?v=opsec-1";
 import * as logistics from "./views/logistics.js";
 import * as weather from "./views/weather.js?v=opsec-1";
-import * as intel from "./views/intel.js?v=better-12";
+import * as intel from "./views/intel.js?v=better-13";
 import * as assistant from "./views/assistant.js?v=better-22";
 import * as settings from "./views/settings.js?v=cache-fix-1";
 

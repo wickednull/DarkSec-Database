@@ -14,6 +14,7 @@ let activeTab = "overview";
 
 const TAB_ITEMS = [
   { id: "overview", label: "OVERVIEW" },
+  { id: "defcon", label: "DEFCON & COMMANDS" },
   { id: "conflict", label: "CONFLICT" },
   { id: "cyber", label: "CYBER & NEWS" },
   { id: "events", label: "EVENTS & HAZARDS" },
@@ -115,17 +116,21 @@ export async function render(root, params = {}) {
     render(root);
   });
 
-  // DEFCON tracker panel
+  // DEFCON tracker panel — global level, all 14 command readiness alerts,
+  // rapid-alert counts and market signals from defconlevel.com.
   if (defcon) {
     const lvl = Number.isFinite(defcon.level) ? defcon.level : null;
-    const tone = lvl == null ? "muted" : lvl <= 2 ? "red" : lvl === 3 ? "amber" : "green";
+    const tone = defconTone(lvl);
     const label = lvl != null ? `DEFCON ${lvl}${defcon.codename ? ` (${defcon.codename})` : ""}` : "DEFCON ?";
     const stale = !!defcon.stale || !!defcon.error;
-    const body = h("div", { class: "col gap-6" });
+    const cmds = defcon.commands || [];
+    const summary = defcon.command_summary || {};
+    const body = h("div", { class: "col gap-8" });
     body.appendChild(h("div", { class: "row gap-8 wrap items-center" },
       badge(label, tone),
       badge(stale ? "STALE" : "LIVE", stale ? "amber" : "green"),
       defcon.readiness ? h("span", { class: "small", text: defcon.readiness }) : null,
+      defcon.nuclear_risk != null ? badge(`NUCLEAR RISK ${defcon.nuclear_risk}`, Number(defcon.nuclear_risk) <= 2 ? "red" : Number(defcon.nuclear_risk) === 3 ? "amber" : "muted") : null,
       defcon.changed ? h("span", { class: "tiny muted", text: `Estimate last changed ${defcon.changed}` }) : null,
       defcon.updated ? h("span", { class: "tiny muted", text: `· data updated ${fmt.date(defcon.updated)}` }) : null,
       defcon.fetched_at ? h("span", { class: "tiny muted", text: `· checked ${fmt.ago(defcon.fetched_at)}` }) : null));
@@ -141,26 +146,47 @@ export async function render(root, params = {}) {
         h("span", { text: defcon.driver })));
     }
     if (defcon.summary) body.appendChild(h("p", { class: "small muted", text: defcon.summary.slice(0, 600) }));
-    const cmds = (defcon.commands || []).filter((c) => c.level != null);
     if (cmds.length) {
+      const counts = h("div", { class: "row wrap gap-6" });
+      if (defcon.commands_raised != null && defcon.commands_total) {
+        counts.appendChild(badge(`RAISED ${defcon.commands_raised}/${defcon.commands_total}`, summary.high || summary.severe ? "amber" : "muted"));
+      }
+      if (summary.severe) counts.appendChild(badge(`SEVERE ${summary.severe}`, "red"));
+      if (summary.high) counts.appendChild(badge(`HIGH ${summary.high}`, "red"));
+      if (summary.elevated) counts.appendChild(badge(`ELEVATED ${summary.elevated}`, "amber"));
+      if (summary.monitoring) counts.appendChild(badge(`MONITORING ${summary.monitoring}`, "muted"));
+      if (defcon.alerts_total_24h != null) counts.appendChild(badge(`24H ALERTS ${defcon.alerts_total_24h}`, "cyan"));
+      body.appendChild(counts);
       const list = h("div", { class: "row wrap gap-6" });
       for (const c of cmds) {
-        const ct = c.level <= 2 ? "red" : c.level === 3 ? "amber" : "green";
-        list.appendChild(h("span", {
-          class: `badge ${ct}`,
-          title: c.description || "",
-          text: `${c.name} · ${c.level}`,
-        }));
+        const ct = defconTone(c.level);
+        const b = badge(`${c.name} · ${c.level != null ? `${c.level}${c.label ? ` ${c.label}` : ""}` : "?"}`, ct);
+        b.title = [c.description, c.area].filter(Boolean).join(" · ") || c.name;
+        list.appendChild(c.url ? h("a", { href: c.url, target: "_blank", rel: "noopener noreferrer", style: { textDecoration: "none" } }, b) : b);
       }
       body.appendChild(list);
-      if (defcon.commands_raised != null && defcon.commands_total) {
-        body.appendChild(h("div", { class: "tiny muted", text: `${defcon.commands_raised} of ${defcon.commands_total} commands currently raised.` }));
-      }
+      body.appendChild(h("div", { class: "tiny muted", text: `${cmds.length} commands tracked (${(cmds || []).filter((c) => c.category === "geographic").length} geographic, ${(cmds || []).filter((c) => c.category === "functional").length} functional, ${(cmds || []).filter((c) => c.category === "monitoring").length} monitoring). Readiness is the site's own per-command estimate, separate from the single DEFCON level.` }));
     }
-    body.appendChild(h("div", { class: "tiny muted", text: "Official DEFCON levels are classified. Values are defconlevel.com's OSINT estimate, not government-confirmed. Verify with official channels. Source: defconlevel.com" }));
+    const markets = defcon.market_signals || [];
+    if (markets.length) {
+      const mrow = h("div", { class: "row wrap gap-6 items-center" });
+      mrow.appendChild(h("span", { class: "tiny muted", text: "MARKET SIGNALS" }));
+      for (const m of markets) {
+        const arrow = m.trend === "up" ? "▲" : m.trend === "down" ? "▼" : "•";
+        mrow.appendChild(h("a", { class: "badge muted", href: m.url, target: "_blank", rel: "noopener noreferrer", text: `${m.label} ${m.value} ${arrow}` }));
+      }
+      body.appendChild(mrow);
+    }
+    if ((defcon.alerts || []).length) {
+      body.appendChild(buildDefconAlertList(defcon, 3));
+      body.appendChild(h("div", { class: "row gap-8 wrap" },
+        btn("OPEN DEFCON & COMMANDS", { size: "sm", icon: "shield", tone: "primary", onClick: () => { activeTab = "defcon"; render(root); } }),
+        btn("OPEN RAPID ALERTS", { size: "sm", icon: "link", tone: "ghost", onClick: () => window.open("https://www.defconlevel.com/rapid-alerts", "_blank", "noopener") })));
+    }
+    body.appendChild(h("div", { class: "tiny muted", text: "Official DEFCON levels are classified. Values are defconlevel.com's OSINT estimate, not government-confirmed. Readiness Alerts are that site's own per-command estimates. Verify with official channels." }));
     root.appendChild(panel({
       title: "DEFCON Tracker", icon: "shield",
-      sub: "Current global alert level and combatant-command postures",
+      sub: "Global alert level, command readiness, rapid alerts and market signals",
       tools: [btn("REFRESH", { size: "sm", icon: "refresh", onClick: async () => {
         try { defcon = await api.post("/api/defcon/refresh"); render(root); }
         catch (err) { toast(err.message || "DEFCON refresh failed", "error"); }
@@ -175,6 +201,7 @@ export async function render(root, params = {}) {
   root.appendChild(body);
 
   if (activeTab === "overview") renderOverview(body);
+  else if (activeTab === "defcon") renderDefcon(body);
   else if (activeTab === "conflict") renderConflict(body);
   else if (activeTab === "cyber") renderCyber(body);
   else if (activeTab === "events") renderEvents(body);
@@ -260,6 +287,179 @@ export async function render(root, params = {}) {
         body: h("div", { class: "grid grid-2 gap-10" }, ...hazardFeeds.map((f) => newsCard(f, 4))),
       }));
     }
+  }
+
+  function defconTone(level) {
+    if (level == null || !Number.isFinite(Number(level))) return "muted";
+    return Number(level) <= 2 ? "red" : Number(level) === 3 ? "amber" : "green";
+  }
+
+  function buildDefconAlertList(dd, limit = 10) {
+    const alerts = (dd.alerts || []).slice(0, limit);
+    const wrap = h("div", { class: "col gap-8" });
+    const counts = dd.alert_counts || [];
+    if (counts.length) {
+      const chips = h("div", { class: "row wrap gap-6 items-center" });
+      chips.appendChild(h("span", { class: "tiny muted", text: "LAST 24H" }));
+      for (const c of counts) {
+        chips.appendChild(h("a", {
+          class: "badge muted", href: c.url, target: "_blank", rel: "noopener noreferrer",
+          text: `${c.label} ${c.count}`,
+        }));
+      }
+      wrap.appendChild(chips);
+    }
+    if (!alerts.length) {
+      wrap.appendChild(h("div", { class: "small muted", text: "No rapid-alert rows were parsed. Open the source stream for the latest items." }));
+    } else {
+      const list = h("div", { class: "list" });
+      for (const a of alerts) {
+        const tone = a.priority === "high" ? "red" : a.priority === "notable" ? "amber" : "muted";
+        const row = h("div", { class: `list-item ${a.priority === "high" ? "alert" : ""}` });
+        const main = h("div", { class: "li-main" });
+        main.appendChild(h("div", { class: "li-title", text: a.title || "Rapid alert" }));
+        main.appendChild(h("div", { class: "li-sub", text: `${a.category || "Uncategorised"} · ${fmt.ago(a.published_at)}${a.priority ? ` · ${String(a.priority).toUpperCase()}` : ""}` }));
+        row.appendChild(main);
+        const tools = h("div", { class: "row gap-6 mt-6 wrap" });
+        if (a.priority) tools.appendChild(badge(String(a.priority).toUpperCase(), tone));
+        if (a.url) tools.appendChild(h("a", { class: "badge cyan", href: a.url, target: "_blank", rel: "noopener noreferrer", text: "READ" }));
+        row.appendChild(tools);
+        list.appendChild(row);
+      }
+      wrap.appendChild(list);
+    }
+    const meta = [];
+    if (dd.alerts_total_24h != null) meta.push(`${dd.alerts_total_24h} rapid alerts in the last 24 hours`);
+    if (dd.alerts_updated) meta.push(`stream updated ${fmt.ago(dd.alerts_updated)}`);
+    if (meta.length) wrap.appendChild(h("div", { class: "tiny muted", text: `${meta.join(" · ")}. Weather notices dominate this feed; military, cyber and diplomatic rows are included when the site publishes them.` }));
+    return wrap;
+  }
+
+  function buildDefconCommandGroups(dd) {
+    const commands = dd.commands || [];
+    const wrap = h("div", { class: "col gap-14" });
+    const groups = [
+      ["geographic", "Geographic commands", "Regional areas of responsibility."],
+      ["functional", "Functional commands", "Worldwide functional domains."],
+      ["monitoring", "Monitoring commands", "Defcon Level monitoring commands, not official U.S. combatant commands."],
+    ];
+    for (const [cat, title, note] of groups) {
+      const items = commands.filter((c) => (c.category || "functional") === cat);
+      if (!items.length) continue;
+      const box = h("div", { class: "col gap-6" });
+      box.appendChild(h("div", { class: "side-label", text: title }));
+      box.appendChild(h("div", { class: "tiny muted", text: note }));
+      const grid = h("div", { class: "defcon-command-grid" });
+      for (const c of items) {
+        const tone = defconTone(c.level);
+        const levelText = c.level != null ? `${c.level}${c.label ? ` ${c.label}` : ""}` : "—";
+        const card = h("div", { class: `defcon-command ${tone}` },
+          h("div", { class: "row gap-6 items-center wrap" },
+            h("b", { class: "defcon-command-name", text: c.name || c.slug || "Command" }),
+            badge(levelText, tone)),
+          h("div", { class: "tiny muted", text: [c.description, c.area].filter(Boolean).join(" · ") || "Area of responsibility not published" }),
+          h("div", { class: "row gap-6 mt-4 items-center" },
+            badge(c.monitoring ? "MONITORING" : "COMMAND", "muted"),
+            c.url ? h("a", { class: "badge cyan", href: c.url, target: "_blank", rel: "noopener noreferrer", text: "SOURCE" }) : null));
+        grid.appendChild(card);
+      }
+      box.appendChild(grid);
+      wrap.appendChild(box);
+    }
+    if (!commands.length) {
+      wrap.appendChild(emptyState("No command readiness parsed", "The live page did not contain command cards. Use REFRESH to retry while online.", "shield"));
+    }
+    return wrap;
+  }
+
+  function buildDefconReadinessScale(dd) {
+    const scale = dd.readiness_scale || [];
+    if (!scale.length) return h("div", { class: "small muted", text: "Readiness scale unavailable." });
+    const list = h("div", { class: "col gap-6" });
+    for (const row of scale) {
+      list.appendChild(h("div", { class: "row gap-8 items-start" },
+        badge(`${row.level} ${row.label}`, defconTone(row.level)),
+        h("div", { class: "small muted", text: row.definition || "" })));
+    }
+    return list;
+  }
+
+  function buildDefconMarkets(dd) {
+    const markets = dd.market_signals || [];
+    if (!markets.length) return h("div", { class: "small muted", text: "No market signals parsed from the current-level page." });
+    const list = h("div", { class: "col gap-6" });
+    for (const m of markets) {
+      const arrow = m.trend === "up" ? "▲" : m.trend === "down" ? "▼" : "•";
+      list.appendChild(h("div", { class: "row gap-8 items-center" },
+        h("a", { class: "badge muted", href: m.url, target: "_blank", rel: "noopener noreferrer", text: `${m.label} ${m.value} ${arrow}` }),
+        h("span", { class: "tiny muted", text: m.trend === "up" ? "rising" : m.trend === "down" ? "falling" : "flat" })));
+    }
+    return list;
+  }
+
+  function renderDefcon(host) {
+    host.appendChild(sectionTitle("DEFCON & Combatant Command Readiness",
+      "Global OSINT estimate, all 14 tracked commands, rapid alerts and market signals from defconlevel.com"));
+    if (!defcon || (defcon.level == null && !(defcon.commands || []).length)) {
+      host.appendChild(emptyState("DEFCON data unavailable",
+        "Use REFRESH while online, or read the cached value on the overview tab.", "shield"));
+      return;
+    }
+    const lvl = Number.isFinite(defcon.level) ? defcon.level : null;
+    const summary = defcon.command_summary || {};
+    const stats = h("div", { class: "grid grid-4 mt-10" });
+    stats.appendChild(stat("GLOBAL DEFCON", lvl != null ? String(lvl) : "—",
+      defcon.codename || "OSINT estimate", lvl != null && lvl <= 2 ? "acc" : ""));
+    stats.appendChild(stat("COMMANDS RAISED",
+      `${defcon.commands_raised ?? "—"}/${defcon.commands_total ?? "—"}`,
+      `${summary.high || 0} high · ${summary.severe || 0} severe`));
+    stats.appendChild(stat("ELEVATED", String(summary.elevated || 0).padStart(2, "0"), "readiness level 3"));
+    stats.appendChild(stat("24H RAPID ALERTS", String(defcon.alerts_total_24h ?? "—"), "military · cyber · weather"));
+    stats.appendChild(stat("NUCLEAR RISK", defcon.nuclear_risk != null ? String(defcon.nuclear_risk) : "—", "site assessment", defcon.nuclear_risk != null && defcon.nuclear_risk <= 2 ? "acc" : ""));
+    stats.appendChild(stat("TRACKED COMMANDS", String(summary.total || (defcon.commands || []).length).padStart(2, "0"), `${summary.monitoring || 0} monitoring`));
+    host.appendChild(stats);
+
+    const estimate = h("div", { class: "col gap-6 mt-14" });
+    estimate.appendChild(h("div", { class: "row gap-8 wrap items-center" },
+      badge(defconTone(lvl) === "muted" ? "STALE / UNKNOWN" : `DEFCON ${lvl}`, defconTone(lvl)),
+      defcon.readiness ? h("span", { class: "small", text: defcon.readiness }) : null,
+      defcon.changed ? h("span", { class: "tiny muted", text: `Estimate last changed ${defcon.changed}` }) : null,
+      defcon.fetched_at ? h("span", { class: "tiny muted", text: `checked ${fmt.ago(defcon.fetched_at)}` }) : null));
+    if (defcon.driver) estimate.appendChild(h("div", { class: "small" }, h("b", { text: "Primary driver: " }), defcon.driver));
+    if (defcon.summary) estimate.appendChild(h("p", { class: "small muted", text: defcon.summary }));
+    estimate.appendChild(h("div", { class: "tiny muted", text: "Official DEFCON levels are classified. This is defconlevel.com's OSINT estimate and per-command Readiness Alerts are the site's own estimates, not government-confirmed. Verify with official channels." }));
+    host.appendChild(panel({ title: "Current Estimate", icon: "shield", body: estimate }));
+
+    const grid = h("div", { class: "panel-grid grid-2 mt-14" });
+    grid.appendChild(panel({
+      title: "Command Readiness",
+      sub: `${(defcon.commands || []).length} commands tracked · per-command OSINT estimates`,
+      icon: "shield",
+      cls: "span-2",
+      body: buildDefconCommandGroups(defcon),
+      tools: [btn("OPEN COMMANDS PAGE", { size: "sm", icon: "link", tone: "ghost", onClick: () => window.open("https://www.defconlevel.com/commands", "_blank", "noopener") })],
+    }));
+    grid.appendChild(panel({
+      title: "Defconlevel Rapid Alerts",
+      sub: defcon.alerts_total_24h != null ? `${defcon.alerts_total_24h} in the last 24 hours` : "Latest parsed rows",
+      icon: "alert",
+      cls: "span-2",
+      body: buildDefconAlertList(defcon, 20),
+      tools: [btn("OPEN RAPID ALERTS", { size: "sm", icon: "link", tone: "ghost", onClick: () => window.open("https://www.defconlevel.com/rapid-alerts", "_blank", "noopener") })],
+    }));
+    grid.appendChild(panel({
+      title: "Readiness Scale",
+      sub: "5 (Normal) to 1 (Severe)",
+      icon: "info",
+      body: buildDefconReadinessScale(defcon),
+    }));
+    grid.appendChild(panel({
+      title: "Market Signals",
+      sub: "Site-tracked oil, gold, gas and rates",
+      icon: "signal",
+      body: buildDefconMarkets(defcon),
+    }));
+    host.appendChild(grid);
   }
 
   function buildConflictSnapshot() {

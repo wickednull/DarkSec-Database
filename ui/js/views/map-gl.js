@@ -3,8 +3,8 @@
    Raster style (no external glyphs/sprites). True DEM terrain requires raster-dem tiles. */
 import { api, download } from "../api.js";
 import { store } from "../store.js";
-import { h, pageHead, btn, alertStrip, loading, fmt, toast, panel, checkbox, select, field, badge } from "../components.js";
-import { positionConfidence, opsecActive, readTextFile } from "./shared.js?v=opsec-1";
+import { h, pageHead, btn, alertStrip, loading, fmt, toast, panel, checkbox, select, field, badge, iconBtn, icon } from "../components.js";
+import { positionConfidence, opsecActive, readTextFile, fullscreenToggle } from "./shared.js?v=opsec-2";
 import * as U from "../units.js";
 
 let maplibrePromise = null;
@@ -376,6 +376,25 @@ export async function render(root, params = {}) {
   if (spaceBackground) wrap.appendChild(h("div", { class: "map-starfield" }));
   const container = h("div", { style: { position: "absolute", inset: "0", zIndex: "1" } });
   wrap.appendChild(container);
+  const fsBtn = iconBtn("fullscreen", "Fullscreen map (F)", () => glFullscreen.toggle());
+  fsBtn.classList.add("map-fs-tool");
+  wrap.appendChild(fsBtn);
+  const glFullscreen = fullscreenToggle(wrap, {
+    onChange: (active) => {
+      fsBtn.replaceChildren(icon(active ? "fullscreen-exit" : "fullscreen"));
+      fsBtn.title = active ? "Exit fullscreen (F)" : "Fullscreen map (F)";
+      fsBtn.setAttribute("aria-label", fsBtn.title);
+      try { map?.resize(); map?.triggerRepaint(); } catch {}
+    },
+  });
+  const onFsKey = (e) => {
+    if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey && !e.altKey
+        && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
+      e.preventDefault();
+      glFullscreen.toggle();
+    }
+  };
+  document.addEventListener("keydown", onFsKey);
   layout.appendChild(wrap);
   const side = h("div", { class: "map-side" });
   layout.appendChild(side);
@@ -1340,5 +1359,10 @@ export async function render(root, params = {}) {
     refreshAlpr(true);
   });
 
-  return () => { disposed = true; try { clearInterval(daynightTimer); clearInterval(glLiveTimer); clearInterval(liveTimer); clearInterval(freshTimer); clearInterval(movingTimer); clearInterval(movingPollTimer); clearInterval(glRepaintTimer); clearTimeout(alprFetchTimer); glResize?.disconnect(); popup?.remove(); map?.remove(); } catch {} };
+  return () => {
+    disposed = true;
+    glFullscreen.destroy();
+    document.removeEventListener("keydown", onFsKey);
+    try { clearInterval(daynightTimer); clearInterval(glLiveTimer); clearInterval(liveTimer); clearInterval(freshTimer); clearInterval(movingTimer); clearInterval(movingPollTimer); clearInterval(glRepaintTimer); clearTimeout(alprFetchTimer); glResize?.disconnect(); popup?.remove(); map?.remove(); } catch {}
+  };
 }

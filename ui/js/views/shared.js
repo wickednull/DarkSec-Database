@@ -267,6 +267,69 @@ export function statusTone(value) {
     : ["ERROR", "FAILED", "CRITICAL", "RED", "EMPTY", "COMPROMISED"].includes(v) ? "red" : "muted";
 }
 
+/* Fullscreen helper for the 2D canvas and 3D GL maps.
+   Prefers the native Fullscreen API; if the runtime blocks it (embedded
+   Electron/WebView, iframe policy), falls back to a fixed-position CSS class
+   so the button still fills the viewport. Returns a small controller so the
+   view can refresh its canvas and clean up the listeners on route change. */
+export function fullscreenToggle(el, { onChange } = {}) {
+  if (!el) return { toggle() {}, exit() {}, isActive: () => false, destroy() {} };
+  let fallback = false;
+  const native = () => document.fullscreenElement === el;
+  const active = () => native() || fallback;
+  const notify = () => { try { onChange?.(active()); } catch {} };
+  const setFallback = (on) => {
+    fallback = !!on;
+    el.classList.toggle("map-fullscreen", fallback);
+    document.body.classList.toggle("map-fullscreen-lock", fallback);
+  };
+  const onFsChange = () => {
+    if (!document.fullscreenElement) setFallback(false);
+    notify();
+  };
+  async function enter() {
+    if (el.requestFullscreen) {
+      try {
+        await el.requestFullscreen({ navigationUI: "hide" });
+        notify();
+        return;
+      } catch { /* fall through to the CSS fallback */ }
+    }
+    setFallback(true);
+    notify();
+  }
+  async function exit() {
+    if (native()) {
+      try { await document.exitFullscreen(); } catch {}
+      notify();
+      return;
+    }
+    if (fallback) {
+      setFallback(false);
+      notify();
+    }
+  }
+  async function toggle() {
+    if (active()) await exit();
+    else await enter();
+  }
+  const onKey = (e) => {
+    if (e.key === "Escape" && fallback) { e.preventDefault(); exit(); }
+  };
+  document.addEventListener("fullscreenchange", onFsChange);
+  document.addEventListener("keydown", onKey);
+  return {
+    toggle,
+    exit,
+    isActive: active,
+    destroy() {
+      document.removeEventListener("fullscreenchange", onFsChange);
+      document.removeEventListener("keydown", onKey);
+      setFallback(false);
+    },
+  };
+}
+
 export function progressBar(value, tone = "") {
   const pct = Math.max(0, Math.min(100, Number(value) || 0));
   const bar = h("div", { class: `progress ${tone}`.trim() });
