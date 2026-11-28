@@ -179,9 +179,9 @@ export async function render(root, params = {}) {
     }
     if ((defcon.alerts || []).length) {
       body.appendChild(buildDefconAlertList(defcon, 3));
-      body.appendChild(h("div", { class: "row gap-8 wrap" },
-        btn("OPEN DEFCON & COMMANDS", { size: "sm", icon: "shield", tone: "primary", onClick: () => { activeTab = "defcon"; render(root); } }),
-        btn("OPEN RAPID ALERTS", { size: "sm", icon: "link", tone: "ghost", onClick: () => window.open("https://www.defconlevel.com/rapid-alerts", "_blank", "noopener") })));
+      if (activeTab !== "defcon") {
+        body.appendChild(btn("OPEN DEFCON & COMMANDS", { size: "sm", icon: "shield", tone: "primary", onClick: () => { activeTab = "defcon"; render(root); } }));
+      }
     }
     body.appendChild(h("div", { class: "tiny muted", text: "Official DEFCON levels are classified. Values are defconlevel.com's OSINT estimate, not government-confirmed. Readiness Alerts are that site's own per-command estimates. Verify with official channels." }));
     root.appendChild(panel({
@@ -445,7 +445,6 @@ export async function render(root, params = {}) {
       icon: "alert",
       cls: "span-2",
       body: buildDefconAlertList(defcon, 20),
-      tools: [btn("OPEN RAPID ALERTS", { size: "sm", icon: "link", tone: "ghost", onClick: () => window.open("https://www.defconlevel.com/rapid-alerts", "_blank", "noopener") })],
     }));
     grid.appendChild(panel({
       title: "Readiness Scale",
